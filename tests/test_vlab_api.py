@@ -1090,3 +1090,123 @@ def test_only_admins_read_the_audit_log(env):
     _, _, alice, _, viewer = env
     assert alice.get('/api/vlab/admin/audit').status_code == 403
     assert viewer.get('/api/vlab/admin/audit').status_code == 403
+
+
+# --- white label (the core's frontend branding, through the console's session) -------
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 16
+
+
+@pytest.fixture
+def branding(env, tmp_path, monkeypatch):
+    import pegaprox.api.frontend_branding as fb
+    monkeypatch.setattr(fb, 'BRANDING_DIR', str(tmp_path))
+    return env
+
+
+def test_white_label_is_saved_and_shown_to_everyone(branding):
+    api, admin, alice, _, _ = branding
+    assert api.anon().get('/api/vlab/branding').get_json()['appName'] == 'MAKUS vLAB'     # defaults, no sign-in
+    r = admin.put('/api/vlab/admin/branding', json={'enabled': True, 'appName': '연구소 VDI', 'primaryColor': 'e63946',
+                                                    'footerText': '© 한빛연구원', 'docsUrl': 'javascript:alert(1)',
+                                                    'logoUrl': 'http://evil/x.png', 'whatever': 1})
+    assert r.status_code == 200, r.get_json()
+    b = r.get_json()['branding']
+    assert (b['appName'], b['primaryColor'], b['docsUrl'], b['logoUrl']) == ('연구소 VDI', '#e63946', '', '')   # cleaned by the core
+    pub = api.anon().get('/api/vlab/branding').get_json()
+    assert (pub['appName'], pub['footerText']) == ('연구소 VDI', '© 한빛연구원') and 'whatever' not in pub
+    assert alice.put('/api/vlab/admin/branding', json={'appName': 'x'}).status_code == 403
+
+
+def test_white_label_images(branding):
+    import io as _io
+    api, admin, _, _, _ = branding
+    admin.put('/api/vlab/admin/branding', json={'enabled': True})
+    up = lambda slot, data: admin.post('/api/vlab/admin/branding/image', data={'slot': slot, 'file': (_io.BytesIO(data), 'f')},
+                                       content_type='multipart/form-data')
+    assert up('logo', b'<svg onload=alert(1)>').status_code == 415                      # SVG refused (the core's rule)
+    assert up('banner', PNG).status_code == 400
+    r = up('logo', PNG)
+    assert r.status_code == 200, r.get_json()
+    url = api.anon().get('/api/vlab/branding').get_json()['logoUrl']
+    assert url.startswith('/api/vlab/branding/image/default/logo.png')
+    img = api.anon().get(url.split('?')[0])
+    assert img.status_code == 200 and img.mimetype == 'image/png' and img.data == PNG
+    assert api.anon().get('/api/vlab/branding/image/default/../../etc.png').status_code == 404
+    assert admin.delete('/api/vlab/admin/branding/image/logo').status_code == 200
+    assert api.anon().get('/api/vlab/branding').get_json()['logoUrl'] == ''
+
+
+# --- backup (the core's backup routes, reached per desktop and pool) -----------------
+
+@pytest.fixture
+def backups(connectable, monkeypatch):
+    import pegaprox.api.storage as core_storage
+    import pegaprox.api.vms as core_vms
+    from flask import jsonify, request
+    calls = []
+
+    def fake(name, answer=None):
+        def f(*args):
+            calls.append((name, args, request.get_json(silent=True)))
+            return jsonify(answer if answer is not None else {'success': True, 'task': 'UPID:x'})
+        return f
+    monkeypatch.setattr(core_vms, 'get_vm_backups', fake('list', {'backups': [{'volid': 'pbs:backup/vm/300/2026-10-16T01:00:00Z'}]}))
+    monkeypatch.setattr(core_vms, 'create_vm_backup', fake('create'))
+    monkeypatch.setattr(core_vms, 'restore_vm_backup', fake('restore'))
+    monkeypatch.setattr(core_vms, 'delete_vm_backup', fake('delete'))
+    monkeypatch.setattr(core_storage, 'create_backup_job', fake('job'))
+    monkeypatch.setattr(core_storage, 'get_backup_jobs', fake('jobs', [{'id': 'b1', 'comment': 'vlab-pool:x lab'}, {'id': 'b2'}]))
+    return connectable, calls
+
+
+def test_desktop_backups_go_to_the_core_routes(backups):
+    (admin, alice, _, _, desk, _), calls = backups
+    base = f"/api/vlab/admin/desktops/{desk['id']}/backups"
+    assert admin.get(base).get_json()['backups'][0]['volid'].startswith('pbs:backup/vm/300/')
+    assert admin.post(base, json={'storage': 'pbs-lab'}).status_code == 200
+    assert admin.post(base, json={}).status_code == 400
+    assert admin.post(base, json={'storage': 'pbs-lab', 'mode': 'yolo'}).status_code == 400
+    assert [(c[0], c[1]) for c in calls] == [('list', (CID, 'pve1', 'qemu', 300)), ('create', (CID, 'pve1', 'qemu', 300))]
+    assert alice.post(base, json={'storage': 'pbs-lab'}).status_code == 403
+
+
+def test_a_restore_goes_back_into_the_same_desktop(backups):
+    (admin, alice, _, _, desk, _), calls = backups
+    url = f"/api/vlab/admin/desktops/{desk['id']}/backups/restore"
+    store.set_base_snap(desk['id'], 'vlab-base')
+    assert admin.post(url, json={'volid': 'pbs:backup/vm/999/2026-10-16T01:00:00Z'}).status_code == 400   # another VM's
+    assert admin.post(url, json={'volid': 'pbs:backup/vm/300/x', 'target_vmid': 500}).status_code == 400  # elsewhere
+    sid = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()['session_id']
+    r = admin.post(url, json={'volid': 'pbs:backup/vm/300/x'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'IN_USE'
+    alice.post(f'/api/vlab/sessions/{sid}/end')
+    assert admin.post(url, json={'volid': 'local:backup/vzdump-qemu-300-2026_10_16-01_00_00.vma.zst'}).status_code == 200
+    assert calls[-1][0] == 'restore' and calls[-1][1] == (CID, 'pve1', 'qemu', 300)
+    assert store.get_desktop(desk['id'])['base_snap'] == ''              # the snapshots went with the restore
+    assert admin.delete(f"/api/vlab/admin/desktops/{desk['id']}/backups/pbs:backup/vm/999/x").status_code == 400
+
+
+def test_pool_backup_jobs_name_the_pools_desktops(backups):
+    (admin, _, _, _, desk, stopped), calls = backups
+    url = f"/api/vlab/admin/pools/{desk['pool_id']}/backup/job"
+    ok = {'vmid': '300', 'storage': 'pbs-lab', 'schedule': 'sun 02:00', 'comment': f"vlab-pool:{desk['pool_id']} lab"}
+    assert admin.post(url, json={**ok, 'vmid': '300,999'}).status_code == 400          # not the pool's
+    assert admin.post(url, json={**ok, 'all': 1}).status_code == 400
+    assert admin.post(url, json={**ok, 'comment': 'nightly'}).status_code == 400
+    assert admin.post(url, json=ok).status_code == 200
+    assert calls[-1][0] == 'job' and calls[-1][1] == (CID,) and calls[-1][2]['vmid'] == '300'
+    jobs = admin.get(f'/api/vlab/admin/clusters/{CID}/backup/jobs').get_json()['jobs']
+    assert [(j['id'], j['vlab_pool_id']) for j in jobs] == [('b1', 'x'), ('b2', None)]
+
+
+def test_backup_storages_put_pbs_first(env, monkeypatch):
+    _, admin, _, _, _ = env
+    import pegaprox.api.clusters as core_clusters
+    monkeypatch.setattr(core_clusters, 'cluster_storage_resources', lambda cid, m: [
+        {'storage': 'local', 'node': 'pve1', 'plugintype': 'dir', 'content': 'iso,backup', 'status': 'available', 'disk': 1, 'maxdisk': 9},
+        {'storage': 'local-lvm', 'node': 'pve1', 'plugintype': 'lvmthin', 'content': 'images', 'status': 'available'},
+        {'storage': 'pbs-lab', 'node': 'pve1', 'plugintype': 'pbs', 'shared': 1, 'content': 'backup', 'status': 'available'},
+        {'storage': 'pbs-lab', 'node': 'pve2', 'plugintype': 'pbs', 'shared': 1, 'content': 'backup', 'status': 'available'}])
+    s = admin.get(f'/api/vlab/admin/clusters/{CID}/backup/storages').get_json()['storages']
+    assert [(x['storage'], x['pbs']) for x in s] == [('pbs-lab', True), ('local', False)]

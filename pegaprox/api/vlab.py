@@ -3,6 +3,12 @@
 vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
 
   GET    /api/vlab/info                               product, API version (any signed-in user)
+  GET    /api/vlab/branding                           white label to display (public: the sign-in screen needs it)
+  GET    /api/vlab/branding/image/<tenant>/<file>     its logo / favicon (public)
+  GET    /api/vlab/admin/branding                     the stored white label            admin.settings
+  PUT    /api/vlab/admin/branding                     save it                           admin.settings
+  POST   /api/vlab/admin/branding/image               multipart slot (logo|loginLogo|favicon), file  admin.settings
+  DELETE /api/vlab/admin/branding/image/<slot>        remove one image                  admin.settings
   GET    /api/vlab/me/desktops                        desktops assigned to the caller       vlab.desk
   GET    /api/vlab/me/leases                          cards/boards/desktops on loan         vlab.desk
   POST   /api/vlab/desktops/<desktop_id>/connect      {protocol: vnc|spice} -> how to connect  vlab.desk
@@ -18,6 +24,15 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/clusters/<cluster_id>/storage storage (shared ones once, with their nodes)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/accelerators  GPUs and FPGA cards per node, PCI mappings, who uses them  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/nodes/<node>/pci/<pciid>/profiles  vGPU (mdev) profiles of a card  vlab.pool.view
+  GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
+  GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
+  POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
+  DELETE /api/vlab/admin/clusters/<cluster_id>/backup/jobs/<job_id>  remove one (the core route)  vlab.pool.manage
+  GET    /api/vlab/admin/pbs                          PBS servers the engine knows (the core route)  vlab.pool.view
+  GET    /api/vlab/admin/desktops/<desktop_id>/backups            its backups (the core route)  vlab.pool.view
+  POST   /api/vlab/admin/desktops/<desktop_id>/backups            back it up now {storage, mode?, notes?}  vlab.pool.manage
+  POST   /api/vlab/admin/desktops/<desktop_id>/backups/restore    {volid, start?, force?} back into the same VM  vlab.pool.manage
+  DELETE /api/vlab/admin/desktops/<desktop_id>/backups/<volid>    delete one backup  vlab.pool.manage
   GET    /api/vlab/admin/pools/<pool_id>/policy       the pool's policy (connection, clipboard, USB, power, account)  vlab.pool.view
   PUT    /api/vlab/admin/pools/<pool_id>/policy       save it                                   vlab.pool.manage
   PUT    /api/vlab/admin/pools/<pool_id>/gpu          {mode: none|passthrough|vgpu, mapping, mdev_type?, label?}  vlab.pool.manage
@@ -916,6 +931,270 @@ def apply_pool_gpu(pool_id):
     log_audit(_user(), 'vlab.pool.gpu.apply', f"pool '{pool['name']}': {len(done)} applied, {len(failed)} failed",
               get_client_ip())
     return jsonify({'applied': done, 'failed': failed, 'needs_restart': pending}), (200 if not failed else 207)
+
+
+# --- backup (운영 > 백업, PBS) ---------------------------------------------------------
+# The core already backs guests up and restores them (vzdump, PBS storages, scheduled
+# backup jobs). These routes hand the request to those core routes as it is - their
+# permission checks (backup.*, the VM ACL) run as they always do - and only add what vLAB
+# knows: which VM a desktop is, which VMs a pool has, and that a restore goes back into
+# the desktop's own VM.
+
+def _desk_vm(desktop_id):
+    desk, err = _desktop_or_error(desktop_id)
+    if err:
+        return None, None, err
+    vm, node = _live_node(desk)
+    if vm is None:
+        return None, None, _bad("The desktop's VM is not on the cluster any more", 404)
+    return desk, node, None
+
+
+def _vmid_of_volid(volid):
+    m = re.search(r'/(?:vm|ct)/(\d+)/', volid) or re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+    return int(m.group(1)) if m else None
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/storages', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def backup_storages(cluster_id):
+    from pegaprox.api import clusters as core_clusters
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    rows = core_clusters.cluster_storage_resources(cluster_id, mgr)
+    if rows is None:
+        return jsonify({'error': 'Could not read the storage'}), 502
+    seen, out = set(), []
+    for r in rows:
+        content = [c for c in str(r.get('content') or '').split(',') if c]
+        name = r.get('storage')
+        if 'backup' not in content or not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({'storage': name, 'type': r.get('plugintype') or '', 'pbs': r.get('plugintype') == 'pbs',
+                    'shared': bool(r.get('shared')), 'status': r.get('status') or 'unknown',
+                    'used': _num(r.get('disk')), 'total': _num(r.get('maxdisk'))})
+    out.sort(key=lambda x: (not x['pbs'], not x['shared'], x['storage']))
+    return jsonify({'storages': out})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/jobs', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def backup_jobs(cluster_id):
+    from pegaprox.api import storage as core_storage
+    if cluster_id not in cluster_managers or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    resp = core_storage.get_backup_jobs(cluster_id)
+    r = resp[0] if isinstance(resp, tuple) else resp
+    if getattr(r, 'status_code', 200) != 200:
+        return resp
+    body = r.get_json()
+    jobs = body if isinstance(body, list) else (body or {}).get('jobs') or (body or {}).get('data') or []
+    pools = {p['id']: p['name'] for p in store.list_pools()}
+    for j in jobs:
+        m = re.match(r'^vlab-pool:(\S+)', str(j.get('comment') or ''))
+        j['vlab_pool_id'] = m.group(1) if m else None
+        j['vlab_pool'] = pools.get(m.group(1)) if m else None
+    return jsonify({'jobs': jobs})
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/backup/job', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def pool_backup_job(pool_id):
+    """A scheduled backup of the pool's desktops, made by the core route with this body.
+    The body names the pool's VMIDs and carries the comment 'vlab-pool:<id> <name>';
+    other VMs, or a whole-node/all-guests job, are refused here."""
+    from pegaprox.api import storage as core_storage
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    mine = {int(d['vmid']) for d in store.list_desktops(pool['id'])}
+    try:
+        wanted = {int(x) for x in str(data.get('vmid') or '').split(',') if x.strip()}
+    except ValueError:
+        return _bad('vmid: the pool desktops\' VMIDs, comma separated')
+    if not wanted or not wanted <= mine:
+        return _bad("vmid must list desktops of this pool only")
+    if any(k in data for k in ('all', 'pool', 'exclude', 'node')):
+        return _bad('A vLAB pool backup names its VMs; all / pool / exclude / node are not taken')
+    if not str(data.get('comment') or '').startswith(f'vlab-pool:{pool["id"]}'):
+        return _bad(f"comment must start with vlab-pool:{pool['id']}")
+    if not data.get('storage') or not data.get('schedule'):
+        return _bad('storage and schedule required')
+    return core_storage.create_backup_job(pool['cluster_id'])
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/jobs/<job_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_pool_backup_job(cluster_id, job_id):
+    from pegaprox.api import storage as core_storage
+    if cluster_id not in cluster_managers or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    return core_storage.delete_backup_job(cluster_id, job_id)
+
+
+@bp.route('/api/vlab/admin/pbs', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def pbs_servers():
+    from pegaprox.api import pbs as core_pbs
+    return core_pbs.list_pbs_servers()
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/backups', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def desktop_backups(desktop_id):
+    from pegaprox.api import vms as core_vms
+    desk, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    return core_vms.get_vm_backups(desk['cluster_id'], node, desk['vm_type'], int(desk['vmid']))
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/backups', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_backup_now(desktop_id):
+    from pegaprox.api import vms as core_vms
+    desk, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if not data.get('storage'):
+        return _bad('storage required')
+    if data.get('mode', 'snapshot') not in ('snapshot', 'suspend', 'stop'):
+        return _bad('mode must be snapshot, suspend or stop')
+    return core_vms.create_vm_backup(desk['cluster_id'], node, desk['vm_type'], int(desk['vmid']))
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/backups/restore', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_restore(desktop_id):
+    """Back into the desktop's own VM from one of its own backups. Refused while someone is
+    connected unless force. The VM's snapshots go with the restore, so the desktop's base
+    is cleared (retake it, or the reset pool takes a new one)."""
+    from pegaprox.api import vms as core_vms
+    desk, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    volid = str(data.get('volid') or '')
+    extra = set(data) - {'volid', 'start', 'force'}
+    if extra:
+        return _bad(f"not taken here: {', '.join(sorted(extra))} (a restore goes back into the desktop's VM)")
+    if _vmid_of_volid(volid) != int(desk['vmid']):
+        return _bad("volid must be a backup of this desktop", 400)
+    if not data.get('force') and desk['id'] in store.open_session_desktops():
+        return jsonify({'error': 'Someone is connected to this desktop', 'code': 'IN_USE'}), 409
+    resp = core_vms.restore_vm_backup(desk['cluster_id'], node, desk['vm_type'], int(desk['vmid']))
+    r = resp[0] if isinstance(resp, tuple) else resp
+    if getattr(r, 'status_code', 200) == 200:
+        store.set_base_snap(desk['id'], '')
+        log_audit(_user(), 'vlab.desktop.restore', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}' from {volid}",
+                  get_client_ip())
+    return resp
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/backups/<path:volid>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_backup_delete(desktop_id, volid):
+    from pegaprox.api import vms as core_vms
+    desk, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    if _vmid_of_volid(volid) != int(desk['vmid']):
+        return _bad("volid must be a backup of this desktop", 400)
+    return core_vms.delete_vm_backup(desk['cluster_id'], node, desk['vm_type'], int(desk['vmid']), volid)
+
+
+# --- white label (운영 > 화이트라벨) ------------------------------------------------
+# The core's white label for separate front ends (pegaprox/api/frontend_branding.py) is
+# reused as it is - its record, cleaning and image checks. Its own routes take a server
+# API token only; the vLAB console is a browser, so these routes reach the same storage
+# with the console's session (admin.settings to change it, reading is public).
+
+def _branding_view(rec):
+    out = dict(rec)
+    for k in ('logoUrl', 'loginLogoUrl', 'faviconUrl'):
+        out[k] = f"/api/vlab/branding/image/{rec[k]}" if rec.get(k) else ''
+    return out
+
+
+@bp.route('/api/vlab/branding', methods=['GET'])
+def branding_public():
+    from pegaprox.api import frontend_branding as fb
+    rec = fb.resolved(fb.DEFAULT_TENANT)
+    keep = ('enabled', 'appName', 'browserTitle', 'logoUrl', 'loginLogoUrl', 'faviconUrl', 'primaryColor',
+            'footerText', 'loginTagline', 'docsUrl', 'supportUrl', 'hideVersion')
+    return jsonify({k: v for k, v in _branding_view(rec).items() if k in keep})
+
+
+@bp.route('/api/vlab/branding/image/<tenant>/<name>', methods=['GET'])
+def branding_image(tenant, name):
+    from flask import Response
+    from pegaprox.api import frontend_branding as fb
+    got = fb.read_image(tenant, name)
+    if not got:
+        return jsonify({'error': 'Not found'}), 404
+    buf, mime = got
+    return Response(buf, mimetype=mime, headers={'X-Content-Type-Options': 'nosniff',
+                                                 'Cache-Control': 'public, max-age=86400'})
+
+
+@bp.route('/api/vlab/admin/branding', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def branding_get():
+    from pegaprox.api import frontend_branding as fb
+    return jsonify({'branding': _branding_view(fb.record(fb.DEFAULT_TENANT)), 'defaults': fb.DEFAULTS})
+
+
+@bp.route('/api/vlab/admin/branding', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def branding_put():
+    from pegaprox.api import frontend_branding as fb
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _bad('JSON body required')
+    current = fb.record(fb.DEFAULT_TENANT)
+    # the images keep their stored references: they change through the image routes only
+    body = dict(data, logoUrl=current['logoUrl'], loginLogoUrl=current['loginLogoUrl'], faviconUrl=current['faviconUrl'])
+    rec = fb.save_record(fb.DEFAULT_TENANT, body, actor=_user())
+    return jsonify({'branding': _branding_view(rec)})
+
+
+_SLOT_FIELD = {'logo': 'logoUrl', 'loginLogo': 'loginLogoUrl', 'favicon': 'faviconUrl'}
+
+
+@bp.route('/api/vlab/admin/branding/image', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def branding_image_upload():
+    from pegaprox.api import frontend_branding as fb
+    if (request.content_length or 0) > fb.MAX_IMAGE_BYTES + 64 * 1024:
+        return _bad('File too large (max 5MB)', 413)
+    slot = request.form.get('slot')
+    f = request.files.get('file')
+    if slot not in _SLOT_FIELD or f is None:
+        return _bad('slot (logo, loginLogo, favicon) and file required')
+    url, err = fb.save_image(fb.DEFAULT_TENANT, slot, f.read(fb.MAX_IMAGE_BYTES + 1), actor=_user())
+    if err:
+        return _bad(err[0], err[1])
+    rec = fb.record(fb.DEFAULT_TENANT)
+    rec[_SLOT_FIELD[slot]] = url
+    rec = fb.save_record(fb.DEFAULT_TENANT, rec, actor=_user())
+    return jsonify({'branding': _branding_view(rec)})
+
+
+@bp.route('/api/vlab/admin/branding/image/<slot>', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def branding_image_delete(slot):
+    from pegaprox.api import frontend_branding as fb
+    if slot not in _SLOT_FIELD:
+        return _bad('slot must be logo, loginLogo or favicon')
+    fb.remove_image(fb.DEFAULT_TENANT, slot)
+    rec = fb.record(fb.DEFAULT_TENANT)
+    rec[_SLOT_FIELD[slot]] = ''
+    rec = fb.save_record(fb.DEFAULT_TENANT, rec, actor=_user())
+    return jsonify({'branding': _branding_view(rec)})
 
 
 # --- pool policy (데스크톱 풀 > 풀 > 정책) -------------------------------------------

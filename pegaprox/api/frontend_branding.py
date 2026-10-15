@@ -154,6 +154,71 @@ def _image_dir(tenant):
     return os.path.join(BRANDING_DIR, 'frontend', _tenant(tenant))
 
 
+def record(tenant):
+    """The stored record of a tenant (cleaned), or the defaults."""
+    return _record(_tenant(tenant)) or dict(DEFAULTS)
+
+
+def resolved(tenant=DEFAULT_TENANT):
+    """What to display: the tenant's record, else the 'default' one; defaults when not enabled."""
+    try:
+        tenant = _tenant(tenant)
+    except ValueError:
+        tenant = DEFAULT_TENANT
+    rec = _record(tenant) or _record(DEFAULT_TENANT)
+    return rec if rec and rec['enabled'] else dict(DEFAULTS)
+
+
+def save_record(tenant, branding, actor=''):
+    tenant = _tenant(tenant)
+    rec = clean(branding)
+    allrec = _all()
+    allrec[tenant] = rec
+    get_db().save_server_setting(FRONTEND_BRANDING_KEY, allrec)
+    log_audit(actor or '', 'frontend.branding_saved', f"tenant={tenant} enabled={rec['enabled']}", get_client_ip())
+    return rec
+
+
+def save_image(tenant, slot, buf, actor=''):
+    """(image_url, None) or (None, (error, status)). Type checked by content; SVG refused."""
+    tenant = _tenant(tenant)
+    if slot not in SLOTS:
+        return None, ('bad request', 400)
+    if len(buf) > MAX_IMAGE_BYTES:
+        return None, ('File too large (max 5MB)', 413)
+    ext = next((e for e, (_, sig) in _TYPES.items() if sig(buf)), None)
+    if ext is None or (ext == 'ico' and slot != 'favicon'):
+        return None, ('Unsupported image (PNG, JPEG, WebP; ICO for the favicon)', 415)
+    d = _image_dir(tenant)
+    os.makedirs(d, exist_ok=True)
+    remove_image(tenant, slot)
+    with open(os.path.join(d, f'{slot}.{ext}'), 'wb') as fh:
+        fh.write(buf)
+    log_audit(actor or '', 'frontend.branding_image', f'tenant={tenant} slot={slot}', get_client_ip())
+    return f'{tenant}/{slot}.{ext}?v={int(time.time())}', None
+
+
+def remove_image(tenant, slot):
+    d = _image_dir(tenant)
+    for e in _TYPES:
+        try:
+            os.remove(os.path.join(d, f'{slot}.{e}'))
+        except FileNotFoundError:
+            pass
+
+
+def read_image(tenant, name):
+    """(bytes, mimetype) or None."""
+    m = _FILE.match(name or '')
+    if not m or not _TENANT.match(tenant or ''):
+        return None
+    try:
+        with open(os.path.join(_image_dir(tenant), name), 'rb') as fh:
+            return fh.read(MAX_IMAGE_BYTES + 1), _TYPES[m.group(2)][0]
+    except FileNotFoundError:
+        return None
+
+
 @bp.route('/api/frontend/branding', methods=['GET'])
 @require_auth(perms=['admin.settings'])
 def get_frontend_branding():
