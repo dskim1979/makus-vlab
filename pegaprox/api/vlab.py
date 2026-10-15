@@ -18,6 +18,8 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/clusters/<cluster_id>/storage storage (shared ones once, with their nodes)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/accelerators  GPUs and FPGA cards per node, PCI mappings, who uses them  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/nodes/<node>/pci/<pciid>/profiles  vGPU (mdev) profiles of a card  vlab.pool.view
+  GET    /api/vlab/admin/pools/<pool_id>/policy       the pool's policy (connection, clipboard, USB, power, account)  vlab.pool.view
+  PUT    /api/vlab/admin/pools/<pool_id>/policy       save it                                   vlab.pool.manage
   PUT    /api/vlab/admin/pools/<pool_id>/gpu          {mode: none|passthrough|vgpu, mapping, mdev_type?, label?}  vlab.pool.manage
   POST   /api/vlab/admin/pools/<pool_id>/gpu/apply    write the pool's GPU to every desktop VM (slot hostpci15)  vlab.pool.manage
   GET    /api/vlab/admin/leases                       card loans (?all=1 with returned ones)   vlab.accel.manage
@@ -67,6 +69,7 @@ from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
 from pegaprox.vlab import VLAB_API_VERSION
 from pegaprox.vlab import accel
+from pegaprox.vlab import policy as pool_policy
 from pegaprox.vlab import store
 
 bp = Blueprint('vlab', __name__)
@@ -260,6 +263,9 @@ def my_desktops():
         v = _desktop_view(d, live.get(d['cluster_id'], {}))
         v['pool_type'] = d.get('pool_type', '')
         v['last_connected'] = last.get(d['id'])
+        pol = pool_policy.effective(_settings_of(d))
+        v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
+                       'start_on_connect': pol['start_on_connect']}
         out.append(v)
     return jsonify({'desktops': out})
 
@@ -278,9 +284,27 @@ def my_leases():
 
 # --- connecting -------------------------------------------------------------------
 
-def _vv_file(data):
-    """virt-viewer .vv from PVE's spiceproxy answer (same assembly as the core SPICE route)."""
+def _settings_of(d):
+    s = d.get('pool_settings')
+    if isinstance(s, str):
+        try:
+            return json.loads(s or '{}')
+        except ValueError:
+            return {}
+    return s if isinstance(s, dict) else {}
+
+
+def _vv_file(data, pol=None):
+    """virt-viewer .vv from PVE's spiceproxy answer (same assembly as the core SPICE route),
+    with the pool policy's SPICE options."""
     lines = ['[virt-viewer]']
+    if pol:
+        data = dict(data)
+        data['enable-usbredir'] = 1 if pol['usb_redirect'] else 0
+        data['enable-usb-autoshare'] = 1 if pol['usb_redirect'] and pol['usb_autoshare'] else 0
+        data['delete-this-file'] = 1
+        if pol['spice_fullscreen']:
+            data['fullscreen'] = 1
     if 'type' not in data:
         lines.append('type=spice')
     for k, v in data.items():
@@ -317,7 +341,8 @@ def connect_desktop(desktop_id):
     data = request.get_json(silent=True) or {}
     protocol = data.get('protocol') or 'vnc'
     pool = store.get_pool(desk['pool_id']) or {}
-    allowed = [p for p in ((pool.get('settings') or {}).get('protocols') or DEFAULT_PROTOCOLS) if p in ('vnc', 'spice')]
+    pol = pool_policy.effective(pool.get('settings'))
+    allowed = pol['protocols']
     if protocol not in allowed:
         return _bad(f"protocol must be one of {', '.join(allowed)}")
 
@@ -331,6 +356,12 @@ def connect_desktop(desktop_id):
     if vm is None:
         return _bad("The desktop's VM is not on the cluster any more", 404)
     if vm.get('status') != 'running':
+        if pol['start_on_connect'] and not vm.get('lock'):
+            r = mgr.vm_action(vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type'], 'start')
+            if isinstance(r, dict) and r.get('success'):
+                log_audit(username, 'vm.start', f"vLAB: start on connect '{desk['name']}' ({desk['vm_type']}/{desk['vmid']})",
+                          get_client_ip())
+                return jsonify({'error': 'The desktop is starting - connect again in a moment', 'code': 'STARTING'}), 409
         return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
     node, vmid, vm_type = vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type']
 
@@ -343,7 +374,7 @@ def connect_desktop(desktop_id):
             if 'no spice port' in err.lower():
                 return jsonify({'error': 'This VM has no SPICE display', 'code': 'NO_SPICE'}), 409
             return _bad(err, 502)
-        answer = {'type': 'spice', 'vv': _vv_file(result.get('data') or {}), 'filename': f"{desk['name']}.vv"}
+        answer = {'type': 'spice', 'vv': _vv_file(result.get('data') or {}, pol), 'filename': f"{desk['name']}.vv"}
     else:
         result = mgr.get_vnc_ticket(node, vmid, vm_type)
         if not result.get('success'):
@@ -358,7 +389,7 @@ def connect_desktop(desktop_id):
             # hand vncproxy's ticket/port on, or the websocket handler mints a second vncproxy
             # whose password no longer matches this one (PVE 9.1)
             ws_path += f"&pve_ticket={quote(str(ticket), safe='')}&pve_port={quote(str(port), safe='')}"
-        answer = {'type': 'vnc', 'ws_path': ws_path, 'password': ticket}
+        answer = {'type': 'vnc', 'ws_path': ws_path, 'password': ticket, 'clipboard': pol['clipboard']}
 
     answer['session_id'] = store.start_session(username, desk, protocol, get_client_ip())
     log_audit(username, 'vm.console', f"vLAB: {protocol} to desktop '{desk['name']}' ({vm_type}/{vmid})",
@@ -369,8 +400,11 @@ def connect_desktop(desktop_id):
 @bp.route('/api/vlab/sessions/<session_id>/end', methods=['POST'])
 @require_auth(perms=['vlab.desk'])
 def end_session(session_id):
+    row = store.db().query_one('SELECT desktop_id FROM vlab_sessions WHERE id = ?', (session_id,))
     if not store.end_session(session_id, _user()):
         return _bad('Session not found', 404)
+    if row and row['desktop_id']:
+        _after_session(store.get_desktop(row['desktop_id']), by=_user())
     return jsonify({'success': True})
 
 
@@ -393,6 +427,8 @@ def power_desktop(desktop_id):
     action = (request.get_json(silent=True) or {}).get('action')
     if action not in POWER_ACTIONS:
         return _bad(f"action must be one of {', '.join(POWER_ACTIONS)}")
+    if not pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))['allow_power']:
+        return jsonify({'error': 'Power control is turned off for this pool', 'code': 'POWER_OFF'}), 403
     user = resolve_authz_user(request.session)
     if not user or not user_can_access_vm(user, desk['cluster_id'], int(desk['vmid']), POWER_ACTIONS[action],
                                           desk['vm_type']):
@@ -880,6 +916,105 @@ def apply_pool_gpu(pool_id):
     log_audit(_user(), 'vlab.pool.gpu.apply', f"pool '{pool['name']}': {len(done)} applied, {len(failed)} failed",
               get_client_ip())
     return jsonify({'applied': done, 'failed': failed, 'needs_restart': pending}), (200 if not failed else 207)
+
+
+# --- pool policy (데스크톱 풀 > 풀 > 정책) -------------------------------------------
+
+def _after_session(desk, by='system'):
+    """A session of the desktop closed: back to its base when the pool resets on logout
+    and nobody else is still on it. Error text or None."""
+    if not desk:
+        return None
+    pool = store.get_pool(desk['pool_id']) or {}
+    pol = pool_policy.effective(pool.get('settings'))
+    if not pol['reset_on_logout'] or pool.get('type') not in pool_policy.RESET_TYPES or not desk.get('base_snap'):
+        return None
+    if desk['id'] in store.open_session_desktops():
+        return None
+    e = _reset_one(desk)
+    log_audit(by, 'vlab.desktop.reset', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}' on logout"
+              + (f' - failed: {e}' if e else ''), get_client_ip() if by != 'system' else '')
+    return e
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/policy', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def get_pool_policy(pool_id):
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    return jsonify({'policy': pool_policy.effective(pool.get('settings')), 'defaults': pool_policy.DEFAULTS,
+                    'reset_allowed': pool.get('type') in pool_policy.RESET_TYPES})
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/policy', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def set_pool_policy(pool_id):
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
+    if e:
+        return _bad(e)
+    settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
+    store.set_pool_settings(pool['id'], settings)
+    log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
+              get_client_ip())
+    return jsonify({'policy': pol})
+
+
+def _ts_utc(iso):
+    from datetime import datetime, timezone
+    t = datetime.fromisoformat(iso)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def policy_tick(now=None):
+    """Once a minute (pegaprox/vlab/loans.py): close sessions open past max_session_hours,
+    then shut down desktops idle past idle_shutdown_min. Returns what it did."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    pools = {p['id']: p for p in store.list_pools()}
+    policies = {pid: pool_policy.effective(p.get('settings')) for pid, p in pools.items()}
+    done = {'expired': 0, 'shutdown': 0}
+
+    for s in store.open_sessions():
+        pol = policies.get(s['pool_id'])
+        if not pol or not pol['max_session_hours']:
+            continue
+        if now - _ts_utc(s['started_at']) >= timedelta(hours=pol['max_session_hours']):
+            store.close_session(s['id'], 'expired', at=now.isoformat(timespec='seconds'))
+            done['expired'] += 1
+            log_audit('system', 'vlab.session.expired', f"session {s['id']} of {s['username']} after "
+                      f"{pol['max_session_hours']} h")
+            _after_session(store.get_desktop(s['desktop_id']) if s['desktop_id'] else None)
+
+    idle_pools = {pid for pid, pol in policies.items() if pol['idle_shutdown_min']}
+    if idle_pools:
+        open_now = store.open_session_desktops()
+        last_end = store.last_end_per_desktop()
+        live = {}
+        for d in store.list_desktops():
+            if d['pool_id'] not in idle_pools or d['id'] in open_now or d.get('state') in ('provisioning', 'resetting'):
+                continue
+            if d['cluster_id'] not in live:
+                live[d['cluster_id']] = _vm_states(d['cluster_id'])
+            vm = live[d['cluster_id']].get(int(d['vmid']))
+            if not vm or vm.get('status') != 'running' or vm.get('lock'):
+                continue
+            limit = timedelta(minutes=policies[d['pool_id']]['idle_shutdown_min'])
+            # up at least that long, and no session ended within it
+            if timedelta(seconds=float(vm.get('uptime') or 0)) < limit:
+                continue
+            if last_end.get(d['id']) and now - _ts_utc(last_end[d['id']]) < limit:
+                continue
+            mgr = cluster_managers.get(d['cluster_id'])
+            r = mgr.vm_action(vm.get('node') or d['node'], int(d['vmid']), d['vm_type'], 'shutdown') if mgr else None
+            if isinstance(r, dict) and r.get('success'):
+                done['shutdown'] += 1
+                log_audit('system', 'vm.shutdown', f"vLAB: idle shutdown '{d['name']}' ({d['vm_type']}/{d['vmid']}) "
+                          f"after {policies[d['pool_id']]['idle_shutdown_min']} min")
+    return done
 
 
 # --- admin: card loans (가속 자원 > 카드 대여 현황) ----------------------------------

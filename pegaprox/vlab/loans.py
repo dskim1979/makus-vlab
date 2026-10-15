@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-vLAB (MAKUS): give loaned cards back when their loan ends.
+vLAB (MAKUS): give loaned cards back when their loan ends, and run the pool policies'
+idle shutdown and session limit (pegaprox/api/vlab.py policy_tick) on the same minute.
 
 A background thread looks once a minute for active loans whose ends_at has passed and
 returns them (pegaprox/api/vlab.py return_lease): the card's slot is taken off the
@@ -40,8 +41,11 @@ def _loop():
         try:
             if ha.is_active():
                 return_due()
+                # the pool policies' idle shutdown and session limit ride the same minute
+                from pegaprox.api.vlab import policy_tick
+                policy_tick()
         except Exception as e:
-            logging.error(f'[VLAB] loan return: {e}')
+            logging.error(f'[VLAB] loan return / pool policy: {e}')
         time.sleep(INTERVAL)
 
 

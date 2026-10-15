@@ -361,10 +361,85 @@ def test_only_the_assigned_user_connects(connectable):
 
 
 def test_connect_refuses_a_stopped_desktop_and_an_unknown_protocol(connectable):
-    _, alice, _, _, desk, stopped = connectable
+    admin, alice, _, _, desk, stopped = connectable
+    # the default policy starts it, and the user connects again in a moment
+    r = alice.post(f"/api/vlab/desktops/{stopped['id']}/connect", json={'protocol': 'vnc'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'STARTING'
+    assert _mgr().vm_action.call_args[0] == ('pve1', 301, 'qemu', 'start')
+    admin.put(f"/api/vlab/admin/pools/{stopped['pool_id']}/policy", json={'start_on_connect': False})
     r = alice.post(f"/api/vlab/desktops/{stopped['id']}/connect", json={'protocol': 'vnc'})
     assert r.status_code == 409 and r.get_json()['code'] == 'VM_STOPPED'
     assert alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'rdp'}).status_code == 400
+
+
+# --- pool policy -------------------------------------------------------------------
+
+def test_pool_policy_defaults_and_checks(connectable):
+    admin, alice, _, _, desk, _ = connectable
+    url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
+    r = admin.get(url).get_json()
+    assert r['policy']['clipboard'] == 'both' and r['policy']['protocols'] == ['vnc', 'spice'] and r['reset_allowed'] is True
+    for bad in ({'clipboard': 'sideways'}, {'protocols': []}, {'protocols': ['rdp']}, {'idle_shutdown_min': -1},
+                {'max_session_hours': 'x'}, {'allow_power': 'yes'}, {'colour': 'blue'}):
+        assert admin.put(url, json=bad).status_code == 400, bad
+    assert alice.put(url, json={'clipboard': 'off'}).status_code == 403
+    dedicated = admin.post('/api/vlab/admin/pools', json={'name': '전용', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    r = admin.put(f"/api/vlab/admin/pools/{dedicated['id']}/policy", json={'reset_on_logout': True})
+    assert r.status_code == 400 and 'reset' in r.get_json()['error']
+
+
+def test_the_policy_shapes_the_connection(connectable):
+    admin, alice, _, _, desk, _ = connectable
+    url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
+    assert admin.put(url, json={'protocols': ['spice'], 'clipboard': 'off', 'usb_redirect': False,
+                                'spice_fullscreen': True}).status_code == 200
+    assert alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).status_code == 400
+    vv = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'spice'}).get_json()['vv']
+    assert 'enable-usbredir=0' in vv and 'enable-usb-autoshare=0' in vv and 'fullscreen=1' in vv and 'delete-this-file=1' in vv
+    admin.put(url, json={'clipboard': 'to_desktop'})
+    a = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()
+    assert a['clipboard'] == 'to_desktop'
+    (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
+    assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True}
+
+
+def test_the_policy_can_take_power_away(connectable):
+    admin, alice, _, _, desk, _ = connectable
+    admin.put(f"/api/vlab/admin/pools/{desk['pool_id']}/policy", json={'allow_power': False})
+    r = alice.post(f"/api/vlab/desktops/{desk['id']}/power", json={'action': 'reboot'})
+    assert r.status_code == 403 and r.get_json()['code'] == 'POWER_OFF'
+
+
+def test_reset_on_logout(connectable):
+    admin, alice, _, _, desk, _ = connectable
+    store.set_base_snap(desk['id'], 'vlab-base')
+    admin.put(f"/api/vlab/admin/pools/{desk['pool_id']}/policy", json={'reset_on_logout': True})
+    _mgr().rollback_snapshot.return_value = {'success': True}
+    s1 = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()['session_id']
+    s2 = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()['session_id']
+    alice.post(f'/api/vlab/sessions/{s1}/end')
+    assert _mgr().rollback_snapshot.call_count == 0                     # still in use by the second session
+    alice.post(f'/api/vlab/sessions/{s2}/end')
+    assert _mgr().rollback_snapshot.call_args[0] == ('pve1', 300, 'qemu', 'vlab-base')
+
+
+def test_policy_tick_expires_long_sessions_and_shuts_idle_desktops(connectable):
+    from datetime import datetime, timedelta, timezone
+    from pegaprox.api.vlab import policy_tick
+    admin, alice, _, _, desk, _ = connectable
+    admin.put(f"/api/vlab/admin/pools/{desk['pool_id']}/policy", json={'max_session_hours': 4, 'idle_shutdown_min': 30})
+    sid = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()['session_id']
+    now = datetime.now(timezone.utc)
+    mgr = _mgr()
+    mgr.get_vm_resources.return_value = [dict(RES[0], uptime=7200), RES[1]]
+    mgr.vm_action.reset_mock()
+    assert policy_tick(now) == {'expired': 0, 'shutdown': 0}             # in use: left alone
+    assert policy_tick(now + timedelta(hours=5)) == {'expired': 1, 'shutdown': 0}   # session closed ...
+    row = store.db().query_one('SELECT result FROM vlab_sessions WHERE id = ?', (sid,))
+    assert row['result'] == 'expired'
+    assert policy_tick(now + timedelta(hours=5)) == {'expired': 0, 'shutdown': 0}   # ... it just ended
+    assert policy_tick(now + timedelta(hours=6)) == {'expired': 0, 'shutdown': 1}   # 30 min idle: shut down
+    assert mgr.vm_action.call_args[0] == ('pve1', 300, 'qemu', 'shutdown')
 
 
 def test_connect_follows_the_vm_acl_not_only_the_assignment(connectable):

@@ -318,6 +318,23 @@ def sessions_overlapping(since_iso, until_iso):
     return [dict(r) for r in rows]
 
 
+def open_sessions():
+    rows = db().query('SELECT * FROM vlab_sessions WHERE ended_at IS NULL ORDER BY started_at')
+    return [dict(r) for r in rows]
+
+
+def close_session(session_id, result='expired', at=None):
+    db().execute('UPDATE vlab_sessions SET ended_at = ?, result = ? WHERE id = ? AND ended_at IS NULL',
+                 (at or now(), result, session_id))
+
+
+def last_end_per_desktop():
+    # {desktop_id: ended_at of its latest closed session}
+    rows = db().query('''SELECT desktop_id, MAX(ended_at) AS at FROM vlab_sessions
+                         WHERE ended_at IS NOT NULL AND desktop_id IS NOT NULL GROUP BY desktop_id''')
+    return {r['desktop_id']: r['at'] for r in rows}
+
+
 def end_session(session_id, username):
     """Close one of the user's own open sessions. False when there is none to close."""
     d = db()
