@@ -1,0 +1,47 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# SSL / Secrets
+cert.pem
+key.pem
+ssl/*.key
+ssl/*.crt
+ssl/*.pem
+*.p12
+*.pfx
+
+# Generated at runtime (rewritten from the vms.py heredoc on every start — never edit
+# the dot-file directly; it drifts in the working tree on each restart otherwise)
+pegaprox/api/.ssh_ws_server.py
+
+# Frontend build cache
+web/Dev/.build/
+
+# Runtime data - never commit
+logs/
+backups/
+config/
+config/*.db
+config/*.key
+config/.pegaprox.key
+config/branding/
+*.db
+*.db-journal
+images/login_bg.png
+
+# OS
+.DS_Store
+.vscode/
+.idea/
+.zed/
+*.swp
+*.swo
+
+# codeant CLI scratch output — tool state, never source
+.codeant/
+
+# MAKUS vLAB - the design document stays outside the repository (internal)
+docs/vlab-design.md

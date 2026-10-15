@@ -1,0 +1,36 @@
+{
+  "name": "MAKUS vLAB",
+  "short_name": "MAKUS vLAB",
+  "description": "Proxmox VE · XCP-ng 멀티 클러스터 통합 관리",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0c1117",
+  "theme_color": "#1668E3",
+  "orientation": "any",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "/images/vlab-symbol-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/images/vlab-symbol-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/images/vlab-symbol.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "categories": [
+    "productivity",
+    "utilities"
+  ]
+}

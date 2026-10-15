@@ -1,0 +1,636 @@
+# -*- coding: utf-8 -*-
+"""
+Prometheus / OpenMetrics exporter.
+
+MK Apr 2026: One endpoint — /api/metrics — that lets any Prometheus/Grafana stack
+scrape PegaProx with zero custom instrumentation. We expose a curated set of gauges
+that match what admins typically want to alert on (node down, high CPU, quorum
+at risk, etc). Most data is derived from existing in-memory state; APT update
+availability is queried through Proxmox and cached briefly per node. Storage, replication
+and backup age come from reads other views make too (see _ESTATE_FAMILIES).
+
+Auth: Bearer token via existing API tokens (admin-view role is enough), or the
+endpoint can be made public by setting `metrics_public: true` in server settings —
+some setups put PegaProx behind a mutual-TLS reverse proxy and want to skip auth.
+"""
+import time
+import logging
+import threading
+from flask import Blueprint, request, Response
+
+from pegaprox.globals import (
+    cluster_managers, pbs_managers, vmware_managers,
+    active_sessions, sessions_lock,
+)
+from pegaprox.api.helpers import load_server_settings
+from pegaprox.utils.auth import validate_api_token, load_users, build_authz_user
+from pegaprox.core.db import get_db
+from pegaprox.core import ha  # PegaProx's own warm standby (#625)
+from pegaprox.models.permissions import ROLE_ADMIN
+from pegaprox.utils.rbac import has_permission
+from pegaprox.utils import auth as auth_state
+
+
+bp = Blueprint('metrics_exporter', __name__)
+
+_APT_UPDATE_CACHE_TTL = 15 * 60
+_apt_update_cache = {}
+_apt_update_cache_lock = threading.Lock()
+
+
+def _escape_label(s):
+    """Prometheus labels can't contain raw quotes, backslashes, or newlines."""
+    if s is None:
+        return ''
+    return str(s).replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+
+
+def _sample(name, value, labels=None, help_text=None, mtype=None):
+    """Build one or two lines of Prometheus exposition format."""
+    lines = []
+    # The HELP/TYPE lines appear once per metric name — caller should emit those
+    # before the first sample. Kept out of here so repeated _sample() calls don't
+    # duplicate metadata.
+    if labels:
+        lbl = ','.join(f'{k}="{_escape_label(v)}"' for k, v in labels.items())
+        lines.append(f'{name}{{{lbl}}} {value}')
+    else:
+        lines.append(f'{name} {value}')
+    return lines
+
+
+def _num(value, default=0):
+    """Return a Prometheus-safe numeric value."""
+    try:
+        if value in (None, ''):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _round_num(value, default=0, places=2):
+    try:
+        return round(float(value), places)
+    except Exception:
+        return default
+
+
+def _pct(used, total):
+    try:
+        total = float(total or 0)
+        if total <= 0:
+            return 0
+        return round((float(used or 0) / total) * 100, 2)
+    except Exception:
+        return 0
+
+
+def _resource_type_label(resource_type):
+    if resource_type == 'qemu':
+        return 'vm'
+    if resource_type == 'lxc':
+        return 'lxc'
+    return resource_type or 'unknown'
+
+
+# MK Oct 2026 - storage, replication and backup age. Storage is the one
+# /cluster/resources?type=storage per cluster that the health pill and the storage overview
+# share for 30 seconds (api/clusters.py). Replication reads the job list and every source
+# node (alert_events.read_replication); the backup age comes from the scan behind the VM
+# list's backup pill (api/pbs.py): the snapshot lists of the linked PBS datastores and the
+# vzdump files on the backup storages, per datastore and storage, never per guest. Those two
+# can take seconds and Prometheus gives a scrape 10, so they run in the background, one per
+# cluster and source at a time, and a scrape hands out the last read.
+_REPLICATION_EVERY = 60
+_REPLICATION_SERVE_MAX = 600
+_BACKUP_EVERY = 600            # backup age moves by the hour
+_BACKUP_PARTIAL_RETRY = 60
+_BACKUP_SERVE_MAX = 3600
+_repl_reads = {}               # cid -> (epoch, read_replication data or None)
+_reads_running = set()         # (source, cid)
+_reads_lock = threading.Lock()
+
+# written out family by family after the cluster walk: the exposition format wants all
+# samples of a metric in one group
+_ESTATE_FAMILIES = (
+    ('pegaprox_cluster_source_up', 'gauge',
+     '1 if the last read of a source behind these metrics answered in full (storage, replication, backups)'),
+    ('pegaprox_storage_active', 'gauge', '1 if the storage is active (a shared one: on at least one node)'),
+    ('pegaprox_storage_inactive_nodes', 'gauge', 'Nodes that list a shared storage without having it active'),
+    ('pegaprox_storage_used_bytes', 'gauge', 'Bytes used on an active storage'),
+    ('pegaprox_storage_total_bytes', 'gauge', 'Size of an active storage in bytes'),
+    ('pegaprox_replication_enabled', 'gauge', '1 if the replication job is enabled'),
+    ('pegaprox_replication_last_sync_timestamp_seconds', 'gauge',
+     'Unix time of the last successful sync of a replication job, 0 if it never synced'),
+    ('pegaprox_replication_last_sync_age_seconds', 'gauge',
+     'Seconds since the last successful sync of a replication job'),
+    ('pegaprox_replication_fail_count', 'gauge', 'Failed runs of a replication job in a row'),
+    ('pegaprox_replication_failed', 'gauge', '1 if the last run of a replication job failed'),
+    ('pegaprox_guest_last_backup_timestamp_seconds', 'gauge',
+     'Unix time of the newest backup of a VM or LXC container on a linked PBS or a backup storage, 0 if none'),
+    ('pegaprox_guest_last_backup_age_seconds', 'gauge',
+     'Seconds since the newest backup of a VM or LXC container'),
+)
+
+
+def _put(fam, name, value, labels):
+    fam[name].extend(_sample(name, value, labels))
+
+
+def _spawn(fn):
+    threading.Thread(target=fn, daemon=True, name='metrics-read').start()
+
+
+def _read_in_background(source, cid, read):
+    """Start read() in the background unless one for this cluster and source runs already."""
+    key = (source, cid)
+    with _reads_lock:
+        if key in _reads_running:
+            return
+        _reads_running.add(key)
+
+    def run():
+        try:
+            read()
+        except Exception as e:
+            logging.debug(f"[metrics] {cid} {source} read failed: {e}")
+        finally:
+            with _reads_lock:
+                _reads_running.discard(key)
+    try:
+        _spawn(run)
+    except Exception as e:
+        logging.debug(f"[metrics] {cid} {source} read not started: {e}")
+        with _reads_lock:
+            _reads_running.discard(key)
+
+
+def _replication_state(cid, mgr, now):
+    """The replication data of the last read when it is recent enough, else None."""
+    hit = _repl_reads.get(cid)
+    if hit is None or now - hit[0] >= _REPLICATION_EVERY:
+        def read():
+            from pegaprox.background.alert_events import read_replication
+            _status, data = read_replication(mgr)
+            _repl_reads[cid] = (time.time(), data)
+        _read_in_background('replication', cid, read)
+        hit = _repl_reads.get(cid)
+    if hit is None or now - hit[0] >= _REPLICATION_SERVE_MAX:
+        return None
+    return hit[1]
+
+
+def _last_backups(cid, mgr, now):
+    """{vmid: epoch of the newest backup, 0 for none} of the last complete scan, or None
+    while there is none to hand out (not read yet, partial, too old)."""
+    from pegaprox.api import pbs as pbs_api
+    entry = pbs_api.backup_status_entry(cid)
+    age = now - entry[0] if entry else 0
+    if entry is None or age >= _BACKUP_EVERY or (not entry[2] and age >= _BACKUP_PARTIAL_RETRY):
+        _read_in_background('backups', cid, lambda: pbs_api.scan_backup_status(cid, mgr))
+        entry = pbs_api.backup_status_entry(cid)
+        age = now - entry[0] if entry else 0
+    # a partial scan may lack a guest's newest backup and report it older than it is
+    if entry is None or not entry[2] or age >= _BACKUP_SERVE_MAX:
+        return None
+    out = {}
+    for row in entry[1] or ():
+        try:
+            out[int(row.get('vmid'))] = int(row.get('last_backup_ts') or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _storage_rows(cid, mgr, ctype):
+    """The storage overview rows of a cluster (api/clusters.py), None when unread."""
+    from pegaprox.api import clusters as clusters_api
+    if ctype == 'xcpng':
+        return clusters_api._xcpng_storage_rows(cid, mgr)
+    rows = clusters_api.cluster_storage_resources(cid, mgr)
+    return None if rows is None else clusters_api._storage_overview_rows(rows)
+
+
+def _put_storage(fam, base, rows):
+    for row in rows:
+        labels = {**base, 'node': row.get('node') or '', 'storage': row.get('storage') or '',
+                  'type': row.get('type') or '', 'shared': '1' if row.get('shared') else '0'}
+        if row.get('uuid'):
+            labels['sr_uuid'] = row['uuid']
+        _put(fam, 'pegaprox_storage_active', 1 if row.get('active') else 0, labels)
+        if row.get('shared'):
+            _put(fam, 'pegaprox_storage_inactive_nodes', len(row.get('inactive_on') or ()), labels)
+        # the figures of a storage that is not active are pvestatd's last ones
+        if row.get('active') and row.get('total') is not None:
+            _put(fam, 'pegaprox_storage_used_bytes', int(row.get('used') or 0), labels)
+            _put(fam, 'pegaprox_storage_total_bytes', int(row.get('total') or 0), labels)
+
+
+def _put_replication(fam, base, data, now):
+    for job in data.get('jobs') or ():
+        jid = str(job.get('id') or '')
+        if not jid:
+            continue
+        labels = {**base, 'job': jid, 'vmid': str(job.get('guest') or jid.split('-', 1)[0]),
+                  'node': str(job.get('source') or ''), 'target': str(job.get('target') or '')}
+        enabled = not job.get('disable')
+        _put(fam, 'pegaprox_replication_enabled', 1 if enabled else 0, labels)
+        st = data['status'].get(jid)
+        if not enabled or st is None:
+            continue   # a disabled job has no state to alert on, an unread source node an unknown one
+        last = int(_num(st.get('last_sync')))
+        fails = int(_num(st.get('fail_count')))
+        _put(fam, 'pegaprox_replication_last_sync_timestamp_seconds', last, labels)
+        if last > 0:
+            _put(fam, 'pegaprox_replication_last_sync_age_seconds', max(0, round(now - last)), labels)
+        _put(fam, 'pegaprox_replication_fail_count', fails, labels)
+        failed = fails > 0 or bool(str(st.get('error') or '').strip())
+        _put(fam, 'pegaprox_replication_failed', 1 if failed else 0, labels)
+
+
+def _node_apt_updates_available(cid, mgr, node):
+    """Return 1 when any APT update is available on a node, otherwise 0.
+
+    The Proxmox endpoint is read-only, but it can still be expensive across
+    larger clusters. Cache per node briefly so frequent scrapes stay cheap.
+    """
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None
+
+    key = (cid, node)
+    now = time.time()
+    with _apt_update_cache_lock:
+        cached = _apt_update_cache.get(key)
+        if cached and now - cached.get('at', 0) < _APT_UPDATE_CACHE_TTL:
+            return cached.get('available', 0)
+
+    try:
+        updates = mgr.get_node_apt_updates(node)
+        available = 1 if updates else 0
+    except Exception as e:
+        logging.debug(f"[metrics] {cid}/{node} apt update check failed: {e}")
+        available = 0
+
+    with _apt_update_cache_lock:
+        _apt_update_cache[key] = {'at': now, 'available': available}
+    return available
+
+
+# MK Sep 2026 (#818) - tokens we have already said the warning about, so a 15-second
+# scrape interval does not turn one warning into 5 760 a day. Keyed by the token id
+# from our own table, so nothing a caller invents lands in here, and it is rebuilt on
+# restart which is exactly when an operator wants to see it again.
+_metrics_perm_announced = set()
+
+
+def _auth_ok():
+    """Allow a scrape when one of these holds:
+
+      (a) metrics_public = true
+      (b) the bearer token is an ADMIN-role token whose owner is still an enabled admin
+      (c) MK Sep 2026 (#818) - the token carries `metrics.view`
+
+    NS Aug 2026 (Aikido pentest): /api/metrics emits cluster-wide, cross-tenant infra gauges
+    (node status, quorum, CPU, VM counts across every cluster). Mere token validity is not
+    enough — a viewer/tenant-scoped token would otherwise scrape all tenants' operational data.
+    That is why (b) demands the admin role rather than any valid token.
+
+    (c) does not weaken that: it is a permission nobody holds unless an admin grants it, it is
+    in no builtin role, and the UI says out loud at the point of granting that it is not
+    tenant-scoped. What it buys is the thing #818 asked for - a monitoring account that can
+    scrape and do nothing else, instead of an admin token in a Prometheus config file.
+
+    The permission is resolved through build_authz_user(), not off the stored account: a token
+    is capped by its own role AND by what its owner holds today, and reading the account
+    directly would let an admin-owned, viewer-capped token through.
+    """
+    settings = load_server_settings()
+    if settings.get('metrics_public', False):
+        return True
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:].strip()
+        try:
+            info = validate_api_token(token)
+            # sec (audit): this route has no @require_auth, so it never ran the decorator's
+            # account-exists / account-enabled checks. validate_api_token only looks at revoked +
+            # expires_at, and disabling a user does NOT revoke their tokens — so a disabled or
+            # demoted admin kept scraping every cluster's inventory. Re-check the owner here.
+            if info:
+                try:
+                    owner = get_db().get_user(info.get('user'))
+                except Exception:
+                    owner = None
+                if not (owner and owner.get('enabled', True)):
+                    logging.warning(f"[metrics] rejected token for '{info.get('user')}' - "
+                                    "account is gone or disabled")
+                    return False
+                if info.get('role') == ROLE_ADMIN:
+                    # an owner a tenant override lowers is not an admin here either (#1028)
+                    from pegaprox.utils.rbac import acts_as_admin
+                    if acts_as_admin(owner):
+                        return True
+                    logging.warning(f"[metrics] rejected admin token for '{info.get('user')}' - "
+                                    "owner is no longer admin")
+                    return False
+                # (c) #818
+                try:
+                    if has_permission(build_authz_user(info.get('user'), info), 'metrics.view'):
+                        tid = info.get('token_id')
+                        if tid not in _metrics_perm_announced:
+                            _metrics_perm_announced.add(tid)
+                            logging.warning(
+                                f"[metrics] token '{info.get('token_name')}' of "
+                                f"'{info.get('user')}' scrapes /api/metrics via metrics.view - "
+                                "this endpoint is NOT tenant-scoped and exposes every cluster")
+                        return True
+                except Exception as e:
+                    logging.debug(f"[metrics] metrics.view check failed: {e}")
+        except Exception as e:
+            logging.debug(f"[metrics] token validate failed: {e}")
+    return False
+
+
+@bp.route('/api/metrics', methods=['GET'])
+def prometheus_metrics():
+    if not _auth_ok():
+        return Response(
+            '# unauthorized - use an admin API token, a token with the metrics.view '
+            'permission, or enable metrics_public\n',
+            status=401, mimetype='text/plain; version=0.0.4'
+        )
+
+    out = []
+    emit = out.append
+
+    # ── PegaProx self metrics ──
+    emit('# HELP pegaprox_info Build information')
+    emit('# TYPE pegaprox_info gauge')
+    try:
+        from pegaprox.constants import PEGAPROX_VERSION, PEGAPROX_BUILD
+        out.extend(_sample('pegaprox_info', 1, {'version': PEGAPROX_VERSION, 'build': PEGAPROX_BUILD}))
+    except Exception:
+        pass
+
+    emit('# HELP pegaprox_scrape_timestamp_seconds Unix time of this scrape')
+    emit('# TYPE pegaprox_scrape_timestamp_seconds gauge')
+    out.extend(_sample('pegaprox_scrape_timestamp_seconds', f'{time.time():.0f}'))
+
+    # ── Session + auth state ──
+    with sessions_lock:
+        sessions = getattr(auth_state, 'active_sessions', active_sessions)
+        sess_total = len(sessions)
+        active_users = set()
+        for s in sessions.values():
+            u = s.get('user', '?')
+            if u and u != '?':
+                active_users.add(u)
+    emit('# HELP pegaprox_sessions_active Currently authenticated sessions')
+    emit('# TYPE pegaprox_sessions_active gauge')
+    out.extend(_sample('pegaprox_sessions_active', sess_total))
+    emit('# HELP pegaprox_users_logged_in Unique PegaProx users with an active session')
+    emit('# TYPE pegaprox_users_logged_in gauge')
+    out.extend(_sample('pegaprox_users_logged_in', len(active_users)))
+
+    try:
+        users = load_users(readonly=True) or {}
+        enabled_users = sum(1 for u in users.values() if u.get('enabled', True))
+        emit('# HELP pegaprox_users_total Configured PegaProx user accounts')
+        emit('# TYPE pegaprox_users_total gauge')
+        out.extend(_sample('pegaprox_users_total', len(users)))
+        emit('# HELP pegaprox_users_enabled Enabled PegaProx user accounts')
+        emit('# TYPE pegaprox_users_enabled gauge')
+        out.extend(_sample('pegaprox_users_enabled', enabled_users))
+    except Exception as e:
+        logging.debug(f"[metrics] user stats failed: {e}")
+
+    # ── Clusters ──
+    emit('# HELP pegaprox_cluster_connected 1 if PegaProx can reach the cluster API')
+    emit('# TYPE pegaprox_cluster_connected gauge')
+    emit('# HELP pegaprox_cluster_nodes_total Node count per cluster')
+    emit('# TYPE pegaprox_cluster_nodes_total gauge')
+    emit('# HELP pegaprox_cluster_nodes_online Online node count')
+    emit('# TYPE pegaprox_cluster_nodes_online gauge')
+    emit('# HELP pegaprox_cluster_vms_total VMs/CTs per cluster')
+    emit('# TYPE pegaprox_cluster_vms_total gauge')
+    emit('# HELP pegaprox_cluster_vms_running Running VMs/CTs per cluster')
+    emit('# TYPE pegaprox_cluster_vms_running gauge')
+    emit('# HELP pegaprox_cluster_quorum_held 1 if quorum is currently held')
+    emit('# TYPE pegaprox_cluster_quorum_held gauge')
+
+    emit('# HELP pegaprox_node_cpu_percent CPU usage percent per node')
+    emit('# TYPE pegaprox_node_cpu_percent gauge')
+    emit('# HELP pegaprox_node_mem_percent Memory usage percent per node')
+    emit('# TYPE pegaprox_node_mem_percent gauge')
+    emit('# HELP pegaprox_node_uptime_seconds Node uptime in seconds')
+    emit('# TYPE pegaprox_node_uptime_seconds gauge')
+    emit('# HELP pegaprox_node_online 1 if the node is online')
+    emit('# TYPE pegaprox_node_online gauge')
+    emit('# HELP pegaprox_node_apt_updates_available 1 if any APT package update is available on the node')
+    emit('# TYPE pegaprox_node_apt_updates_available gauge')
+
+    emit('# HELP pegaprox_guest_running 1 if the VM or LXC container is running')
+    emit('# TYPE pegaprox_guest_running gauge')
+    emit('# HELP pegaprox_guest_cpu_percent CPU usage percent per VM or LXC container')
+    emit('# TYPE pegaprox_guest_cpu_percent gauge')
+    emit('# HELP pegaprox_guest_mem_used_bytes Memory used by a VM or LXC container')
+    emit('# TYPE pegaprox_guest_mem_used_bytes gauge')
+    emit('# HELP pegaprox_guest_mem_total_bytes Configured memory limit for a VM or LXC container')
+    emit('# TYPE pegaprox_guest_mem_total_bytes gauge')
+    emit('# HELP pegaprox_guest_mem_percent Memory usage percent per VM or LXC container')
+    emit('# TYPE pegaprox_guest_mem_percent gauge')
+    emit('# HELP pegaprox_guest_disk_used_bytes Disk bytes used by a VM or LXC container')
+    emit('# TYPE pegaprox_guest_disk_used_bytes gauge')
+    emit('# HELP pegaprox_guest_disk_total_bytes Configured disk size for a VM or LXC container')
+    emit('# TYPE pegaprox_guest_disk_total_bytes gauge')
+    emit('# HELP pegaprox_guest_disk_percent Disk usage percent per VM or LXC container')
+    emit('# TYPE pegaprox_guest_disk_percent gauge')
+    emit('# HELP pegaprox_guest_network_receive_bytes_total Cumulative network bytes received by a VM or LXC container')
+    emit('# TYPE pegaprox_guest_network_receive_bytes_total counter')
+    emit('# HELP pegaprox_guest_network_transmit_bytes_total Cumulative network bytes transmitted by a VM or LXC container')
+    emit('# TYPE pegaprox_guest_network_transmit_bytes_total counter')
+    emit('# HELP pegaprox_guest_disk_read_bytes_total Bytes a VM or LXC container read from its disks since it started')
+    emit('# TYPE pegaprox_guest_disk_read_bytes_total counter')
+    emit('# HELP pegaprox_guest_disk_write_bytes_total Bytes a VM or LXC container wrote to its disks since it started')
+    emit('# TYPE pegaprox_guest_disk_write_bytes_total counter')
+    emit('# HELP pegaprox_guest_uptime_seconds Uptime in seconds for a VM or LXC container')
+    emit('# TYPE pegaprox_guest_uptime_seconds gauge')
+    # Ceph (#540) — only emitted for clusters that actually run Ceph
+    emit('# HELP pegaprox_ceph_health_status Ceph cluster health (0=OK, 1=WARN, 2=ERR, 3=unknown)')
+    emit('# TYPE pegaprox_ceph_health_status gauge')
+    emit('# HELP pegaprox_ceph_osd_up Number of Ceph OSDs currently up')
+    emit('# TYPE pegaprox_ceph_osd_up gauge')
+    emit('# HELP pegaprox_ceph_osd_in Number of Ceph OSDs currently in')
+    emit('# TYPE pegaprox_ceph_osd_in gauge')
+
+    now = time.time()
+    fam = {name: [] for name, _t, _h in _ESTATE_FAMILIES}
+
+    # a scrape walks every cluster over the API; copy the dict so a cluster
+    # registered mid-scrape can't break the whole exposition
+    for cid, mgr in list(cluster_managers.items()):
+        cname = getattr(getattr(mgr, 'config', None), 'name', cid) or cid
+        base = {'cluster_id': cid, 'cluster': cname}
+        connected = 1 if getattr(mgr, 'is_connected', False) else 0
+        out.extend(_sample('pegaprox_cluster_connected', connected, base))
+        if not connected:
+            continue
+        ctype = getattr(mgr, 'cluster_type', 'proxmox')
+
+        # Node counts + per-node stats
+        try:
+            node_status = mgr.get_node_status() or {}
+            nodes_total = len(node_status)
+            nodes_online = 0
+            for name, info in node_status.items():
+                is_online = (info.get('status') == 'online') or (not info.get('offline', False))
+                if is_online:
+                    nodes_online += 1
+                nlabels = {**base, 'node': name}
+                out.extend(_sample('pegaprox_node_online', 1 if is_online else 0, nlabels))
+                out.extend(_sample('pegaprox_node_cpu_percent',
+                                   _round_num(info.get('cpu_percent', _num(info.get('cpu', 0)) * 100)),
+                                   nlabels))
+                out.extend(_sample('pegaprox_node_mem_percent',
+                                   _round_num(info.get('mem_percent', 0)), nlabels))
+                out.extend(_sample('pegaprox_node_uptime_seconds',
+                                   _num(info.get('uptime', 0)), nlabels))
+                apt_available = _node_apt_updates_available(cid, mgr, name) if is_online else 0
+                if apt_available is not None:
+                    out.extend(_sample('pegaprox_node_apt_updates_available', apt_available, nlabels))
+            out.extend(_sample('pegaprox_cluster_nodes_total', nodes_total, base))
+            out.extend(_sample('pegaprox_cluster_nodes_online', nodes_online, base))
+            # Quorum: >50% online
+            quorum = 1 if nodes_online * 2 > nodes_total else 0
+            out.extend(_sample('pegaprox_cluster_quorum_held', quorum, base))
+        except Exception as e:
+            logging.debug(f"[metrics] {cid} node stats failed: {e}")
+
+        # Ceph health (#540) — best-effort; get_ceph_health_summary returns None when
+        # the cluster has no Ceph, so no ceph_* series are emitted for those clusters.
+        # One SSH probe per cluster per scrape, consistent with the apt-updates metric.
+        # MK Sep 2026 (#625) - not from a PegaProx standby, like the metrics collector:
+        # ceph -s goes over SSH, the active reads the same nodes already, and a host key
+        # pinned here lands in the known_hosts file the next sync replaces. A standby
+        # scrape then has no ceph series, as for a cluster without Ceph.
+        try:
+            ceph = (mgr.get_ceph_health_summary()
+                    if ha.is_active() and hasattr(mgr, 'get_ceph_health_summary') else None)
+            if ceph:
+                _cmap = {'HEALTH_OK': 0, 'HEALTH_WARN': 1, 'HEALTH_ERR': 2}
+                out.extend(_sample('pegaprox_ceph_health_status', _cmap.get(ceph.get('status'), 3), base))
+                out.extend(_sample('pegaprox_ceph_osd_up', _num(ceph.get('osd_up', 0)), base))
+                out.extend(_sample('pegaprox_ceph_osd_in', _num(ceph.get('osd_in', 0)), base))
+        except Exception as e:
+            logging.debug(f"[metrics] {cid} ceph health failed: {e}")
+
+        if ctype in ('proxmox', 'xcpng'):
+            try:
+                srows = _storage_rows(cid, mgr, ctype)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} storage failed: {e}")
+                srows = None
+            _put(fam, 'pegaprox_cluster_source_up', 0 if srows is None else 1, {**base, 'source': 'storage'})
+            _put_storage(fam, base, srows or ())
+        last_backup = None
+        if ctype == 'proxmox':
+            try:
+                repl = _replication_state(cid, mgr, now)
+                if repl is not None:
+                    _put_replication(fam, base, repl, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} replication failed: {e}")
+                repl = None
+            _put(fam, 'pegaprox_cluster_source_up', 1 if repl is not None and not repl.get('failed') else 0,
+                 {**base, 'source': 'replication'})
+            try:
+                last_backup = _last_backups(cid, mgr, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} backup ages failed: {e}")
+            _put(fam, 'pegaprox_cluster_source_up', 0 if last_backup is None else 1,
+                 {**base, 'source': 'backups'})
+
+        # VM counts
+        try:
+            vms = []
+            if hasattr(mgr, 'get_vm_resources'):
+                vms = mgr.get_vm_resources() or []
+            elif hasattr(mgr, 'get_resources'):
+                vms = [r for r in (mgr.get_resources() or []) if r.get('type') in ('qemu', 'lxc')]
+            out.extend(_sample('pegaprox_cluster_vms_total', len(vms), base))
+            running = sum(1 for v in vms if v.get('status') == 'running')
+            out.extend(_sample('pegaprox_cluster_vms_running', running, base))
+
+            for v in vms:
+                vmid = v.get('vmid', '')
+                labels = {
+                    **base,
+                    'node': v.get('node', ''),
+                    'type': _resource_type_label(v.get('type')),
+                    'vmid': vmid,
+                    'name': v.get('name') or v.get('hostname') or str(vmid),
+                }
+                mem_used = _num(v.get('mem', 0))
+                mem_total = _num(v.get('maxmem', 0))
+                disk_used = _num(v.get('disk', 0))
+                disk_total = _num(v.get('maxdisk', 0))
+                out.extend(_sample('pegaprox_guest_running', 1 if v.get('status') == 'running' else 0, labels))
+                out.extend(_sample('pegaprox_guest_cpu_percent',
+                                   _round_num(v.get('cpu_percent', _num(v.get('cpu', 0)) * 100)),
+                                   labels))
+                out.extend(_sample('pegaprox_guest_mem_used_bytes', mem_used, labels))
+                out.extend(_sample('pegaprox_guest_mem_total_bytes', mem_total, labels))
+                out.extend(_sample('pegaprox_guest_mem_percent',
+                                   _round_num(v.get('mem_percent', _pct(mem_used, mem_total))),
+                                   labels))
+                out.extend(_sample('pegaprox_guest_disk_used_bytes', disk_used, labels))
+                out.extend(_sample('pegaprox_guest_disk_total_bytes', disk_total, labels))
+                out.extend(_sample('pegaprox_guest_disk_percent',
+                                   _round_num(v.get('disk_percent', _pct(disk_used, disk_total))),
+                                   labels))
+                out.extend(_sample('pegaprox_guest_network_receive_bytes_total', _num(v.get('netin', 0)), labels))
+                out.extend(_sample('pegaprox_guest_network_transmit_bytes_total', _num(v.get('netout', 0)), labels))
+                # /cluster/resources counts these since the guest started; a cluster type
+                # that does not report them gets no series rather than a zero
+                if 'diskread' in v:
+                    out.extend(_sample('pegaprox_guest_disk_read_bytes_total', _num(v.get('diskread')), labels))
+                if 'diskwrite' in v:
+                    out.extend(_sample('pegaprox_guest_disk_write_bytes_total', _num(v.get('diskwrite')), labels))
+                out.extend(_sample('pegaprox_guest_uptime_seconds', _num(v.get('uptime', 0)), labels))
+                if last_backup is not None and v.get('type') in ('qemu', 'lxc') and not v.get('template'):
+                    try:
+                        ts = last_backup.get(int(vmid), 0)
+                    except (TypeError, ValueError):
+                        continue
+                    _put(fam, 'pegaprox_guest_last_backup_timestamp_seconds', ts, labels)
+                    if ts:
+                        _put(fam, 'pegaprox_guest_last_backup_age_seconds', max(0, round(now - ts)), labels)
+        except Exception as e:
+            logging.debug(f"[metrics] {cid} vm list failed: {e}")
+
+    for name, mtype, help_text in _ESTATE_FAMILIES:
+        emit(f'# HELP {name} {help_text}')
+        emit(f'# TYPE {name} {mtype}')
+        out.extend(fam[name])
+
+    # ── PBS backup servers ──
+    if pbs_managers:
+        emit('# HELP pegaprox_pbs_connected 1 if PBS is reachable')
+        emit('# TYPE pegaprox_pbs_connected gauge')
+        for pid, pmgr in pbs_managers.items():
+            labels = {'pbs_id': pid, 'pbs': getattr(pmgr, 'name', '') or pid}
+            out.extend(_sample('pegaprox_pbs_connected',
+                               1 if getattr(pmgr, 'connected', False) else 0, labels))
+
+    # ── VMware/ESXi ──
+    if vmware_managers:
+        emit('# HELP pegaprox_esxi_connected 1 if ESXi/vCenter is reachable')
+        emit('# TYPE pegaprox_esxi_connected gauge')
+        for vid, vmgr in vmware_managers.items():
+            labels = {'esxi_id': vid, 'host': getattr(vmgr, 'host', '') or vid}
+            out.extend(_sample('pegaprox_esxi_connected',
+                               1 if getattr(vmgr, 'connected', False) else 0, labels))
+
+    body = '\n'.join(out) + '\n'
+    return Response(body, mimetype='text/plain; version=0.0.4; charset=utf-8')

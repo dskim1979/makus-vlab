@@ -1,0 +1,34 @@
+name: Tests
+
+# MAKUS vLAB - the engine's pytest suite (vLAB API, accelerators, the route permission
+# contract and the core) on every pull request and on pushes to main and feature branches.
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feat/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04   # Python 3.12, as in the Dockerfile base image
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install dependencies
+        # an isolated venv: the runner's system Python carries a partial `zope` namespace
+        # that shadows pip-installed zope.event (a gevent dependency)
+        run: |
+          python3 --version
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+      - name: vLAB tests
+        run: .venv/bin/python -m pytest tests/test_vlab_api.py tests/test_vlab_accel.py -q
+      - name: Full test suite
+        run: .venv/bin/python -m pytest tests/ -q

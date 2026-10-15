@@ -1,0 +1,2 @@
+# bash scripts stay LF on Windows checkouts too (core.autocrlf would add CR)
+scripts/upstream/*.sh text eol=lf

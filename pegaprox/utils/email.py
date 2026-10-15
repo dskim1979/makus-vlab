@@ -1,0 +1,194 @@
+# -*- coding: utf-8 -*-
+"""
+PegaProx Email Utilities - Layer 3
+SMTP email sending.
+"""
+
+import os
+import logging
+import socket
+import ssl
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime
+
+
+def get_email_logo_html(settings: dict = None) -> str:
+    """<img> tag for the app logo at the top of HTML emails, or '' if we can't
+    build a reachable URL for it.
+
+    Email clients need an absolute, publicly-reachable URL — they can't read
+    files off this server's local disk — so this only renders once a domain
+    is configured. Embedding the ~1MB bundled logo as base64 would bloat every
+    single alert email, so we link to it instead (same trade-off virtually
+    every SaaS product's email templates make).
+    """
+    try:
+        if settings is None:
+            from pegaprox.api.helpers import load_server_settings
+            settings = load_server_settings()
+        domain = (settings.get('domain') or '').strip()
+        if not domain:
+            return ''
+        port = settings.get('port', 5000)
+        base = f"https://{domain}" if port in (443, '443') else f"https://{domain}:{port}"
+        logo_path = settings.get('logo_url') or '/images/vlab-symbol-512.png'  # MAKUS vLAB 심볼 (메일은 PNG)
+        app_name = settings.get('app_name') or 'MAKUS vLAB'
+        import html as _html_lib
+        return (
+            f'<div style="text-align:center;margin-bottom:16px;">'
+            f'<img src="{_html_lib.escape(base + logo_path, quote=True)}" alt="{_html_lib.escape(app_name)}" '
+            f'style="height:36px;max-width:220px;object-fit:contain;" />'
+            f'</div>'
+        )
+    except Exception:
+        return ''
+
+def send_email(to_addresses: list, subject: str, body: str, html_body: str = None,
+               smtp_settings: dict = None) -> tuple:
+    """send email via smtp"""
+    # MK: spent way too long on this, every smtp server is different
+    if smtp_settings:
+        settings = smtp_settings
+    else:
+        from pegaprox.api.helpers import load_server_settings
+        settings = load_server_settings()
+    
+    if not smtp_settings and not settings.get('smtp_enabled'):
+        return False, "SMTP not enabled"
+    
+    smtp_host = settings.get('smtp_host', '')
+    smtp_port = int(settings.get('smtp_port', 587) or 587)
+    smtp_user = settings.get('smtp_user', '')
+    # NS: Feb 2026 - SECURITY: decrypt stored password (encrypted since 0.7.0)
+    # If smtp_settings dict was passed directly (e.g. SMTP test), password is already plaintext
+    raw_smtp_password = settings.get('smtp_password', '')
+    if smtp_settings:
+        # Caller provided settings directly (e.g. SMTP test) - password is plaintext
+        smtp_password = raw_smtp_password
+    else:
+        # Loaded from DB - needs decryption
+        from pegaprox.core.db import get_db
+        try:
+            smtp_password = get_db()._decrypt(raw_smtp_password) if raw_smtp_password else ''
+        except Exception:
+            # sec (audit): the fallback exists for genuinely legacy PLAINTEXT values, but it
+            # applied to any failure — so when a stored ciphertext could not be decrypted (a
+            # rotated or damaged key) the literal "aes256:..." string was sent to the mail relay
+            # as the password. Only fall back for a value that was never encrypted; a
+            # ciphertext we cannot read is an error, not a credential.
+            if str(raw_smtp_password or '').startswith('aes256:'):
+                logging.error("[MAIL] stored SMTP password could not be decrypted — refusing to "
+                              "send the stored value as a credential; re-enter it in settings")
+                return False, "SMTP password could not be decrypted (re-enter it in Settings)"
+            smtp_password = raw_smtp_password  # genuinely legacy unencrypted value
+    from_email = settings.get('smtp_from_email', '')
+    from_name = settings.get('smtp_from_name', '') or settings.get('app_name', '') or 'MAKUS vLAB'
+    use_tls = settings.get('smtp_tls', True)
+    use_ssl = settings.get('smtp_ssl', False)
+    
+    if not smtp_host:
+        return False, "SMTP host not configured"
+    if not from_email:
+        return False, "From email not configured"
+    
+    if isinstance(to_addresses, str):
+        to_addresses = [to_addresses]
+    
+    # print(f"sending to {to_addresses}")  # DEBUG - NS
+    logging.info(f"[SMTP] sending to {to_addresses} via {smtp_host}:{smtp_port}")
+    
+    try:
+        from email.utils import formatdate, make_msgid
+        
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = f"{from_name} <{from_email}>" if from_name else from_email
+        msg['To'] = ', '.join(to_addresses)
+        msg['Date'] = formatdate(localtime=True)
+        msg['Message-ID'] = make_msgid(domain=from_email.split('@')[-1] if '@' in from_email else 'pegaprox.local')
+        
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        if html_body:
+            msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+        
+        # Connect and send
+        if use_ssl:
+            logging.debug(f"[SMTP] Connecting with SSL to {smtp_host}:{smtp_port}")
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
+        else:
+            logging.debug(f"[SMTP] Connecting to {smtp_host}:{smtp_port}")
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+        
+        # Debug mode disabled for production (would log passwords!)
+        # server.set_debuglevel(1)
+        
+        # Identify ourselves to the server
+        server.ehlo()
+        
+        if not use_ssl and use_tls:
+            logging.debug("[SMTP] Starting TLS")
+            server.starttls()
+            server.ehlo()  # Re-identify after TLS
+        
+        # Authenticate if credentials provided
+        if smtp_user and smtp_password and smtp_password != '********':
+            logging.info(f"[SMTP] Authenticating as {smtp_user}")
+            server.login(smtp_user, smtp_password)
+        else:
+            logging.warning(f"[SMTP] No authentication! user={bool(smtp_user)}, password={bool(smtp_password and smtp_password != '********')}")
+        
+        # Send the email
+        refused = server.sendmail(from_email, to_addresses, msg.as_string())
+        server.quit()
+        
+        if refused:
+            logging.warning(f"[SMTP] Some recipients refused: {refused}")
+            return False, f"Some recipients refused: {list(refused.keys())}"
+        
+        logging.info(f"[SMTP] Email sent successfully to {to_addresses}: {subject}")
+        return True, None
+        
+    except smtplib.SMTPAuthenticationError as e:
+        error = f"Authentication failed: Check username/password"
+        logging.error(f"[SMTP] {error}: {e}")
+        return False, error
+    except smtplib.SMTPRecipientsRefused as e:
+        # Get detailed error
+        details = []
+        for addr, (code, msg) in e.recipients.items():
+            details.append(f"{addr}: {code} {msg.decode() if isinstance(msg, bytes) else msg}")
+        error = f"Recipients refused: {'; '.join(details)}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+    except smtplib.SMTPSenderRefused as e:
+        error = f"Sender refused ({from_email}): {e.smtp_error.decode() if isinstance(e.smtp_error, bytes) else e.smtp_error}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+    except smtplib.SMTPDataError as e:
+        error = f"Data error: {e.smtp_error.decode() if isinstance(e.smtp_error, bytes) else e.smtp_error}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+    except smtplib.SMTPConnectError as e:
+        error = f"Connection failed to {smtp_host}:{smtp_port}"
+        logging.error(f"[SMTP] {error}: {e}")
+        return False, error
+    except socket.timeout:
+        error = f"Connection timeout to {smtp_host}:{smtp_port}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+    except socket.gaierror as e:
+        error = f"DNS resolution failed for {smtp_host}"
+        logging.error(f"[SMTP] {error}: {e}")
+        return False, error
+    except ConnectionRefusedError:
+        error = f"Connection refused by {smtp_host}:{smtp_port}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+    except Exception as e:
+        error = f"Failed to send email: {str(e)}"
+        logging.error(f"[SMTP] {error}")
+        return False, error
+

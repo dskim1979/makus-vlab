@@ -1,0 +1,56 @@
+name: Dependency Audit
+
+# NS Sep 2026 — known-vulnerability scan for requirements.txt / requirements-dev.txt
+# via pip-audit (PyPA's own tool, queries the PyPI Advisory Database / OSV).
+#
+# Added specifically to close a gap flagged during 보안기능확인서(NIS) prep work:
+# 국가용 보안요구사항 9.2.1 (조건부 필수) requires the product to actively check
+# for and remove known vulnerabilities — this repo had test.yml (functional
+# correctness) but nothing that checked *known-CVE* status of what's actually
+# pinned. Runs on every PR/push (catch a newly-introduced vulnerable pin before
+# merge) AND on a weekly schedule (catch a CVE disclosed *after* a version was
+# already pinned and merged — the more common real-world case, since audit
+# databases update independently of this repo's commit history).
+#
+# Confirmed clean against the current requirements.txt/requirements-dev.txt
+# before adding this gate (0 known vulnerabilities either file, 2026-09-04) —
+# so this starts as a real fail-the-build gate, not a warn-only placeholder.
+
+on:
+  pull_request:
+    paths:
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - '.github/workflows/dependency-audit.yml'
+  push:
+    branches: [main, Testing]
+    paths:
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+  schedule:
+    - cron: '17 3 * * 1'  # every Monday 03:17 UTC — offset off the hour to avoid the GH Actions top-of-hour queueing spike
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install pip-audit
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install pip-audit
+      - name: Audit runtime dependencies (requirements.txt)
+        run: .venv/bin/pip-audit -r requirements.txt
+      - name: Audit dev/test dependencies (requirements-dev.txt)
+        # NS: dev-only deps never ship in the appliance, but a compromised dev
+        # toolchain is still a supply-chain risk worth catching in CI.
+        run: .venv/bin/pip-audit -r requirements-dev.txt

@@ -1,0 +1,28 @@
+# MAKUS vLAB engine, API only. The full install (console + HTTPS proxy) is in the
+# console repository's deploy/ folder; this file runs the engine by itself.
+#   docker build --build-arg WEB_UI=0 -t vlab-engine:dev .
+#   docker compose up -d
+
+services:
+  vlab-engine:
+    image: ${VLAB_ENGINE_IMAGE:-vlab-engine:dev}
+    build:
+      context: .
+      args:
+        WEB_UI: "0"
+    container_name: vlab-engine
+    ports:
+      - "5000:5000"   # API
+      - "5001:5001"   # VNC websocket (browser console)
+    volumes:
+      - vlab-config:/app/config
+      - vlab-logs:/app/logs
+    restart: unless-stopped
+    environment:
+      PEGAPROX_BEHIND_PROXY: "1"
+      # PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"
+      # PEGAPROX_ALLOWED_ORIGINS: "https://vlab.example.com"
+
+volumes:
+  vlab-config:
+  vlab-logs:
