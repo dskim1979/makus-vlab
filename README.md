@@ -2,7 +2,7 @@
   <img src="images/vlab-logo.svg" alt="MAKUS vLAB" height="56">
 </p>
 
-<h3 align="center">연구소·대학 실습실·FPGA 개발을 위한 가상 데스크톱(VDI) 플랫폼</h3>
+<h3 align="center">연구소·기업·교육 기관의 LAB과 FPGA 개발을 위한 가상 데스크톱(VDI) 플랫폼</h3>
 
 <p align="center">
   <img alt="Engine version" src="https://img.shields.io/badge/version-1.3.0-blue">
@@ -13,15 +13,23 @@
 
 ---
 
-**MAKUS vLAB** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·학생에게 데스크톱을 나눠 주고,
+**MAKUS vLAB** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·교육생·직원에게 데스크톱을 나눠 주고,
 GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 저장소는 vLAB 의 **엔진(API 서버)** 입니다.
-관리 콘솔과 사용자 포털은 별도 저장소 `makus-vlab-console`, 전용 클라이언트는 `makus-vlab-client` 입니다.
+관리 콘솔과 사용자 작업 공간은 [makus-vlab-console](https://github.com/dskim1979/makus-vlab-console), 전용 클라이언트는 `makus-vlab-client` 입니다.
+
+<p align="center"><img src="docs/images/portal.png" alt="사용자 작업 공간" width="900"></p>
+
+| 관리 콘솔 대시보드 | GPU·가속 카드 재고 |
+|---|---|
+| ![대시보드](docs/images/admin-dashboard.png) | ![GPU·가속 카드](docs/images/accel-inventory.png) |
+
+화면 전체는 [콘솔 저장소](https://github.com/dskim1979/makus-vlab-console#화면)에 있습니다.
 
 ## 주요 기능
 
 | 영역 | 내용 |
 |---|---|
-| 데스크톱 풀 | 전용·초기화·공유·교육용·빌드 팜 풀, 템플릿 일괄 복제(VMID·이름 자동), 사용자 할당과 VM 권한 연동 |
+| 데스크톱 풀 | 전용·초기화·공유·일정형·빌드 팜 풀, 템플릿 일괄 복제(VMID·이름 자동), 사용자 할당과 VM 권한 연동 |
 | 초기화 | 기준 스냅숏 자동 생성, 데스크톱·풀 단위 초기화(접속 중인 데스크톱은 건너뜀) |
 | 접속 | 브라우저 접속(noVNC), SPICE(`.vv`), 접속 기록, 사용자 전원 제어 |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU) |

@@ -94,7 +94,7 @@ def gpu(api, seed, monkeypatch):
 
 
 def _pool(admin, vmids=(300, 301), type_='dedicated'):
-    pool = admin.post('/api/vlab/admin/pools', json={'name': 'AI 연구실', 'type': type_, 'cluster_id': CID}).get_json()['pool']
+    pool = admin.post('/api/vlab/admin/pools', json={'name': 'AI 랩', 'type': type_, 'cluster_id': CID}).get_json()['pool']
     desks = [admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': v}).get_json()['desktop'] for v in vmids]
     return pool, desks
 
@@ -109,7 +109,7 @@ def test_accelerators_list_gpus_and_fpgas_and_who_uses_them(gpu):
     assert (a16['kind'], a16['vgpu_capable'], a16['iommu_group'], a16['mappings'], a16['used_by']) == (
         'gpu', True, 40, ['gpu-a16'], [])
     (w7900_user,) = devs[('pve1', '0000:81:00.0')]['used_by']
-    assert (w7900_user['vmid'], w7900_user['slot'], w7900_user['pool']) == (300, 'hostpci0', 'AI 연구실')
+    assert (w7900_user['vmid'], w7900_user['slot'], w7900_user['pool']) == (300, 'hostpci0', 'AI 랩')
     assert devs[('pve2', '0000:c1:00.0')]['kind'] == 'fpga'
     (m,) = r['mappings']
     assert [(u['vmid'], u['mdev']) for u in m['used_by']] == [(302, 'nvidia-746')]

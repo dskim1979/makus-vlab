@@ -35,7 +35,7 @@ def _acl_users(vmid):
 
 
 def _pool_with_desktop(admin, vmid=300):
-    r = admin.post('/api/vlab/admin/pools', json={'name': '실습실 A', 'type': 'reset', 'cluster_id': CID})
+    r = admin.post('/api/vlab/admin/pools', json={'name': '공용 랩 A', 'type': 'reset', 'cluster_id': CID})
     assert r.status_code == 201, r.get_json()
     pool = r.get_json()['pool']
     r = admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': vmid})
@@ -81,7 +81,7 @@ def test_assignment_shows_the_desktop_and_grants_the_vm_acl(env):
 
     mine = alice.get('/api/vlab/me/desktops').get_json()['desktops']
     assert [d['id'] for d in mine] == [desk['id']]
-    assert mine[0]['pool'] == '실습실 A'
+    assert mine[0]['pool'] == '공용 랩 A'
     assert mine[0]['state'] == 'ready'                     # guest is running
     assert mine[0]['spec'] == {'cpu': 4, 'memory_gb': 8}
     assert bob.get('/api/vlab/me/desktops').get_json()['desktops'] == []
@@ -289,7 +289,7 @@ def test_all_desktops_lists_every_pool(env):
     admin.put(f"/api/vlab/admin/desktops/{desk['id']}/assign", json={'username': 'alice'})
     desks = admin.get('/api/vlab/admin/desktops').get_json()['desktops']
     assert [(d['id'], d['pool'], d['pool_id'], d['assigned_user'], d['state']) for d in desks] == [
-        (desk['id'], '실습실 A', pool['id'], 'alice', 'ready')]
+        (desk['id'], '공용 랩 A', pool['id'], 'alice', 'ready')]
     assert desks[0]['usage'] == {'cpu_percent': 0, 'cpus': 4, 'mem': 0, 'maxmem': 8 * 1024 ** 3, 'uptime': 0}
 
 
@@ -449,7 +449,7 @@ def test_admin_reads_the_session_log(connectable):
     alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'spice'})
     rows = admin.get('/api/vlab/admin/sessions').get_json()['sessions']
     assert [(s['username'], s['desktop'], s['protocol'], s['pool']) for s in rows] == [
-        ('alice', 'lab-win11-01', 'spice', '실습실 A'), ('alice', 'lab-win11-01', 'vnc', '실습실 A')]
+        ('alice', 'lab-win11-01', 'spice', '공용 랩 A'), ('alice', 'lab-win11-01', 'vnc', '공용 랩 A')]
     assert admin.get('/api/vlab/admin/sessions?username=bob').get_json()['sessions'] == []
     assert len(admin.get('/api/vlab/admin/sessions?limit=1').get_json()['sessions']) == 1
     assert admin.get('/api/vlab/admin/sessions?limit=x').status_code == 400
@@ -486,7 +486,7 @@ def test_usage_report_counts_hours_peaks_and_utilization(env):
     assert abs(sum(d['hours'] for d in r['by_day']) - 4) < 0.05
     (p,) = r['by_pool']
     window_h = (datetime.fromisoformat(r['to']) - datetime.fromisoformat(r['from'])).total_seconds() / 3600
-    assert (p['name'], p['desktops'], p['sessions'], p['users']) == ('실습실 A', 1, 2, 2)
+    assert (p['name'], p['desktops'], p['sessions'], p['users']) == ('공용 랩 A', 1, 2, 2)
     assert abs(p['utilization'] - 4 / window_h) < 0.001
     assert [u['username'] for u in r['top_users']] == ['alice', 'bob']
     assert r['by_protocol'] == {'vnc': 1, 'spice': 1}
@@ -526,7 +526,7 @@ def cloning(api, seed):
     mgr.is_connected = True
     api.set_manager(CID, mgr)
     admin = api.as_user(seed.user('root', role='admin'))
-    pool = admin.post('/api/vlab/admin/pools', json={'name': '실습실 B', 'type': 'reset', 'cluster_id': CID}).get_json()['pool']
+    pool = admin.post('/api/vlab/admin/pools', json={'name': '공용 랩 B', 'type': 'reset', 'cluster_id': CID}).get_json()['pool']
     return api, admin, mgr, pool
 
 
@@ -621,7 +621,7 @@ def test_clone_input_is_checked(cloning):
     assert admin.post(url, json={'template_vmid': 999, 'count': 1, 'name_prefix': 'x'}).status_code == 404
     assert admin.post(url, json={'template_vmid': 900, 'count': 0, 'name_prefix': 'x'}).status_code == 400
     assert admin.post(url, json={'template_vmid': 900, 'count': 101, 'name_prefix': 'x'}).status_code == 400
-    assert admin.post(url, json={'template_vmid': 900, 'count': 1, 'name_prefix': '실습'}).status_code == 400
+    assert admin.post(url, json={'template_vmid': 900, 'count': 1, 'name_prefix': '공용'}).status_code == 400
     assert admin.post(url, json={'template_vmid': 'a', 'count': 1, 'name_prefix': 'x'}).status_code == 400
     assert not mgr.clone_vm.called
 
