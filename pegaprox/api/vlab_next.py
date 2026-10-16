@@ -46,6 +46,19 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET/POST /api/vlab/me/build-jobs, POST .../<id>/cancel     the caller's build jobs                vlab.desk
   GET/POST /api/vlab/admin/build-jobs, POST .../<id>/cancel  every build job                        vlab.pool.view / manage
   GET    /api/vlab/admin/reports/cards                ?days=&format=csv card loans per card       vlab.report.view
+
+  VM build (가상머신 > ISO · 이미지 관리, VM 만들기) - thin wrappers over the core routes; each needs
+  vlab.pool.view (reads) or vlab.pool.manage (changes) besides the core permission named:
+  GET    /api/vlab/admin/clusters/<id>/nodes/<node>/isos              ?storage=  the ISOs     storage.view
+  POST   .../nodes/<node>/storage/<storage>/upload                    multipart file, node   storage.upload
+  POST   .../nodes/<node>/storage/<storage>/download-url              {url, filename, checksum?}  storage.download
+  DELETE .../nodes/<node>/storage/<storage>/isos/<volid>              ?node=                 storage.delete
+  GET    .../nodes/<node>/tasks/<upid>                                download/upload/create progress  storage.view
+  GET    .../nodes/<node>/networks                                    bridges for a new NIC  node.view
+  GET    /api/vlab/admin/clusters/<id>/nextid                         the next free VMID     vm.create
+  POST   .../nodes/<node>/vms                                         a new VM from an ISO   vm.create
+  POST   /api/vlab/admin/clusters/<id>/vms/<vmid>/console             noVNC while installing vm.console
+  POST   /api/vlab/admin/clusters/<id>/vms/<vmid>/template            make it a template     vm.template
 """
 
 import base64
@@ -1723,3 +1736,357 @@ def card_report():
 def _csv(v):
     v = str(v)
     return '"' + v.replace('"', '""') + '"' if any(ch in v for ch in ',"\n') else v
+
+
+# --- VM build: the ISO library and new VMs (가상머신 > ISO · 이미지 관리, VM 만들기) -------
+#
+# The console speaks /api/vlab/* only (its README, 구조), and ISO upload, download from a
+# URL and creating a VM from an ISO were core routes. These wrappers stay thin: each checks
+# what the console may send, keeps it to ISOs and to the fields the wizard has, and hands
+# the request on to the core route that does the work - so the core's permissions, its
+# SSRF guard on URLs, the tenant quota and VMID range on a create, and its audit stay the
+# one place they are. What the core has no route for (a VM's console outside a pool, turning
+# a VM into a template, a task's progress) is a manager call here, gated like the core would.
+
+_NODE_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,62}')
+_STORE_RE = re.compile(r'[A-Za-z][A-Za-z0-9._-]{0,63}')
+_ISO_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,190}\.iso', re.I)
+_BRIDGE_RE = re.compile(r'[A-Za-z][A-Za-z0-9._-]{0,15}')
+_VM_NAME_RE = re.compile(r'[A-Za-z0-9]([A-Za-z0-9.-]{0,61}[A-Za-z0-9])?')
+_CHECKSUM_ALGOS = ('md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512')
+# the task kinds this page follows: an ISO download, an upload, a create, a template
+_BUILD_TASKS = ('download', 'imgcopy', 'qmcreate', 'qmtemplate')
+
+
+def _build_target(cluster_id, node=None, storage=None):
+    """The connected manager for the cluster, else the answer to give."""
+    if not core._can_reach(cluster_id):
+        return None, _bad('Cluster not found', 404)
+    if node is not None and not _NODE_RE.fullmatch(node):
+        return None, _bad('Invalid node')
+    if storage is not None and not _STORE_RE.fullmatch(storage):
+        return None, _bad('Invalid storage')
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return None, _bad('Cluster not connected', 503)
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, _bad('Only Proxmox clusters build VMs here')
+    return mgr, None
+
+
+def _iso_volid(storage, volid):
+    """A volid of an ISO on that storage, nothing else."""
+    prefix = f'{storage}:iso/'
+    return volid.startswith(prefix) and bool(_ISO_NAME_RE.fullmatch(volid[len(prefix):]))
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/isos', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'storage.view'])
+def build_isos(cluster_id, node):
+    """The ISOs a node sees (?storage= for one storage), newest first."""
+    storage = request.args.get('storage') or None
+    mgr, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    rows = mgr.get_iso_list(node, storage) or []
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or not isinstance(r.get('volid'), str):
+            continue
+        vol = r['volid']
+        out.append({'volid': vol, 'name': vol.split('/', 1)[-1], 'storage': r.get('storage') or vol.split(':', 1)[0],
+                    'size': core._num(r.get('size')), 'ctime': core._num(r.get('ctime'))})
+    out.sort(key=lambda x: (-x['ctime'], x['name']))
+    return jsonify({'isos': out})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/storage/<storage>/upload', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'storage.upload'])
+def build_upload_iso(cluster_id, node, storage):
+    """multipart: file (an .iso), node (the same as the path). The core streams it on to
+    the node; the request ends when the node has it."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    if request.form.get('node') != node:
+        return _bad('node: send the node of the path as a form field')
+    if request.form.get('content', 'iso') != 'iso':
+        return _bad('Only ISO images are uploaded here')
+    f = request.files.get('file')
+    if not f or not _ISO_NAME_RE.fullmatch(f.filename or ''):
+        return _bad('file: an .iso with letters, digits, dot, dash, underscore or plus in its name')
+    return core_vms.upload_to_datastore(cluster_id, storage)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/storage/<storage>/download-url', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'storage.download'])
+def build_download_iso(cluster_id, node, storage):
+    """{url, filename, content: 'iso', checksum?: 'sha256:<hex>'} - the node fetches the
+    URL itself; the answer carries the task (upid) to follow."""
+    from pegaprox.api import storage as core_storage
+    _, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    data = _body()
+    url = data.get('url')
+    if not isinstance(url, str) or not re.fullmatch(r'https?://\S{3,2000}', url):
+        return _bad('url: an http or https address')
+    if not isinstance(data.get('filename'), str) or not _ISO_NAME_RE.fullmatch(data['filename']):
+        return _bad('filename: an .iso with letters, digits, dot, dash, underscore or plus in its name')
+    if data.get('content', 'iso') != 'iso':
+        return _bad('Only ISO images are downloaded here')
+    checksum = data.get('checksum')
+    if checksum not in (None, ''):
+        algo, _, value = str(checksum).partition(':')
+        if algo not in _CHECKSUM_ALGOS or not re.fullmatch(r'[0-9a-fA-F]{32,128}', value):
+            return _bad(f"checksum: <algorithm>:<hex>, algorithm one of {', '.join(_CHECKSUM_ALGOS)}")
+    if set(data) - {'url', 'filename', 'content', 'checksum'}:
+        return _bad('Unknown field')
+    return core_storage.download_from_url(cluster_id, node, storage)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/storage/<storage>/isos/<path:volid>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage', 'storage.delete'])
+def build_delete_iso(cluster_id, node, storage, volid):
+    """Delete an ISO (?node= the node of the path); the core refuses while a VM still has it
+    in a drive."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    if not _iso_volid(storage, volid):
+        return _bad('Only ISO images of this storage are deleted here')
+    if request.args.get('node') != node:
+        return _bad('node: send the node of the path as ?node=')
+    return core_vms.delete_datastore_content(cluster_id, storage, volid)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'storage.view'])
+def build_task(cluster_id, node, upid):
+    """How far a download, upload, create or template task is: {type, running, ok,
+    exitstatus, percent, last}. Other kinds of task are not read here."""
+    mgr, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    parts = upid.split(':')
+    if len(parts) < 8 or parts[0] != 'UPID' or parts[1] != node or parts[5] not in _BUILD_TASKS:
+        return _bad('Not a task of this page', 404)
+    st = mgr.get_task_status(node, upid)
+    if not isinstance(st, dict):
+        return _bad('Task not found', 404)
+    running = st.get('status') == 'running'
+    out = {'type': parts[5], 'running': running, 'ok': (not running) and st.get('exitstatus') == 'OK',
+           'exitstatus': None if running else str(st.get('exitstatus') or ''), 'percent': None, 'last': ''}
+    log = mgr.get_task_log(node, upid, 50)
+    lines = [ln for ln in (log.splitlines() if isinstance(log, str) else []) if ln.strip()]
+    if lines:
+        out['last'] = lines[-1][:300]
+    for ln in reversed(lines):
+        m = re.search(r'(\d{1,3}(?:\.\d+)?)\s*%', ln)
+        if m:
+            out['percent'] = min(100.0, float(m.group(1)))
+            break
+    if out['ok']:
+        out['percent'] = 100.0
+    return jsonify(out)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/networks', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.view'])
+def build_networks(cluster_id, node):
+    """The bridges (and SDN VNets) a new VM's network card can go on."""
+    mgr, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    out = []
+    for n in mgr.get_network_list(node) or []:
+        if isinstance(n, dict) and isinstance(n.get('iface'), str):
+            out.append({'iface': n['iface'], 'type': n.get('type') or '', 'comments': str(n.get('comments') or '').strip(),
+                        'vlan_aware': str(n.get('bridge_vlan_aware') or n.get('vlanaware') or '') in ('1', 'True', 'true'),
+                        'cidr': str(n.get('cidr') or '')})
+    out.sort(key=lambda x: x['iface'])
+    return jsonify({'networks': out})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nextid', methods=['GET'])
+@require_auth(perms=['vlab.pool.manage', 'vm.create'])
+def build_nextid(cluster_id):
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    r = mgr.get_next_vmid()
+    if not isinstance(r, dict) or not r.get('success'):
+        return _bad('Could not read the next free VMID', 502)
+    return jsonify({'vmid': int(r['vmid'])})
+
+
+def _whole(lo, hi):
+    return lambda v: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _flag(v):
+    return isinstance(v, bool)
+
+
+def _iso_ref(v):
+    return isinstance(v, str) and _iso_volid(v.split(':', 1)[0], v)
+
+
+# what the wizard sends, and what each may hold. The core writes several into drive strings
+# (storage:size,..., bridge=..., <volid>,media=cdrom), so none may carry a comma or '='.
+_CREATE_FIELDS = {
+    'vmid': _whole(100, 999999999),
+    'name': lambda v: isinstance(v, str) and bool(_VM_NAME_RE.fullmatch(v)),
+    'ostype': lambda v: v in ('win11', 'win10', 'l26', 'other'),
+    'iso': _iso_ref,
+    'virtio_iso': _iso_ref,
+    'sockets': _whole(1, 4),
+    'cores': _whole(1, 128),
+    'cpu': lambda v: v in ('host', 'x86-64-v2-AES', 'x86-64-v3', 'kvm64'),
+    'memory': _whole(512, 4 * 1024 * 1024),
+    'storage': lambda v: isinstance(v, str) and bool(_STORE_RE.fullmatch(v)),
+    'disk_size': _whole(1, 65536),
+    'disk_type': lambda v: v in ('scsi', 'virtio', 'sata'),
+    'disk_discard': _flag,
+    'disk_ssd': _flag,
+    'disk_iothread': _flag,
+    'scsihw': lambda v: v in ('virtio-scsi-single', 'virtio-scsi-pci'),
+    'net_model': lambda v: v in ('virtio', 'e1000', 'e1000e', 'rtl8139'),
+    'net_bridge': lambda v: isinstance(v, str) and bool(_BRIDGE_RE.fullmatch(v)),
+    'net_tag': _whole(1, 4094),
+    'net_firewall': _flag,
+    'vga': lambda v: v in ('qxl', 'qxl2', 'std', 'virtio'),
+    'agent': _flag,
+    'bios': lambda v: v in ('seabios', 'ovmf'),
+    'machine': lambda v: v in ('q35', 'pc'),
+    'efi_storage': lambda v: isinstance(v, str) and bool(_STORE_RE.fullmatch(v)),
+    'efi_pre_enroll': _flag,
+    'tpm_storage': lambda v: isinstance(v, str) and bool(_STORE_RE.fullmatch(v)),
+    'tpm_version': lambda v: v == 'v2.0',
+    'onboot': _flag,
+}
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/vms', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'vm.create'])
+def build_create_vm(cluster_id, node):
+    """A new VM from an ISO: the fields of _CREATE_FIELDS (name, ostype, iso, storage,
+    disk_size and net_bridge required). Windows 11 needs UEFI with q35 and a TPM 2.0 state.
+    The core creates it; the answer is the core's {success, vmid, task}."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    data = _body()
+    unknown = sorted(set(data) - set(_CREATE_FIELDS))
+    if unknown:
+        return _bad(f"Unknown field: {', '.join(unknown)}")
+    for key in ('name', 'ostype', 'iso', 'storage', 'disk_size', 'net_bridge'):
+        if data.get(key) in (None, ''):
+            return _bad(f'{key} is required')
+    for key, ok in _CREATE_FIELDS.items():
+        if data.get(key) is not None and not ok(data[key]):
+            return _bad(f'Invalid {key}')
+    if data['ostype'] == 'win11' and not (data.get('bios') == 'ovmf' and data.get('machine') == 'q35'
+                                          and data.get('tpm_storage')):
+        return _bad('Windows 11 needs UEFI (bios ovmf, machine q35) and a TPM 2.0 state (tpm_storage)')
+    if data.get('vmid') is not None and data['vmid'] in core._vm_states(cluster_id):
+        return _bad(f"VMID {data['vmid']} is taken", 409)
+    return core_vms.create_vm_api(cluster_id, node)
+
+
+def _build_vm(cluster_id, vmid):
+    """The live guest for a VM-build call, else the answer to give."""
+    vm = core._vm_states(cluster_id).get(vmid)
+    if not vm:
+        return None, _bad(f'VM {vmid} not found on this cluster', 404)
+    if (vm.get('type') or 'qemu') != 'qemu':
+        return None, _bad('Only virtual machines (QEMU)')
+    if vm.get('template'):
+        return None, _bad('This VM is a template', 409)
+    return vm, None
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/vms/<int:vmid>/console', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'vm.console'])
+def build_console(cluster_id, vmid):
+    """noVNC to a VM being installed: {type: 'vnc', ws_path, password, node, name}. A
+    stopped VM is started first (409 STARTING, ask again in a moment); one still locked by
+    its create answers 409 BUSY."""
+    from urllib.parse import quote
+
+    from pegaprox.api.ha import standby_console_refusal
+    from pegaprox.utils.auth import request_credential, resolve_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.utils.realtime import create_ws_token
+
+    refused = standby_console_refusal()
+    if refused:
+        return refused
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    vm, err = _build_vm(cluster_id, vmid)
+    if err:
+        return err
+    user = resolve_authz_user(request.session)
+    if not user or not user_can_access_vm(user, cluster_id, vmid, 'vm.console', 'qemu'):
+        return _bad('Permission denied: vm.console', 403)
+    node = vm.get('node') or ''
+    if vm.get('status') != 'running':
+        if vm.get('lock'):
+            return jsonify({'error': f"The VM is locked ({vm.get('lock')}) - try again in a moment", 'code': 'BUSY'}), 409
+        if not user_can_access_vm(user, cluster_id, vmid, 'vm.start', 'qemu'):
+            return _bad('The VM is not running and you may not start it (vm.start)', 403)
+        r = mgr.vm_action(node, vmid, 'qemu', 'start')
+        if not isinstance(r, dict) or not r.get('success'):
+            msg = str(r.get('error') if isinstance(r, dict) else r)[:200]
+            return jsonify({'error': f'Start failed: {msg}', 'code': 'BUSY' if 'lock' in msg.lower() else 'START_FAILED'}), 409
+        log_audit(_user(), 'vm.start', f"VM build: start qemu/{vmid} for its console", get_client_ip())
+        return jsonify({'error': 'The VM is starting - connect again in a moment', 'code': 'STARTING'}), 409
+    result = mgr.get_vnc_ticket(node, vmid, 'qemu')
+    if not isinstance(result, dict) or not result.get('success'):
+        return _bad(str(result.get('error', 'Console failed') if isinstance(result, dict) else 'Console failed'), 502)
+    ws_token = create_ws_token(_user(), user.get('effective_role', user.get('role', 'viewer')), sid=request_credential()[0])
+    ticket, port = result.get('ticket') or '', result.get('port') or ''
+    ws_path = (f"/api/clusters/{quote(cluster_id, safe='')}/vms/{quote(str(node), safe='')}/"
+               f"qemu/{vmid}/vncwebsocket?token={quote(ws_token, safe='')}")
+    if ticket and port:
+        # as on a desktop's connect: hand vncproxy's ticket/port on (PVE 9.1)
+        ws_path += f"&pve_ticket={quote(str(ticket), safe='')}&pve_port={quote(str(port), safe='')}"
+    log_audit(_user(), 'vm.console', f"VM build: console to qemu/{vmid}", get_client_ip())
+    return jsonify({'type': 'vnc', 'ws_path': ws_path, 'password': ticket, 'node': node,
+                    'name': vm.get('name') or f'vm-{vmid}'})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/vms/<int:vmid>/template', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'vm.template'])
+def build_make_template(cluster_id, vmid):
+    """Turn a finished, shut down VM into a template (템플릿 관리 clones from it). Not for a
+    desktop of a pool or a golden image, which stay VMs."""
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    vm, err = _build_vm(cluster_id, vmid)
+    if err:
+        return err
+    if vm.get('status') != 'stopped':
+        return _bad('Shut the VM down first', 409)
+    if store.desktop_for_vm(cluster_id, vmid):
+        return _bad('This VM is a desktop of a pool', 409)
+    if catalog.golden_for_vm(cluster_id, vmid):
+        return _bad('This VM is a golden image - it stays a VM', 409)
+    node = vm.get('node') or ''
+    if not _NODE_RE.fullmatch(node):
+        return _bad('The VM has no node', 502)
+    resp = mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{vmid}/template")
+    if resp is None or getattr(resp, 'status_code', 0) != 200:
+        return _bad(f"Proxmox refused: {str(getattr(resp, 'text', '') or '')[:200]}", 502)
+    try:
+        upid = (resp.json() or {}).get('data')
+    except Exception:
+        upid = None
+    log_audit(_user(), 'vm.template', f"VM build: qemu/{vmid} ({vm.get('name') or ''}) made a template", get_client_ip())
+    return jsonify({'success': True, 'vmid': vmid, 'task': upid})

@@ -500,3 +500,117 @@ def test_card_usage_report(env):
     assert rep['days'] == 7 and row['card'] == 'Alveo U250 #1' and row['loans'] == 2 and row['users'] == ['alice', 'bob'] and row['active'] == 1
     csv = admin.get('/api/vlab/admin/reports/cards?days=7&format=csv')
     assert csv.status_code == 200 and 'Alveo U250 #1' in csv.get_data(as_text=True)
+
+
+# --- VM build: ISO library and new VMs ----------------------------------------------------
+
+def test_iso_library_lists_and_hands_uploads_downloads_deletes_to_the_core(env, monkeypatch):
+    import io
+
+    import pegaprox.api.storage as core_storage
+    import pegaprox.api.vms as core_vms
+    from flask import jsonify
+    _, mgr, admin, alice, _, _ = env
+    mgr.get_iso_list.return_value = [
+        {'volid': 'local:iso/old.iso', 'size': 10, 'ctime': 1},
+        {'volid': 'local:iso/Win11_24H2.iso', 'size': 6 * 1024 ** 3, 'ctime': 9, 'storage': 'local'}]
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/pve1/isos?storage=local')
+    assert r.status_code == 200, r.get_json()
+    assert [i['name'] for i in r.get_json()['isos']] == ['Win11_24H2.iso', 'old.iso']
+    assert mgr.get_iso_list.call_args[0] == ('pve1', 'local')
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/bad_node/isos').status_code == 400
+    assert alice.get(f'/api/vlab/admin/clusters/{CID}/nodes/pve1/isos').status_code == 403
+
+    seen = {}
+
+    def fake_upload(c, s):
+        seen['up'] = (c, s)
+        return jsonify({'success': True, 'upid': 'UPID:x'})
+    monkeypatch.setattr(core_vms, 'upload_to_datastore', fake_upload)
+    base = f'/api/vlab/admin/clusters/{CID}/nodes/pve1/storage/local'
+
+    def up(name, **form):
+        return admin.post(f'{base}/upload', data={'file': (io.BytesIO(b'iso'), name), **form},
+                          content_type='multipart/form-data')
+    assert up('x.iso').status_code == 400                         # the node goes in the form too
+    assert up('x.qcow2', node='pve1').status_code == 400          # ISOs only
+    assert up('x.iso', node='pve1', content='vztmpl').status_code == 400
+    assert up('a b.iso', node='pve1').status_code == 400
+    r = up('virtio-win-0.1.262.iso', node='pve1')
+    assert r.status_code == 200 and seen['up'] == (CID, 'local')
+
+    monkeypatch.setattr(core_storage, 'download_from_url',
+                        lambda c, n, s: jsonify({'success': True, 'upid': f'UPID:{n}:1:2:3:download:local:root@pam:'}))
+
+    def dl(**b):
+        return admin.post(f'{base}/download-url', json=b)
+    assert dl(url='ftp://x/y.iso', filename='y.iso').status_code == 400
+    assert dl(url='https://x/y.iso', filename='y.img').status_code == 400
+    assert dl(url='https://x/y.iso', filename='y.iso', checksum='crc:abc').status_code == 400
+    assert dl(url='https://x/y.iso', filename='y.iso', extra=1).status_code == 400
+    r = dl(url='https://mirror.example.com/ubuntu.iso', filename='ubuntu.iso', content='iso', checksum='sha256:' + 'a' * 64)
+    assert r.status_code == 200 and r.get_json()['upid'].startswith('UPID:pve1')
+
+    mgr.get_task_status.return_value = {'status': 'running'}
+    mgr.get_task_log.return_value = 'downloading\n42.5% of 5.8 GiB\n'
+    t = admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/pve1/tasks/UPID:pve1:1:2:3:download:local:root@pam:').get_json()
+    assert t['running'] and t['percent'] == 42.5 and t['type'] == 'download'
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/pve1/tasks/UPID:pve1:1:2:3:vzdump:100:root@pam:').status_code == 404
+
+    monkeypatch.setattr(core_vms, 'delete_datastore_content', lambda c, s, v: jsonify({'success': True, 'volid': v}))
+    assert admin.delete(f'{base}/isos/local:images/vm-1.qcow2?node=pve1').status_code == 400
+    assert admin.delete(f'{base}/isos/other:iso/x.iso?node=pve1').status_code == 400
+    r = admin.delete(f'{base}/isos/local:iso/old.iso?node=pve1')
+    assert r.status_code == 200 and r.get_json()['volid'] == 'local:iso/old.iso'
+
+
+def test_create_vm_checks_the_wizard_fields_then_the_core_creates(env):
+    _, mgr, admin, alice, _, _ = env
+    mgr.get_network_list.return_value = [{'iface': 'vmbr1', 'type': 'bridge', 'bridge_vlan_aware': 1},
+                                         {'iface': 'vmbr0', 'type': 'bridge'}]
+    nets = admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/pve1/networks').get_json()['networks']
+    assert [n['iface'] for n in nets] == ['vmbr0', 'vmbr1'] and nets[1]['vlan_aware']
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/nextid').get_json() == {'vmid': 1000}
+
+    mgr.create_vm.return_value = {'success': True, 'vmid': 1000, 'task': 'UPID:pve1:1:2:3:qmcreate:1000:root@pam:'}
+    body = {'vmid': 1000, 'name': 'win11-gold', 'ostype': 'win11', 'iso': 'local:iso/Win11_24H2.iso',
+            'virtio_iso': 'local:iso/virtio-win.iso', 'cores': 4, 'memory': 8192, 'cpu': 'host',
+            'storage': 'local-lvm', 'disk_size': 64, 'disk_type': 'scsi', 'scsihw': 'virtio-scsi-single',
+            'net_bridge': 'vmbr0', 'net_model': 'virtio', 'vga': 'qxl', 'agent': True}
+    url = f'/api/vlab/admin/clusters/{CID}/nodes/pve1/vms'
+    assert admin.post(url, json=body).status_code == 400                        # Windows 11 without UEFI/TPM
+    win11 = {**body, 'bios': 'ovmf', 'machine': 'q35', 'efi_storage': 'local-lvm', 'efi_pre_enroll': True,
+             'tpm_storage': 'local-lvm', 'tpm_version': 'v2.0'}
+    assert admin.post(url, json={**win11, 'storage': 'local-lvm,cache=unsafe'}).status_code == 400
+    assert admin.post(url, json={**win11, 'net_bridge': 'vmbr0,tag=5'}).status_code == 400
+    assert admin.post(url, json={**win11, 'iso': 'local:images/x.qcow2'}).status_code == 400
+    assert admin.post(url, json={**win11, 'hookscript': 'local:snippets/x'}).status_code == 400
+    assert admin.post(url, json={**win11, 'vmid': 300}).status_code == 409       # taken
+    assert alice.post(url, json=win11).status_code == 403
+    r = admin.post(url, json=win11)
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()['vmid'] == 1000
+    sent = mgr.create_vm.call_args[0]
+    assert sent[0] == 'pve1' and sent[1]['tpm_storage'] == 'local-lvm' and sent[1]['vga'] == 'qxl'
+
+
+def test_build_console_starts_the_vm_then_opens_and_template_needs_it_off(env, monkeypatch):
+    import pegaprox.utils.rbac as rbac
+    _, mgr, admin, _, _, _ = env
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    mgr.vm_action.return_value = {'success': True}
+    r = admin.post(f'/api/vlab/admin/clusters/{CID}/vms/500/console')
+    assert r.status_code == 409 and r.get_json()['code'] == 'STARTING'
+    assert mgr.vm_action.call_args[0] == ('pve1', 500, 'qemu', 'start')
+    mgr.get_vnc_ticket.return_value = {'success': True, 'ticket': 't', 'port': '5900'}
+    r = admin.post(f'/api/vlab/admin/clusters/{CID}/vms/300/console')
+    assert r.status_code == 200 and '/qemu/300/vncwebsocket?token=' in r.get_json()['ws_path']
+    assert admin.post(f'/api/vlab/admin/clusters/{CID}/vms/900/console').status_code == 409   # a template
+
+    assert admin.post(f'/api/vlab/admin/clusters/{CID}/vms/300/template').status_code == 409  # running
+    mgr.host, mgr.api_port = 'pve', 8006
+    mgr._api_post.return_value.status_code = 200
+    mgr._api_post.return_value.json.return_value = {'data': 'UPID:pve1:1:2:3:qmtemplate:500:root@pam:'}
+    r = admin.post(f'/api/vlab/admin/clusters/{CID}/vms/500/template')
+    assert r.status_code == 200, r.get_json()
+    assert mgr._api_post.call_args[0][0].endswith('/nodes/pve1/qemu/500/template')
