@@ -833,6 +833,13 @@ def auth_login():
                 login_attempts_by_user[target_username]['locked_until'] = current_time + lockout_time
                 logging.warning(f"User '{target_username}' locked out after {len(recent_user)} failed attempts")
                 locked = True
+                # MOAVI Desk: the account's owner and the administrators hear (only a real account)
+                if target_username in (load_users() or {}):
+                    try:
+                        from pegaprox.api.vlab_notices import account_locked
+                        account_locked(target_username, max(1, int(lockout_time // 60)), client_ip)
+                    except Exception as e:
+                        logging.warning(f"[VLAB] lockout notice for {target_username}: {e}")
         
         return locked
     

@@ -581,8 +581,14 @@ def _end_admin_session(s):
         hung = hang_up_tagged(s['username'], desktop_ws_tag(desk))
     if desk:
         _after_session(desk, by=_user())
+    record_only = (s.get('protocol') or '') in UNREACHED_PROTOCOLS
+    try:
+        from pegaprox.api.vlab_notices import session_ended
+        session_ended(s, desk, _user(), record_only)
+    except Exception as e:
+        logging.warning(f'[VLAB] session end notice: {e}')
     return {'id': s['id'], 'username': s['username'], 'protocol': s.get('protocol') or '',
-            'hung_up': hung, 'record_only': (s.get('protocol') or '') in UNREACHED_PROTOCOLS}
+            'hung_up': hung, 'record_only': record_only}
 
 
 @bp.route('/api/vlab/admin/sessions/<session_id>/end', methods=['POST'])

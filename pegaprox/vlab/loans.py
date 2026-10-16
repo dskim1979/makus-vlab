@@ -85,6 +85,11 @@ def _loop():
             if ha.is_active():
                 from pegaprox.api.vlab_ops_notices import ops_tick
                 ops_tick()
+                # the people of a LAB booking, before it starts
+                from pegaprox.vlab import features
+                if features.enabled('lab'):
+                    from pegaprox.api.vlab_notices import booking_reminders
+                    booking_reminders()
         except Exception as e:
             logging.error(f'[VLAB] operations notices: {e}')
         time.sleep(INTERVAL)

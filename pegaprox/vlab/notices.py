@@ -29,7 +29,9 @@ KINDS = {
     'loan': ('카드·보드 대여 만료 알림과 자동 반납', 'Card / board loan reminders and automatic returns'),
     'ide': ('웹 IDE 종료 (유휴·관리자)', 'Web IDE closed (idle / by an administrator)'),
     'work': ('작업 보호 (정리 미룸·쓰이지 않는 카드)', 'Work protection (deferred clean-ups, idle cards)'),
-    'desktop': ('데스크톱 배정·회수', 'Desktop assigned / taken back'),
+    'desktop': ('데스크톱 배정·회수·교체·이동·접속 끊김', 'Desktop assigned, taken back, replaced, moved or disconnected'),
+    'booking': ('LAB 예약 시작 전 알림', 'LAB booking about to start'),
+    'storage': ('내 폴더(NAS) 용량 90%·100%', 'My NAS folders at 90% / 100%'),
     'request': ('신청 결과 (가입·대여·반출·예약)', 'Answers to my requests (sign-up, loans, exports, bookings)'),
 }
 KEEP_DAYS = 120
@@ -165,6 +167,14 @@ def webhook(channels, event, title, text, severity='info', **data):
 
 
 # --- the pure rules --------------------------------------------------------------------------
+
+def storage_level(kb, quota_gb):
+    """'full' at or past the folder's quota, 'warn' at or past 90 %, else None (no quota: None)."""
+    if not quota_gb or quota_gb <= 0 or kb is None:
+        return None
+    pct = 100.0 * kb / (quota_gb * 1024 * 1024)
+    return 'full' if pct >= 100 else ('warn' if pct >= 90 else None)
+
 
 def quota_level(hours, limit, warn_pct):
     """'full' at or past the monthly GPU-hours, 'warn' at or past warn_pct of them, else None."""

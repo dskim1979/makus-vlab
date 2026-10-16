@@ -462,6 +462,126 @@ def account_security(username, what, by):
     tell(username, 'account', title, text, f'account_{what}', 'warning' if what in ('password', '2fa') else 'info', always=True)
 
 
+# --- LAB bookings, shared storage, desktops replaced / moved / disconnected, locked accounts ----
+
+def _booking_people(r):
+    """The requester, the participants named one by one and the members of the departments named."""
+    from pegaprox.vlab import catalog
+    people = [r['requester']]
+    deps = set()
+    for p in r.get('participants') or []:
+        if p.get('subject_type') == 'user':
+            people.append(p['subject_id'])
+        elif p.get('subject_type') == 'department':
+            deps.add(p['subject_id'])
+    if deps:
+        people += [u for u, d in catalog.user_departments().items() if d in deps]
+    return list(dict.fromkeys(x for x in people if x))[:300]
+
+
+def booking_reminders(at=None):
+    """Approved LAB bookings that start within remind_min (reservation settings > 알림): each
+    person in it hears once. Returns how many bookings were told."""
+    from datetime import datetime, timedelta
+    from pegaprox.vlab import reservations as rsv
+    from pegaprox.vlab import store
+    g = rsv.get_settings(rsv.GLOBAL_KEY)
+    mins = int(g.get('remind_min') or 0)
+    if mins <= 0:
+        return 0
+    at = at or datetime.now()
+    t0, t1 = rsv.fmt(at), rsv.fmt(at + timedelta(minutes=mins))
+    told = 0
+    for r in rsv.between(t0, t1, statuses=['approved']):
+        if not (t0 <= r['start_at'] <= t1):
+            continue
+        if not notices.once(f"booking:{r['id']}:{r['start_at']}"):
+            continue
+        lab = store.get_lab(r['lab_id']) if r.get('lab_id') else None
+        where = (lab or {}).get('name') or (store.get_pool(r['pool_id']) or {}).get('name') or 'LAB'
+        when = f"{r['start_at'].replace('T', ' ')} ~ {r['end_at'][11:]}"
+        title = f"곧 시작하는 예약: {where} {r['start_at'][11:]}"
+        text = (f"{where} 예약이 곧 시작합니다.\n일시: {when}\n목적: {r.get('purpose') or '-'}\n"
+                "시작 시간에 포털 > 예약의 [데스크톱 열기]로 들어가거나, 실습실 PC 키오스크에서 로그인하세요.")
+        for u in _booking_people(r):
+            tell(u, 'booking', title, text, 'lab_booking_soon', reservation_id=r['id'])
+        told += 1
+    return told
+
+
+def storage_usage(pool, username, usage):
+    """After a storage check measured `username`'s folders ({template: KB}): 90 % and 100 % of a
+    folder's quota are told once a month each."""
+    from datetime import datetime
+    from pegaprox.vlab import nas
+    if not username or not usage:
+        return
+    cfg = nas.get(pool['id']) or {}
+    names = {'home': '홈', 'project': '프로젝트', 'scratch': '스크래치'}
+    month = datetime.now().strftime('%Y-%m')
+    for key, kb in usage.items():
+        quota = ((cfg.get('folders') or {}).get(key) or {}).get('quota_gb') or 0
+        level = notices.storage_level(kb, quota)
+        if not level or not notices.once(f"storage:{username}:{pool['id']}:{key}:{month}:{level}"):
+            continue
+        used = kb / 1024 / 1024
+        name = names.get(key, key)
+        if level == 'full':
+            title = f"내 {name} 폴더가 가득 찼습니다 ({used:.1f} / {quota} GB)"
+            text = (f"{pool['name']} 의 {name} 폴더가 할당량 {quota} GB 를 다 썼습니다 ({used:.1f} GB). "
+                    "새 파일을 저장하지 못할 수 있습니다. 필요 없는 파일을 지우거나 관리자에게 늘려 달라고 요청하세요.")
+        else:
+            title = f"내 {name} 폴더 90% 사용 ({used:.1f} / {quota} GB)"
+            text = (f"{pool['name']} 의 {name} 폴더가 할당량 {quota} GB 의 90% 를 넘었습니다 ({used:.1f} GB). "
+                    "필요 없는 파일을 정리해 주세요." + (" 스크래치는 보관 기간이 지나면 지워집니다." if key == 'scratch' else ''))
+        tell(username, 'storage', title, text, f'storage_{level}', 'warning', pool=pool['name'], folder=key, used_gb=round(used, 1), quota_gb=quota)
+
+
+def desktop_replaced(user, name, image, version):
+    tell(user, 'desktop', f"데스크톱 새 버전으로 교체: {name}",
+         f"데스크톱 {name} 가 골든 이미지 {image} 의 새 버전({version})으로 바뀌었습니다. 같은 이름으로 그대로 접속하면 됩니다. "
+         "예전 데스크톱 안에만 저장한 파일은 옮겨지지 않습니다 (공유 저장소의 홈 · 프로젝트 폴더는 그대로입니다).",
+         'desktop_replaced', desktop=name, version=version)
+
+
+def desktops_moving(cluster_id, node, by):
+    """A node goes into maintenance with its guests moved off: the users of its running desktops hear."""
+    from pegaprox.vlab import store
+    try:
+        live = core._vm_states(cluster_id)
+    except Exception:
+        return 0
+    n = 0
+    for d in store.list_desktops():
+        if d['cluster_id'] != cluster_id or not d.get('assigned_user'):
+            continue
+        st = live.get(int(d['vmid'])) or {}
+        if st.get('node') != node or st.get('status') != 'running':
+            continue
+        tell(d['assigned_user'], 'desktop', f"서버 점검으로 데스크톱 이동: {d['name']}",
+             f"서버({node}) 점검 때문에 데스크톱 {d['name']} 를 다른 서버로 옮깁니다(관리자: {by}). 옮기는 동안 화면이 잠깐 멈추거나 "
+             "접속이 끊길 수 있으니 작업을 저장해 두세요. 끊기면 잠시 뒤 다시 접속하면 됩니다.", 'desktop_moving', desktop=d['name'], node=node)
+        n += 1
+    return n
+
+
+def session_ended(session, desk, by, record_only=False):
+    name = (desk or {}).get('name') or '데스크톱'
+    tell(session['username'], 'desktop', f"관리자가 접속을 끊었습니다: {name}",
+         f"관리자({by})가 {name} 접속을 끊었습니다." + (" 열려 있는 화면은 닫아 주세요." if record_only else '')
+         + " 저장하지 않은 작업이 있었다면 다시 접속해 확인하세요. 이유는 관리자에게 문의하세요.",
+         'session_ended', desktop=name)
+
+
+def account_locked(username, minutes, ip):
+    """Too many wrong passwords: the user (always) and the administrators hear."""
+    tell(username, 'account', '로그인 실패가 많아 계정이 잠시 잠겼습니다',
+         f"{username} 계정에 비밀번호가 여러 번 틀려 {minutes}분 동안 로그인을 막았습니다 (접속한 곳: {ip or '-'}). "
+         "본인이 아니라면 비밀번호를 바꾸고 관리자에게 알려 주세요.", 'account_locked', 'warning', always=True)
+    admins(f"계정 잠김: {username}", f"{username} 계정이 로그인 실패로 {minutes}분 동안 잠겼습니다 (접속한 곳: {ip or '-'}).",
+           {'kind': 'account_locked', 'user': username, 'ip': ip or '', 'severity': 'warning'})
+
+
 # --- the minute loop ----------------------------------------------------------------------------
 
 def notice_tick():

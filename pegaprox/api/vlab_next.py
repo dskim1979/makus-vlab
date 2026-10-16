@@ -1806,6 +1806,9 @@ def rollout_golden(gid):
             dr = mgr.delete_vm(live.get(int(old['vmid']), {}).get('node') or old['node'], int(old['vmid']), old['vm_type'], purge=True)
             deleted = isinstance(dr, dict) and bool(dr.get('success'))
         replaced.append({'name': old['name'], 'old_vmid': old['vmid'], 'new_vmid': vmid, 'user': user, 'old_deleted': deleted})
+        if user:
+            from pegaprox.api.vlab_notices import desktop_replaced
+            desktop_replaced(user, old['name'], img['name'], img['current_version'])
     log_audit(_user(), 'vlab.golden.rollout', f"pool '{pool['name']}' -> {img['current_version']}: {len(replaced)} replaced, "
               f"{len(skipped)} in use" + (f", stopped at {failure['name']}" if failure else ''), get_client_ip())
     return jsonify({'replaced': replaced, 'skipped': skipped, 'failed': failure}), (200 if not failure else (207 if replaced else 502))
@@ -3648,7 +3651,15 @@ def node_maintenance_set(cluster_id, node):
         return _bad('Unknown field')
     if any(not isinstance(v, bool) for v in data.values()) or 'enable' not in data:
         return _bad('enable, skip_evacuation, migrate_templates, relax_anti_affinity: true or false')
-    return core_vms.set_maintenance_mode(cluster_id, node)
+    out = core_vms.set_maintenance_mode(cluster_id, node)
+    code = out[1] if isinstance(out, tuple) and len(out) > 1 else getattr(out, 'status_code', 200)
+    if data['enable'] and not data.get('skip_evacuation') and isinstance(code, int) and code < 300:
+        try:
+            from pegaprox.api.vlab_notices import desktops_moving
+            desktops_moving(cluster_id, node, _user())
+        except Exception as e:
+            logging.warning(f'[VLAB] maintenance notices: {e}')
+    return out
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/action', methods=['POST'])
@@ -4035,6 +4046,12 @@ def _storage_failed(pool, desk, username, code, detail):
 
 def _storage_record(desk, pool, username, ok, code, detail, path, changed, os_kind, **extra):
     nas.record(desk['id'], username, pool['id'], ok, code, detail, path, changed, os_kind, **extra)
+    if extra.get('usage'):
+        from pegaprox.api.vlab_notices import storage_usage
+        try:
+            storage_usage(pool, username, extra['usage'])
+        except Exception as e:
+            logging.warning(f'[VLAB] storage notices: {e}')
     return _storage_view(nas.last(desk['id'], username), pool)
 
 

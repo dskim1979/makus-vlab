@@ -47,7 +47,8 @@ DEFAULTS = {
     'after': 'reset',
     'banner': False,          # an approved booking also shows as a notice while it runs
 }
-GLOBAL_DEFAULTS = {'mail': True, 'channels': []}   # mail the requester; webhook channel ids
+GLOBAL_DEFAULTS = {'mail': True, 'channels': [], 'remind_min': 30}   # mail the requester; webhook channel ids;
+                                                                  # remind the people N minutes before (0: no)
 
 _SCHEMA = (
     '''CREATE TABLE IF NOT EXISTS vlab_reservations (

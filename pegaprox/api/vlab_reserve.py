@@ -562,6 +562,11 @@ def put_reservation_settings(key):
             if not isinstance(data['channels'], list) or len(data['channels']) > 50:
                 return _bad('channels: a list of channel ids')
             cur['channels'] = [str(c) for c in data['channels']]
+        if 'remind_min' in data:
+            v = data['remind_min']
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 1440:
+                return _bad('remind_min: minutes from 0 (no reminder) to 1440')
+            cur['remind_min'] = v
         out = rsv.save_settings(key, cur)
     else:
         if key != rsv.POOL_KEY and not store.get_lab(key):
@@ -606,7 +611,8 @@ def _notify(rows, event, by, reason=''):
                              g['channels'])
         except Exception as e:
             logging.warning(f'[VLAB] reservation webhook: {e}')
-    if event != 'requested' and g.get('mail', True):
+    from pegaprox.vlab import notices
+    if event != 'requested' and g.get('mail', True) and notices.wants(r['requester'], 'request'):
         try:
             from pegaprox.utils.auth import load_users
             from pegaprox.utils.email import send_email
