@@ -242,6 +242,11 @@ def set_state(desktop_id, state):
     db().execute('UPDATE vlab_desktops SET state = ? WHERE id = ?', (state, desktop_id))
 
 
+def set_node(desktop_id, node):
+    """where the desktop's VM lives after a migration"""
+    db().execute('UPDATE vlab_desktops SET node = ? WHERE id = ?', (node, desktop_id))
+
+
 def set_base_snap(desktop_id, snap):
     db().execute('UPDATE vlab_desktops SET base_snap = ? WHERE id = ?', (snap or '', desktop_id))
 

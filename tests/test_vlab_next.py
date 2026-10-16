@@ -868,3 +868,148 @@ def test_notices_have_a_start_an_audience_and_a_kind(env):
     listed = admin.get('/api/vlab/admin/banners').get_json()['banners']
     assert later['id'] not in {b['id'] for b in listed} and len(listed) == 2
     assert admin.delete(f"/api/vlab/admin/banners/{later['id']}").status_code == 404
+
+
+# --- 가상머신 > 데스크톱(VM) 관리 ----------------------------------------------------------
+
+RAW = {'name': 'lab-win11-01', 'cores': 4, 'sockets': 1, 'memory': 8192, 'ostype': 'win11',
+       'scsi0': 'ceph-vm:vm-300-disk-0,iothread=1,size=64G', 'ide2': 'none,media=cdrom',
+       'net0': 'virtio=BC:24:11:00:00:01,bridge=vmbr0,firewall=1,tag=20'}
+
+
+def _vm_env(env, raw=None):
+    api, mgr, admin, alice, bob, viewer = env
+    mgr.get_vm_config.return_value = {'success': True, 'config': {'raw': dict(raw or RAW)}}
+    mgr.get_network_list.return_value = [{'iface': 'vmbr0'}, {'iface': 'vmbr1'}]
+    mgr.get_storage_list.return_value = [{'storage': 'ceph-vm', 'content': 'images,rootdir', 'active': 1, 'shared': 1, 'avail': 10},
+                                         {'storage': 'local', 'content': 'iso,vztmpl', 'active': 1}]
+    mgr.get_node_status.return_value = {'pve1': {'status': 'online'}, 'pve2': {'status': 'online'}, 'pve3': {'offline': True}}
+    for m in ('resize_vm_disk', 'add_disk', 'update_network', 'delete_snapshot', 'rollback_snapshot', 'delete_vm'):
+        getattr(mgr, m).return_value = {'success': True}
+    mgr.migrate_vm_manual.return_value = {'success': True, 'data': 'UPID:pve1:0001:0002:0003:qmigrate:300:root@pam:'}
+    pool = store.create_pool('실습 VM', 'dedicated', CID)
+    desk = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    return api, mgr, admin, alice, viewer, desk
+
+
+def test_desktop_vm_settings_and_changes(env):
+    _, mgr, admin, alice, viewer, desk = _vm_env(env)
+    base = f"/api/vlab/admin/desktops/{desk['id']}"
+    assert alice.get(f'{base}/vm').status_code == 403
+    r = admin.get(f'{base}/vm')
+    assert r.status_code == 200, r.get_json()
+    vm = r.get_json()['vm']
+    assert (vm['cores'], vm['memory_mb'], vm['node'], vm['status']) == (4, 8192, 'pve1', 'running')
+    assert vm['disks'] == [{'key': 'scsi0', 'storage': 'ceph-vm', 'volume': 'ceph-vm:vm-300-disk-0', 'size_gb': 64.0}]
+    assert vm['networks'] == [{'key': 'net0', 'model': 'virtio', 'mac': 'BC:24:11:00:00:01', 'bridge': 'vmbr0', 'tag': 20, 'firewall': True}]
+    assert vm['bridges'] == ['vmbr0', 'vmbr1'] and [s['storage'] for s in vm['storages']] == ['ceph-vm']
+    assert [(t['node'], t['online']) for t in vm['targets']] == [('pve2', True), ('pve3', False)]
+    assert vm['passthrough'] == []
+
+    assert viewer.put(f'{base}/vm/hardware', json={'cores': 8}).status_code == 403
+    assert admin.put(f'{base}/vm/hardware', json={'cores': 0}).status_code == 400
+    assert admin.put(f'{base}/vm/hardware', json={}).status_code == 400
+    r = admin.put(f'{base}/vm/hardware', json={'cores': 8, 'memory_mb': 16384})
+    assert r.status_code == 200 and r.get_json()['needs_restart'] is True        # 300 is running
+    assert mgr.update_vm_config.call_args[0][3] == {'cores': 8, 'memory': 16384}
+
+    assert admin.post(f'{base}/vm/disks/efi0/resize', json={'grow_gb': 10}).status_code == 400
+    assert admin.post(f'{base}/vm/disks/scsi0/resize', json={'grow_gb': 10}).status_code == 200
+    assert mgr.resize_vm_disk.call_args[0][3:] == ('scsi0', '+10G')
+    assert admin.post(f'{base}/vm/disks', json={'storage': 'ceph-vm,size=1', 'size_gb': 10}).status_code == 400
+    r = admin.post(f'{base}/vm/disks', json={'storage': 'ceph-vm', 'size_gb': 20})
+    assert r.status_code == 200 and r.get_json()['disk'] == 'scsi1'
+
+    assert admin.put(f'{base}/vm/networks/net0', json={'bridge': 'vmbr1', 'tag': 5000}).status_code == 400
+    r = admin.put(f'{base}/vm/networks/net0', json={'bridge': 'vmbr1', 'tag': None})
+    assert r.status_code == 200 and r.get_json()['needs_restart'] is True
+    cfg = mgr.update_network.call_args[0][4]
+    assert cfg == {'bridge': 'vmbr1', 'tag': None, 'firewall': True, 'macaddr': 'BC:24:11:00:00:01', 'model': 'virtio'}
+    assert admin.put(f'{base}/vm/networks/net7', json={'bridge': 'vmbr1'}).status_code == 404
+
+
+def test_desktop_snapshots(env):
+    _, mgr, admin, _, viewer, desk = _vm_env(env)
+    store.set_base_snap(desk['id'], 'vlab-base')
+    base = f"/api/vlab/admin/desktops/{desk['id']}/snapshots"
+    got = admin.get(base).get_json()
+    assert [s['name'] for s in got['snapshots']] == ['gold-20261001-090000', 'vlab-base']
+    assert [s['base'] for s in got['snapshots']] == [False, True] and got['running'] is True
+    assert viewer.post(base, json={'name': 'before-update'}).status_code == 403
+    assert admin.post(base, json={'name': '../x'}).status_code == 400
+    assert admin.post(base, json={'name': 'vlab-base'}).status_code == 400
+    r = admin.post(base, json={'name': 'before-update', 'description': '패치 전', 'vmstate': True})
+    assert r.status_code == 201, r.get_json()
+    assert mgr.create_snapshot.call_args[0][3:] == ('before-update', '패치 전', True)
+    assert admin.post(f'{base}/before-update/rollback').status_code == 200
+    assert mgr.rollback_snapshot.call_args[0][3] == 'before-update'
+    assert admin.delete(f'{base}/vlab-base').status_code == 200
+    assert store.get_desktop(desk['id'])['base_snap'] == ''
+
+
+def test_desktop_migrate_refuses_passthrough_and_follows_the_task(env):
+    _, mgr, admin, _, _, desk = _vm_env(env, dict(RAW, hostpci0='mapping=a16,mdev=nvidia-660', usb1='spice'))
+    base = f"/api/vlab/admin/desktops/{desk['id']}"
+    r = admin.post(f'{base}/migrate', json={'target': 'pve2'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'PASSTHROUGH'
+    assert [d['key'] for d in r.get_json()['devices']] == ['hostpci0']             # SPICE USB redirection is fine
+    assert not mgr.migrate_vm_manual.called
+
+    mgr.get_vm_config.return_value = {'success': True, 'config': {'raw': dict(RAW)}}
+    assert admin.post(f'{base}/migrate', json={'target': 'pve1'}).status_code == 400
+    r = admin.post(f'{base}/migrate', json={'target': 'pve2'})
+    assert r.status_code == 200, r.get_json()
+    a = r.get_json()
+    assert (a['from'], a['to'], a['online']) == ('pve1', 'pve2', True)
+    assert store.get_desktop(desk['id'])['node'] == 'pve2'
+    mgr.get_task_status.return_value = {'status': 'stopped', 'exitstatus': 'OK'}
+    assert admin.get(f"{base}/task?upid={a['task']}").get_json() == {'status': 'stopped', 'exitstatus': 'OK'}
+    assert mgr.get_task_status.call_args[0][0] == 'pve1'
+    assert admin.get(f'{base}/task?upid=UPID:pve1:0:0:0:qmigrate:999:root@pam:').status_code == 400
+
+
+def test_desktop_template_and_delete_leave_the_pool(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    from pegaprox.core.db import get_db
+    _, mgr, admin, _, _, desk = _vm_env(env)
+    acl = []
+    monkeypatch.setattr(core, '_acl_set', lambda c, vmid, u, grant: acl.append((vmid, u, grant)) or True)
+    store.set_assignment(desk['id'], 'alice')
+    base = f"/api/vlab/admin/desktops/{desk['id']}"
+    assert admin.post(f'{base}/template').status_code == 409                          # running
+
+    other = store.add_desktop(store.get_pool(desk['pool_id']), 'pve2', 301, 'lab-win11-02')
+    store.set_assignment(other['id'], 'alice')
+    mgr._api_post.return_value = type('R', (), {'status_code': 200, 'text': ''})()
+    r = admin.post(f"/api/vlab/admin/desktops/{other['id']}/template")
+    assert r.status_code == 200, r.get_json()
+    assert mgr._api_post.call_args[0][0].endswith('/nodes/pve2/qemu/301/template')
+    assert store.get_desktop(other['id']) is None and acl == [(301, 'alice', False)]
+
+    assert admin.delete(f'{base}/vm', json={'confirm_name': 'lab-win11'}).status_code == 400
+    store.start_session('alice', desk, 'vnc', '127.0.0.1')
+    r = admin.delete(f'{base}/vm', json={'confirm_name': 'lab-win11-01'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'IN_USE'
+    get_db().save_vm_acl(CID, '300', {'users': ['alice'], 'permissions': [], 'inherit_role': True})
+    r = admin.delete(f'{base}/vm', json={'confirm_name': 'lab-win11-01', 'force': True})
+    assert r.status_code == 200, r.get_json()
+    assert mgr.delete_vm.call_args[0][:3] == ('pve1', 300, 'qemu') and mgr.delete_vm.call_args[1] == {'purge': True}
+    assert store.get_desktop(desk['id']) is None
+    assert '300' not in (get_db().get_all_vm_acls().get(CID) or {})
+
+
+def test_admin_console_is_audited(env, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    _, mgr, admin, alice, _, desk = _vm_env(env)
+    seen = []
+    monkeypatch.setattr(nxt, 'log_audit', lambda user, action, details, *a, **k: seen.append((user, action, details)))
+    mgr.get_vnc_ticket.return_value = {'success': True, 'ticket': 'PVEVNC:t', 'port': '5901'}
+    store.set_assignment(desk['id'], 'alice')
+    base = f"/api/vlab/admin/desktops/{desk['id']}/console"
+    assert alice.post(base).status_code == 403
+    r = admin.post(base)
+    assert r.status_code == 200, r.get_json()
+    a = r.get_json()
+    assert a['ws_path'].startswith(f'/api/clusters/{CID}/vms/pve1/qemu/300/vncwebsocket?token=') and a['password'] == 'PVEVNC:t'
+    assert not store.open_session_desktops()                                          # support is no session
+    assert [(u, act) for u, act, _ in seen] == [('root', 'vlab.desktop.admin_console')] and 'user alice' in seen[0][2]

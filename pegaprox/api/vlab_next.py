@@ -75,6 +75,19 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   /api/vlab/admin/banners                      {text, severity?, starts_at?, expires_at?, audience: all|admins}  admin.settings
   PUT    /api/vlab/admin/banners/<id>                 change it (fields left out stay)        admin.settings
   DELETE /api/vlab/admin/banners/<id>                 remove it                               admin.settings
+
+  가상머신 > 데스크톱(VM) 관리 (thin wrappers over pegaprox/api/vms.py, see the block at the end):
+  GET    /api/vlab/admin/desktops/<id>/vm                the VM config, bridges, storages, nodes to move to  vlab.pool.view
+  PUT    /api/vlab/admin/desktops/<id>/vm/hardware       {cores?, sockets?, memory_mb?}       vlab.pool.manage
+  POST   /api/vlab/admin/desktops/<id>/vm/disks          {storage, size_gb} a new disk        vlab.pool.manage
+  POST   /api/vlab/admin/desktops/<id>/vm/disks/<disk>/resize   {grow_gb}                   vlab.pool.manage
+  PUT    /api/vlab/admin/desktops/<id>/vm/networks/<net> {bridge, tag|null}                   vlab.pool.manage
+  DELETE /api/vlab/admin/desktops/<id>/vm                {confirm_name, force?} VM deleted, out of the pool  vlab.pool.manage
+  GET/POST /api/vlab/admin/desktops/<id>/snapshots, POST .../<name>/rollback, DELETE .../<name>  vlab.pool.view / manage
+  POST   /api/vlab/admin/desktops/<id>/migrate           {target, online?} not with PCI/USB passthrough  vlab.pool.manage
+  GET    /api/vlab/admin/desktops/<id>/task              ?upid= how its task is going         vlab.pool.view
+  POST   /api/vlab/admin/desktops/<id>/template          shut down VM -> template, out of the pool  vlab.pool.manage
+  POST   /api/vlab/admin/desktops/<id>/console           noVNC for support, audited           vlab.pool.manage
 """
 
 import base64
@@ -2564,3 +2577,533 @@ def delete_notice(banner_id):
     log_audit(_user(), 'settings.banner_deleted', f"Notice {banner_id} deleted: {bn._preview(gone['text'])}",
               get_client_ip())
     return jsonify({'success': True})
+
+
+# --- 가상머신 > 데스크톱(VM) 관리: settings, snapshots, migration, template, delete, console -----
+#
+# Thin wrappers over the core VM routes (pegaprox/api/vms.py: config, disks, networks,
+# snapshots, migrate, DELETE, vnc). They are here, under /api/vlab/admin/desktops/<id>/...,
+# because the console only speaks /api/vlab/* (README of makus-vlab-console, 구조), and a pool
+# desktop is more than its VM: deleting it or making it a template takes it out of the pool
+# store (vlab_desktops) and off the VM ACL, a migration moves the node the store keeps, and the
+# desktop's base snapshot is what a reset goes back to. (The VM-build routes above make a
+# template of a VM that is no desktop; this one does it for a desktop and takes it out.) Every one of these is a request an
+# administrator makes and waits for - no background step, so nothing here asks ha.confirm_step;
+# the calls go through the manager's guarded exits like the core routes do.
+
+_VM_NAME_OK = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$')
+_DISK_KEY = re.compile(r'^(?:scsi|virtio|sata|ide)\d{1,2}$|^(?:rootfs|mp\d{1,3})$')
+_NET_KEY = re.compile(r'^net\d{1,2}$')
+_UPID = re.compile(r'^UPID:([A-Za-z0-9-]{1,63}):[^/?#%\s]{1,400}$')
+_PASSTHROUGH = re.compile(r'^(?:hostpci\d+|usb\d+)$')
+
+
+def _desk_vm(desktop_id):
+    """(desk, mgr, live vm, node) or an error answer as the 5th item."""
+    desk = store.get_desktop(desktop_id)
+    if not desk or not core._can_reach(desk['cluster_id']):
+        return None, None, None, None, _bad('Desktop not found', 404)
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return desk, None, None, None, _bad('Cluster not connected', 503)
+    vm = core._vm_states(desk['cluster_id']).get(int(desk['vmid']))
+    if vm is None:
+        return desk, mgr, None, None, _bad("The desktop's VM is not on the cluster any more", 404)
+    return desk, mgr, vm, vm.get('node') or desk['node'], None
+
+
+def _failed(r, what):
+    if isinstance(r, dict) and r.get('success'):
+        return None
+    err = r.get('error') if isinstance(r, dict) else None
+    return _bad(str(err or f'{what} failed')[:300], 502)
+
+
+def _raw_config(mgr, node, desk):
+    r = mgr.get_vm_config(node, int(desk['vmid']), desk['vm_type'])
+    if not isinstance(r, dict) or not r.get('success'):
+        return None
+    cfg = r.get('config') or {}
+    return cfg.get('raw') if isinstance(cfg.get('raw'), dict) else {}
+
+
+def _passthrough(raw):
+    """The devices that tie the VM to its node: PCI (GPU, vGPU) and host USB. A USB slot
+    that only redirects over SPICE does not."""
+    out = []
+    for k, v in sorted((raw or {}).items()):
+        if _PASSTHROUGH.match(k) and not (k.startswith('usb') and str(v).startswith('spice')):
+            out.append({'key': k, 'value': str(v)[:120]})
+    return out
+
+
+def _size_gb(size):
+    m = re.match(r'^\s*([0-9.]+)\s*([KMGT]?)', str(size or ''), re.I)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    return round(n * {'': 1 / 1024 ** 3, 'K': 1 / 1024 ** 2, 'M': 1 / 1024, 'G': 1, 'T': 1024}[m.group(2).upper()], 1)
+
+
+def _vm_view(desk, vm, node, raw):
+    disks, nets = [], []
+    for k, v in sorted(raw.items()):
+        v = str(v)
+        if _DISK_KEY.match(k):
+            if 'media=cdrom' in v:
+                continue
+            opts = dict(p.split('=', 1) for p in v.split(',')[1:] if '=' in p)
+            vol = v.split(',')[0]
+            disks.append({'key': k, 'storage': vol.split(':')[0] if ':' in vol else '', 'volume': vol,
+                          'size_gb': _size_gb(opts.get('size'))})
+        elif _NET_KEY.match(k):
+            parts = v.split(',')
+            opts = dict(p.split('=', 1) for p in parts if '=' in p)
+            model = parts[0].split('=')[0] if parts else ''
+            mac = parts[0].split('=', 1)[1] if parts and '=' in parts[0] else opts.get('hwaddr', '')
+            nets.append({'key': k, 'model': opts.get('name', model) if desk['vm_type'] == 'lxc' else model,
+                         'mac': mac, 'bridge': opts.get('bridge', ''), 'tag': int(opts['tag']) if str(opts.get('tag', '')).isdigit() else None,
+                         'firewall': opts.get('firewall') == '1'})
+    return {
+        'vmid': int(desk['vmid']), 'type': desk['vm_type'], 'node': node, 'name': raw.get('name') or raw.get('hostname') or desk['name'],
+        'status': vm.get('status') or 'unknown', 'lock': raw.get('lock') or vm.get('lock') or '',
+        'cores': int(raw.get('cores') or 1), 'sockets': int(raw.get('sockets') or 1), 'memory_mb': int(raw.get('memory') or 512),
+        'cpu': str(raw.get('cpu') or ''), 'ostype': str(raw.get('ostype') or ''),
+        'disks': disks, 'networks': nets, 'passthrough': _passthrough(raw),
+    }
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def desktop_vm(desktop_id):
+    """The desktop's VM as configured, with what the settings forms choose from: the node's
+    bridges and disk storages, and the online nodes it could move to."""
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    raw = _raw_config(mgr, node, desk)
+    if raw is None:
+        return _bad('Could not read the VM config', 502)
+    view = _vm_view(desk, vm, node, raw)
+    bridges = []
+    try:
+        for n in mgr.get_network_list(node) or []:
+            name = n.get('iface') or n.get('name') if isinstance(n, dict) else None
+            if name and name not in bridges:
+                bridges.append(str(name))
+    except Exception as e:
+        logging.debug(f'[VLAB] bridges of {node}: {e}')
+    storages = []
+    try:
+        for s in mgr.get_storage_list(node) or []:
+            if isinstance(s, dict) and 'images' in str(s.get('content', '')).split(',') and s.get('active', 1):
+                storages.append({'storage': s.get('storage'), 'type': s.get('type', ''),
+                                 'avail': int(s.get('avail') or 0), 'shared': bool(s.get('shared'))})
+    except Exception as e:
+        logging.debug(f'[VLAB] storages of {node}: {e}')
+    targets = []
+    try:
+        status = mgr.get_node_status() or {}
+        for name, s in sorted(status.items() if isinstance(status, dict) else []):
+            if name != node and isinstance(s, dict):
+                targets.append({'node': name, 'online': not s.get('offline') and s.get('status') == 'online',
+                                'maintenance': bool(s.get('maintenance_mode'))})
+    except Exception as e:
+        logging.debug(f'[VLAB] nodes of {desk["cluster_id"]}: {e}')
+    view.update({'desktop_id': desk['id'], 'pool_id': desk['pool_id'], 'base_snap': desk.get('base_snap') or '',
+                 'bridges': bridges, 'storages': storages, 'targets': targets})
+    return jsonify({'vm': view})
+
+
+def _vm_change(desk, vm, what):
+    """Running VMs take a CPU/memory/NIC change on the next start: say so."""
+    log_audit(_user(), 'vlab.desktop.vm', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': {what}", get_client_ip())
+    return jsonify({'success': True, 'needs_restart': vm.get('status') == 'running'})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/hardware', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_vm_hardware(desktop_id):
+    """{cores?, sockets?, memory_mb?} - vCPUs and memory."""
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = _body()
+    upd = {}
+    try:
+        if data.get('cores') not in (None, ''):
+            upd['cores'] = _int(data, 'cores', 1, 256)
+        if data.get('sockets') not in (None, '') and desk['vm_type'] == 'qemu':
+            upd['sockets'] = _int(data, 'sockets', 1, 8)
+        if data.get('memory_mb') not in (None, ''):
+            upd['memory'] = _int(data, 'memory_mb', 256, 4 * 1024 * 1024)
+    except ValueError as e:
+        return _bad(str(e))
+    if not upd:
+        return _bad('Nothing to change')
+    e = _failed(mgr.update_vm_config(node, int(desk['vmid']), desk['vm_type'], upd), 'config update')
+    if e:
+        return e
+    return _vm_change(desk, vm, ', '.join(f'{k}={v}' for k, v in upd.items()))
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/disks/<disk>/resize', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_vm_disk_grow(desktop_id, disk):
+    """{grow_gb} - a disk only grows (PVE cannot shrink one)."""
+    if not _DISK_KEY.match(disk):
+        return _bad('Unknown disk')
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    try:
+        grow = _int(_body(), 'grow_gb', 1, 16384)
+    except ValueError as e:
+        return _bad(str(e))
+    e = _failed(mgr.resize_vm_disk(node, int(desk['vmid']), desk['vm_type'], disk, f'+{grow}G'), 'resize')
+    if e:
+        return e
+    log_audit(_user(), 'vlab.desktop.vm', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': {disk} +{grow}G", get_client_ip())
+    return jsonify({'success': True, 'needs_restart': False})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/disks', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_vm_disk_add(desktop_id):
+    """{storage, size_gb} - a new SCSI disk in the next free slot (QEMU)."""
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    if desk['vm_type'] != 'qemu':
+        return _bad('Disks are added to QEMU VMs only')
+    data = _body()
+    storage = str(data.get('storage') or '').strip()
+    if not _STORE_RE.fullmatch(storage):
+        return _bad('storage is required')
+    try:
+        size = _int(data, 'size_gb', 1, 16384)
+    except ValueError as e:
+        return _bad(str(e))
+    raw = _raw_config(mgr, node, desk)
+    if raw is None:
+        return _bad('Could not read the VM config', 502)
+    slot = next((f'scsi{i}' for i in range(31) if f'scsi{i}' not in raw), None)
+    if not slot:
+        return _bad('No free SCSI slot', 409)
+    e = _failed(mgr.add_disk(node, int(desk['vmid']), 'qemu', {'storage': storage, 'size': str(size), 'disk_id': slot}), 'add disk')
+    if e:
+        return e
+    log_audit(_user(), 'vlab.desktop.vm', f"qemu/{desk['vmid']} '{desk['name']}': {slot} {size}G on {storage}", get_client_ip())
+    return jsonify({'success': True, 'disk': slot, 'needs_restart': False})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/networks/<net>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_vm_network(desktop_id, net):
+    """{bridge, tag|null} - the NIC keeps its model, MAC and firewall flag."""
+    if not _NET_KEY.match(net):
+        return _bad('Unknown network device')
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = _body()
+    bridge = str(data.get('bridge') or '').strip()
+    if not _BRIDGE_RE.fullmatch(bridge):
+        return _bad('bridge is required')
+    tag = None
+    if data.get('tag') not in (None, ''):
+        try:
+            tag = _int(data, 'tag', 1, 4094)
+        except ValueError as e:
+            return _bad(str(e))
+    raw = _raw_config(mgr, node, desk)
+    if raw is None:
+        return _bad('Could not read the VM config', 502)
+    cur = next((n for n in _vm_view(desk, vm, node, raw)['networks'] if n['key'] == net), None)
+    if not cur:
+        return _bad('Unknown network device', 404)
+    cfg = {'bridge': bridge, 'tag': tag, 'firewall': cur['firewall'], 'macaddr': cur['mac']}
+    if desk['vm_type'] == 'qemu':
+        cfg['model'] = cur['model'] or 'virtio'
+    else:
+        cfg['name'] = cur['model'] or 'eth0'
+    e = _failed(mgr.update_network(node, int(desk['vmid']), desk['vm_type'], net, cfg), 'network update')
+    if e:
+        return e
+    return _vm_change(desk, vm, f"{net} bridge={bridge} vlan={tag or '-'}")
+
+
+# snapshots
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def desktop_snapshots(desktop_id):
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    out = []
+    for s in mgr.get_snapshots(node, int(desk['vmid']), desk['vm_type']) or []:
+        if not isinstance(s, dict) or s.get('name') in (None, 'current'):
+            continue
+        out.append({'name': s['name'], 'description': str(s.get('description') or ''), 'time': s.get('snaptime'),
+                    'vmstate': bool(s.get('vmstate')), 'parent': s.get('parent') or '',
+                    'base': s['name'] == (desk.get('base_snap') or '')})
+    out.sort(key=lambda s: s['time'] or 0, reverse=True)
+    return jsonify({'snapshots': out, 'running': vm.get('status') == 'running'})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_snapshot_take(desktop_id):
+    """{name, description?, vmstate?} - vmstate keeps the RAM of a running VM too."""
+    from pegaprox.utils.sanitization import validate_snapshot_name
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = _body()
+    name = str(data.get('name') or '').strip()
+    if not _VM_NAME_OK.match(name) or not name[0].isalpha() or not validate_snapshot_name(name) or name == 'current':
+        return _bad('name: letters, digits, "-", "_" and ".", starting with a letter (at most 40)')
+    if name == core.BASE_SNAP:
+        return _bad(f"'{core.BASE_SNAP}' is the base snapshot - take it from the pool's desktop list")
+    try:
+        description = _text(data, 'description', 200)
+    except ValueError as e:
+        return _bad(str(e))
+    vmstate = bool(data.get('vmstate')) and desk['vm_type'] == 'qemu' and vm.get('status') == 'running'
+    e = _failed(mgr.create_snapshot(node, int(desk['vmid']), desk['vm_type'], name, description, vmstate), 'snapshot')
+    if e:
+        return e
+    log_audit(_user(), 'vlab.desktop.snapshot', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': took '{name}'"
+              + (' with RAM' if vmstate else ''), get_client_ip())
+    return jsonify({'success': True, 'name': name}), 201
+
+
+def _snap_name(name):
+    from pegaprox.utils.sanitization import validate_snapshot_name
+    return name if name != 'current' and validate_snapshot_name(name) else None
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots/<name>/rollback', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_snapshot_rollback(desktop_id, name):
+    """Back to the snapshot: what was done since is gone. Refused while someone is connected
+    unless {force}."""
+    if not _snap_name(name):
+        return _bad('Invalid snapshot name')
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    if not bool(_body().get('force')) and desk['id'] in store.open_session_desktops():
+        return jsonify({'error': 'Someone is connected to this desktop', 'code': 'IN_USE'}), 409
+    e = _failed(mgr.rollback_snapshot(node, int(desk['vmid']), desk['vm_type'], name), 'rollback')
+    if e:
+        return e
+    log_audit(_user(), 'vlab.desktop.snapshot', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': back to '{name}'", get_client_ip())
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots/<name>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_snapshot_delete(desktop_id, name):
+    """The base snapshot is what a reset goes back to: deleting it also clears it on the
+    desktop (the pool's list then offers to take a new one)."""
+    if not _snap_name(name):
+        return _bad('Invalid snapshot name')
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    e = _failed(mgr.delete_snapshot(node, int(desk['vmid']), desk['vm_type'], name), 'delete snapshot')
+    if e:
+        return e
+    if name == (desk.get('base_snap') or ''):
+        store.set_base_snap(desk['id'], '')
+    log_audit(_user(), 'vlab.desktop.snapshot', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': deleted '{name}'", get_client_ip())
+    return jsonify({'success': True})
+
+
+# migration
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/migrate', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_migrate(desktop_id):
+    """{target, online?} - to another node of the cluster. A VM with a PCI (GPU, vGPU) or host
+    USB device stays where its device is: refused with the devices (code PASSTHROUGH)."""
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = _body()
+    target = str(data.get('target') or '').strip()
+    if not _NODE_RE.fullmatch(target):
+        return _bad('target is required')
+    if target == node:
+        return _bad('The VM is already on that node')
+    if vm.get('lock'):
+        return _bad(f"The VM is busy ({vm['lock']}) - try again shortly", 409)
+    raw = _raw_config(mgr, node, desk)
+    if raw is None:
+        return _bad('Could not read the VM config', 502)
+    held = _passthrough(raw)
+    if held:
+        return jsonify({'error': 'The VM uses devices of its node: ' + ', '.join(h['key'] for h in held),
+                        'code': 'PASSTHROUGH', 'devices': held}), 409
+    online = bool(data.get('online', True)) and vm.get('status') == 'running'
+    r = mgr.migrate_vm_manual(node, int(desk['vmid']), desk['vm_type'], target, online,
+                              {'online': online, 'with_local_disks': bool(data.get('with_local_disks'))})
+    e = _failed(r, 'migration')
+    if e:
+        return e
+    upid = r.get('upid') or r.get('task') or r.get('data')
+    store.set_node(desk['id'], target)
+    log_audit(_user(), 'vm.migrated', f"vLAB: desktop '{desk['name']}' ({desk['vm_type']}/{desk['vmid']}) {node} -> {target}"
+              + (' (online)' if online else ''), get_client_ip())
+    return jsonify({'success': True, 'task': upid if isinstance(upid, str) else None, 'from': node, 'to': target, 'online': online})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/task', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def desktop_task(desktop_id):
+    """?upid= - how a task of this desktop is going: {status: running|stopped, exitstatus}."""
+    desk = store.get_desktop(desktop_id)
+    if not desk or not core._can_reach(desk['cluster_id']):
+        return _bad('Desktop not found', 404)
+    upid = str(request.args.get('upid') or '')
+    m = _UPID.match(upid)
+    if not m or f":{int(desk['vmid'])}:" not in upid:
+        return _bad('upid is not a task of this desktop')
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return _bad('Cluster not connected', 503)
+    st = mgr.get_task_status(m.group(1), upid)
+    if not isinstance(st, dict):
+        return jsonify({'status': 'unknown', 'exitstatus': ''})
+    return jsonify({'status': st.get('status') or 'unknown', 'exitstatus': str(st.get('exitstatus') or '')})
+
+
+# template, delete
+
+def _ties(desk):
+    """What still hangs on the desktop: a card loan or a board."""
+    if store.active_lease_of_vm(desk['cluster_id'], desk['vmid']):
+        return 'A card is lent to this desktop - return it first'
+    if any(b.get('attached_desktop') == desk['id'] for b in catalog.list_boards()):
+        return 'A board is attached to this desktop - detach it first'
+    return None
+
+
+def _leave_pool(desk):
+    """Out of the pool store: the assigned user's grant first (False when the ACL store is
+    unreadable), then the desktop and its golden-image version."""
+    if desk['assigned_user'] and not core._acl_set(desk['cluster_id'], desk['vmid'], desk['assigned_user'], False):
+        return False
+    store.remove_desktop(desk['id'])
+    catalog.forget_desktop_version(desk['id'])
+    return True
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/template', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_to_template(desktop_id):
+    """A shut down desktop VM becomes a template (템플릿 관리 clones from it). A template is no
+    desktop: it leaves the pool, and its user loses access."""
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    if desk['vm_type'] != 'qemu':
+        return _bad('Only QEMU VMs become templates here')
+    if vm.get('status') != 'stopped':
+        return _bad('Shut the VM down first', 409)
+    tie = _ties(desk)
+    if tie:
+        return _bad(tie, 409)
+    if not _NODE_RE.fullmatch(node):
+        return _bad('The VM has no node', 502)
+    resp = mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(desk['vmid'])}/template")
+    if resp is None or getattr(resp, 'status_code', 0) != 200:
+        return _bad(f"Proxmox refused: {str(getattr(resp, 'text', '') or '')[:200]}", 502)
+    if not _leave_pool(desk):
+        return _bad('The VM is a template now, but the VM access list was unavailable - take the desktop out of the pool', 503)
+    log_audit(_user(), 'vm.template', f"vLAB: desktop '{desk['name']}' (qemu/{desk['vmid']}) made a template, out of its pool",
+              get_client_ip())
+    return jsonify({'success': True, 'vmid': int(desk['vmid'])})
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/vm', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_vm_delete(desktop_id):
+    """{confirm_name, force?} - delete the VM on Proxmox (disks too) and the desktop with it.
+    The desktop's name is typed again to confirm. Refused while someone is connected unless
+    force, and while a card or a board is on it."""
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.rbac import invalidate_vm_acls_cache
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    data = _body()
+    if str(data.get('confirm_name') or '') != desk['name']:
+        return _bad("confirm_name must be the desktop's name")
+    if not bool(data.get('force')) and desk['id'] in store.open_session_desktops():
+        return jsonify({'error': 'Someone is connected to this desktop', 'code': 'IN_USE'}), 409
+    tie = _ties(desk)
+    if tie:
+        return _bad(tie, 409)
+    if vm.get('lock'):
+        return _bad(f"The VM is busy ({vm['lock']}) - try again shortly", 409)
+    e = _failed(mgr.delete_vm(node, int(desk['vmid']), desk['vm_type'], purge=True), 'delete')
+    if e:
+        return e
+    store.remove_desktop(desk['id'])
+    catalog.forget_desktop_version(desk['id'])
+    try:
+        # a recycled VMID must not inherit the old grants (as the core delete route does)
+        if get_db().delete_vm_acl(desk['cluster_id'], int(desk['vmid'])):
+            invalidate_vm_acls_cache()
+    except Exception as ex:
+        logging.error(f"[VLAB] {desk['vm_type']}/{desk['vmid']} deleted but its VM ACL was not removed: {ex}")
+        log_audit(_user(), 'vm.acl_cleanup_failed', f"{desk['vm_type']}/{desk['vmid']} deleted but its VM ACL is still there "
+                  f"- remove it by hand, the next guest on this VMID would inherit it", get_client_ip())
+    log_audit(_user(), 'vm.deleted', f"vLAB: desktop '{desk['name']}' ({desk['vm_type']}/{desk['vmid']}) deleted from {node}",
+              get_client_ip())
+    return jsonify({'success': True})
+
+
+# console for support
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/console', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def desktop_admin_console(desktop_id):
+    """An administrator opens the desktop's screen to help its user: {ws_path, password} for
+    noVNC, as the portal's connect answers. Every opening is in the audit log; no vLAB session
+    is recorded (the desktop does not count as in use)."""
+    from urllib.parse import quote
+
+    from pegaprox.api.ha import standby_console_refusal
+    from pegaprox.utils.auth import request_credential, resolve_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.utils.realtime import create_ws_token
+
+    refused = standby_console_refusal()
+    if refused:
+        return refused
+    desk, mgr, vm, node, err = _desk_vm(desktop_id)
+    if err:
+        return err
+    user = resolve_authz_user(request.session)
+    if not user or not user_can_access_vm(user, desk['cluster_id'], int(desk['vmid']), 'vm.console', desk['vm_type']):
+        return _bad('Permission denied: vm.console', 403)
+    if vm.get('status') != 'running':
+        return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
+    vmid, vm_type = int(desk['vmid']), desk['vm_type']
+    result = mgr.get_vnc_ticket(node, vmid, vm_type)
+    if not isinstance(result, dict) or not result.get('success'):
+        return _bad(str((result or {}).get('error') if isinstance(result, dict) else 'Console failed')[:200], 502)
+    ws_token = create_ws_token(_user(), user.get('effective_role', user.get('role', 'viewer')), sid=request_credential()[0])
+    ticket, port = result.get('ticket') or '', result.get('port') or ''
+    ws_path = (f"/api/clusters/{quote(desk['cluster_id'], safe='')}/vms/{quote(str(node), safe='')}/"
+               f"{vm_type}/{vmid}/vncwebsocket?token={quote(ws_token, safe='')}")
+    if ticket and port:
+        ws_path += f"&pve_ticket={quote(str(ticket), safe='')}&pve_port={quote(str(port), safe='')}"
+    log_audit(_user(), 'vlab.desktop.admin_console',
+              f"vLAB: administrator console to desktop '{desk['name']}' ({vm_type}/{vmid})"
+              + (f", user {desk['assigned_user']}" if desk['assigned_user'] else ''), get_client_ip())
+    return jsonify({'type': 'vnc', 'ws_path': ws_path, 'password': ticket, 'clipboard': 'both'})
