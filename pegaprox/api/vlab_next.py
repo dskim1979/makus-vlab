@@ -1240,26 +1240,35 @@ def attach_board(bid):
             lease_until = lease_until[:16]
         except ValueError:
             return _bad('lease_until must look like 2026-10-20T18:00')
+    out, err = lend_board(b, desk, _user(), lease_user, lease_until)
+    if err:
+        return _bad(err[0], err[1])
+    return jsonify({'board': out})
+
+
+def lend_board(b, desk, by, lease_user, lease_until, ip=None):
+    """Attach board b to the desktop (it must run on the board's node), lent to lease_user until
+    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status))."""
     if desk['vm_type'] != 'qemu':
-        return _bad('USB passthrough needs a virtual machine (QEMU)')
+        return None, ('USB passthrough needs a virtual machine (QEMU)', 400)
     live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
     node = live.get('node') or desk['node']
     if node != b['node']:
-        return _bad(f"The desktop runs on {node}, the board is on {b['node']} - move the desktop first", 409)
+        return None, (f"The desktop runs on {node}, the board is on {b['node']} - move the desktop first", 409)
     if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id'] for o in catalog.list_boards()):
-        return _bad('Another board is attached to this desktop', 409)
+        return None, ('Another board is attached to this desktop', 409)
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
-        return _bad('Cluster not connected', 503)
+        return None, ('Cluster not connected', 503)
     r = mgr.update_vm_config(node, int(desk['vmid']), 'qemu', {BOARD_SLOT: f"host={b['usb']}"})
     if not isinstance(r, dict) or not r.get('success'):
-        return _bad(f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
-    b = catalog.set_board_attachment(bid, desk['id'], desk['vmid'], _user(), lease_user, lease_until)
-    log_audit(_user(), 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
-              + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), get_client_ip())
+        return None, (f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
+    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
+              + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
     from pegaprox.api.vlab_notices import board_lent
     board_lent(b, desk['name'], lease_user, lease_until)
-    return jsonify({'board': b})
+    return b, None
 
 
 @bp.route('/api/vlab/admin/boards/<bid>/detach', methods=['POST'])
@@ -1997,6 +2006,10 @@ def refresh_jobs(pool_id=None):
                 err = (research.job_error(code) or '') + ('\n' if err and research.job_error(code) else '') + err
             catalog.update_build_job(job['id'], status='done' if code in (0, None) else 'failed', exit_code=code,
                                      output=out, error=err, finished_at=store.now())
+            if ha.is_active():
+                # the result files: listed, and kept on the NAS (pegaprox/api/vlab_builds.py)
+                from pegaprox.api.vlab_builds import collect
+                collect(catalog.get_build_job(job['id']), desk, mgr, node)
             ended.append(job['id'])
         elif research.is_gpu_job(job) and _past_limit(job):
             # the guest's own timeout did not end it (no coreutils timeout, a hung container)
@@ -2099,10 +2112,11 @@ def _job_view(j):
     from pegaprox.vlab import research
     desk = store.get_desktop(j['desktop_id']) if j.get('desktop_id') else None
     pool = store.get_pool(j['pool_id']) if j.get('pool_id') else None
+    from pegaprox.api.vlab_builds import job_extra_view
     return dict(j, desktop=desk['name'] if desk else None, pool=pool['name'] if pool else None,
                 env=research.loads(j.get('env'), {}) or None, notify=research.loads(j.get('notify'), {}),
                 gpu_index=[int(x) for x in str(j.get('gpu_index') or '').split(',') if x.strip().isdigit()],
-                gpu_job=research.is_gpu_job(j))
+                gpu_job=research.is_gpu_job(j), **job_extra_view(j))
 
 
 def _add_job(pool, username, name, command, workdir, extra=None):

@@ -1834,30 +1834,44 @@ def create_lease():
     if ends <= datetime.now(timezone.utc).isoformat(timespec='seconds'):
         return _bad('ends_at must be in the future')
     name = str(data.get('name') or '').strip()[:80]
+    out, err = lend_card(desk, mapping, ends, name, _user())
+    if err:
+        return _bad(err[0], err[1])
+    return jsonify(out), 201
+
+
+def card_kind(m):
+    """'fpga', 'npu' or 'gpu' from a PCI mapping's device ids."""
+    ids = [x['id'].lower() for x in (m or {}).get('devices') or []]
+    return ('fpga' if any(i.startswith(tuple(f'{v}:' for v in accel.FPGA_VENDOR_IDS)) for i in ids)
+            else 'npu' if any(i.startswith(tuple(f'{v}:' for v in accel.NPU_VENDOR_IDS)) for i in ids) else 'gpu')
+
+
+def lend_card(desk, mapping, ends, name, by, ip=None):
+    """Lend a card of `mapping` to the desktop's user until `ends` (UTC ISO).
+    ({lease, needs_restart, warnings}, None) or (None, (message, status))."""
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
-        return _bad('Cluster not connected', 503)
+        return None, ('Cluster not connected', 503)
     mappings = accel.pci_mappings(mgr)
     m = next((x for x in mappings or [] if x['id'] == mapping), None)
     if mappings is not None and m is None:
-        return _bad(f"No PCI mapping '{mapping}' on this cluster", 404)
+        return None, (f"No PCI mapping '{mapping}' on this cluster", 404)
     if store.active_lease_of_vm(desk['cluster_id'], desk['vmid']):
-        return _bad('This desktop has a card on loan already', 409)
+        return None, ('This desktop has a card on loan already', 409)
     if m is not None and len(store.active_leases_on(desk['cluster_id'], mapping)) >= max(1, len(m['devices'])):
-        return _bad(f"Every card of '{mapping}' is lent out", 409)
+        return None, (f"Every card of '{mapping}' is lent out", 409)
     vm = _vm_states(desk['cluster_id']).get(int(desk['vmid']))
     if vm is None:
-        return _bad("The desktop's VM is not on the cluster any more", 404)
+        return None, ("The desktop's VM is not on the cluster any more", 404)
     e = _set_slot(desk['cluster_id'], vm.get('node') or desk['node'], desk['vmid'], accel.LEASE_SLOT, f'mapping={mapping},pcie=1')
     if e:
-        return _bad(e, 502)
-    ids = [x['id'].lower() for x in (m or {}).get('devices') or []]
-    kind = ('fpga' if any(i.startswith(tuple(f'{v}:' for v in accel.FPGA_VENDOR_IDS)) for i in ids)
-            else 'npu' if any(i.startswith(tuple(f'{v}:' for v in accel.NPU_VENDOR_IDS)) for i in ids) else 'gpu')
+        return None, (e, 502)
+    kind = card_kind(m)
     lease = store.add_lease(kind, mapping, name or (m['description'] if m else '') or mapping, desk['assigned_user'],
                             desk['cluster_id'], desk['vmid'], ends)
-    log_audit(_user(), 'vlab.lease.create', f"{lease['resource_name']} ({mapping}) to qemu/{desk['vmid']} "
-              f"({desk['assigned_user']}) until {ends}", get_client_ip())
+    log_audit(by, 'vlab.lease.create', f"{lease['resource_name']} ({mapping}) to qemu/{desk['vmid']} "
+              f"({desk['assigned_user']}) until {ends}", ip if ip is not None else get_client_ip())
     from pegaprox.vlab import accel_checks
     try:
         warnings = accel_checks.for_vm(mgr, desk['cluster_id'], vm.get('node') or desk['node'], desk['vmid'], desk=desk)
@@ -1866,7 +1880,7 @@ def create_lease():
         warnings = []
     from pegaprox.api.vlab_notices import loan_granted
     loan_granted(lease, needs_restart=vm.get('status') == 'running')
-    return jsonify({'lease': lease, 'needs_restart': vm.get('status') == 'running', 'warnings': warnings}), 201
+    return {'lease': lease, 'needs_restart': vm.get('status') == 'running', 'warnings': warnings}, None
 
 
 def _lease_or_error(lease_id):

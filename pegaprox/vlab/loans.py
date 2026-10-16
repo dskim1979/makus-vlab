@@ -81,18 +81,43 @@ def _loop():
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         try:
-            # the administrators' notices: lab PCs waiting, the server pair, failed long tasks
             if ha.is_active():
-                from pegaprox.api.vlab_ops_notices import ops_tick
-                ops_tick()
-                # the people of a LAB booking, before it starts
-                from pegaprox.vlab import features
-                if features.enabled('lab'):
-                    from pegaprox.api.vlab_notices import booking_reminders
-                    booking_reminders()
+                _side_ticks()
         except Exception as e:
-            logging.error(f'[VLAB] operations notices: {e}')
+            logging.error(f'[VLAB] side ticks: {e}')
         time.sleep(INTERVAL)
+
+
+def _side_ticks():
+    """The minute's other work, each on its own so one failing does not stop the rest."""
+    from pegaprox.vlab import features
+
+    def ops():
+        from pegaprox.api.vlab_ops_notices import ops_tick      # the administrators' notices
+        ops_tick()
+
+    def bookings():
+        from pegaprox.api.vlab_notices import booking_reminders  # the people of a LAB booking, before it starts
+        booking_reminders()
+
+    def cards():
+        from pegaprox.api.vlab_accel_book import booking_tick    # card and board bookings: lent, given back
+        booking_tick()
+
+    def forecast():
+        from pegaprox.api.vlab_forecast import forecast_tick     # the growth forecast's daily numbers (hourly)
+        forecast_tick()
+
+    for name, on, fn in (('operations notices', True, ops),
+                         ('LAB booking reminders', features.enabled('lab'), bookings),
+                         ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
+                         ('growth forecast', True, forecast)):
+        if not on:
+            continue
+        try:
+            fn()
+        except Exception as e:
+            logging.error(f'[VLAB] {name}: {e}')
 
 
 def start_loan_thread():

@@ -342,6 +342,10 @@ SYNC_TABLES = (
     'vlab_gpu_quotas', 'vlab_research_settings', 'vlab_ide_sessions',
     # per-user notices: who takes which mail, and the ones sent once (pegaprox/vlab/notices.py)
     'vlab_notice_prefs', 'vlab_notice_sent',
+    # CI connections to the build farm (pegaprox/vlab/ci.py) and card / board bookings (pegaprox/vlab/accel_bookings.py)
+    'vlab_ci_links', 'vlab_accel_bookings',
+    # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
+    'vlab_capacity_daily',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

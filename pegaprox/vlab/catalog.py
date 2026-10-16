@@ -180,6 +180,10 @@ _COLUMNS = (
     ('vlab_build_jobs', 'wait_reason', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'department_id', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'notified_at', 'TEXT'),
+    # results kept (pegaprox/vlab/artifacts.py) and where a job came from (a CI connection, pegaprox/vlab/ci.py)
+    ('vlab_build_jobs', 'artifacts', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'artifacts_dir', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'source', "TEXT NOT NULL DEFAULT ''"),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -709,7 +713,8 @@ def jobs_in(status, pool_id=None):
 
 def update_build_job(jid, **fields):
     keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at',
-                                       'workdir', 'pool_id', 'gpu_index', 'wait_reason', 'notified_at')]
+                                       'workdir', 'pool_id', 'gpu_index', 'wait_reason', 'notified_at',
+                                       'artifacts', 'artifacts_dir', 'source')]
     if keys:
         db().execute(f"UPDATE vlab_build_jobs SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
                      tuple(fields[k] for k in keys) + (jid,))
