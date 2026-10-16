@@ -1550,7 +1550,7 @@ def branding_public():
     from pegaprox.api import frontend_branding as fb
     rec = fb.resolved(fb.DEFAULT_TENANT)
     keep = ('enabled', 'appName', 'browserTitle', 'logoUrl', 'loginLogoUrl', 'faviconUrl', 'primaryColor',
-            'footerText', 'loginTagline', 'docsUrl', 'supportUrl', 'hideVersion')
+            'footerText', 'loginTagline', 'docsUrl', 'supportUrl', 'feedbackUrl', 'hideVersion')
     return jsonify({k: v for k, v in _branding_view(rec).items() if k in keep})
 
 

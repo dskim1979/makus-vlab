@@ -56,7 +56,7 @@ _FILE = re.compile(r'^(logo|loginLogo|favicon)\.(png|jpg|webp|ico)$')
 DEFAULTS = {
     'enabled': False, 'appName': 'MOAVI Desk', 'browserTitle': '', 'logoUrl': '', 'loginLogoUrl': '', 'faviconUrl': '',
     'primaryColor': '', 'footerText': '', 'poweredByVisible': True, 'showAbout': True, 'showSubscription': True,
-    'loginTagline': '', 'loginHighlights': [], 'docsUrl': '', 'supportUrl': '', 'changelogUrl': '', 'hideVersion': False,
+    'loginTagline': '', 'loginHighlights': [], 'docsUrl': '', 'supportUrl': '', 'changelogUrl': '', 'feedbackUrl': '', 'hideVersion': False,
 }
 
 _TYPES = {
@@ -136,6 +136,7 @@ def clean(b):
         'docsUrl': _url(b.get('docsUrl')),
         'supportUrl': _url(b.get('supportUrl')),
         'changelogUrl': _url(b.get('changelogUrl')),
+        'feedbackUrl': _url(b.get('feedbackUrl')),   # MOAVI Desk: 개선 요청 · 버그 신고
         'hideVersion': bool(b.get('hideVersion')),
     }
 
