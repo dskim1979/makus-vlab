@@ -61,6 +61,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   PUT    /api/vlab/admin/lab-schedules/<id>           change it                                 vlab.pool.manage
   DELETE /api/vlab/admin/lab-schedules/<id>           remove it                                 vlab.pool.manage
   POST   /api/vlab/admin/lab-schedules/<id>/run       {phase: prepare|finish} now               vlab.pool.manage
+  (LAB bookings - portal 예약, LAB > 예약 - are in pegaprox/api/vlab_reserve.py; lab_tick runs them too)
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -2607,6 +2608,8 @@ def delete_lab(lab_id):
     store.delete_lab(lab_id)
     from pegaprox.vlab import enroll
     enroll.forget_lab(lab_id)
+    from pegaprox.vlab import reservations
+    reservations.delete_of_lab(lab_id)      # its bookings that have not started are cancelled
     log_audit(_user(), 'vlab.lab.delete', f"LAB '{lab['name']}' (its schedules too; terminals kept unassigned)", get_client_ip())
     return jsonify({'success': True})
 
@@ -2778,14 +2781,16 @@ def run_lab_schedule(schedule_id):
     return jsonify(result)
 
 
-def _lab_phase(sched, pool, phase, after=None):
+def _lab_phase(sched, pool, phase, after=None, desks=None):
     """Start the pool's desktops (prepare) or put them back (finish: reset = base and off,
-    off = shut down). Desktops someone is connected to are left alone at the finish."""
+    off = shut down). Desktops someone is connected to are left alone at the finish.
+    `desks` narrows it to some of them (a booking of N seats or desktops)."""
     done, skipped, failed = [], [], []
     mgr = cluster_managers.get(pool['cluster_id'])
     live = _vm_states(pool['cluster_id'])
     busy = store.open_session_desktops()
-    for d in store.list_desktops(pool['id']):
+    targets = store.list_desktops(pool['id']) if desks is None else desks
+    for d in targets:
         vm = live.get(int(d['vmid']))
         if not mgr or not vm:
             failed.append({'id': d['id'], 'name': d['name'], 'error': 'the VM is not on the cluster'})
@@ -2818,28 +2823,44 @@ def _lab_phase(sched, pool, phase, after=None):
         else:
             failed.append({'id': d['id'], 'name': d['name'], 'error': str((r or {}).get('error') if isinstance(r, dict) else r)})
     if phase == 'finish' and pool.get('type') == 'classroom':
+        keep = {d['id'] for d in targets}
         for d in store.list_desktops(pool['id']):
-            if d['assigned_user'] and d['id'] not in busy and _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False):
+            if d['id'] in keep and d['assigned_user'] and d['id'] not in busy and _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False):
                 store.set_assignment(d['id'], None)
     return {'phase': phase, 'done': done, 'skipped': skipped, 'failed': failed}
 
 
 def lab_tick(now=None):
-    """Once a minute (pegaprox/vlab/loans.py): run every LAB schedule phase that is due.
-    Returns [(schedule_id, phase, result)]."""
+    """Once a minute (pegaprox/vlab/loans.py): run every LAB schedule and booking phase that
+    is due (pegaprox/api/vlab_reserve.py). Every clean-up runs before any start, and a start
+    waits while a session of the same pool that ends by then is not cleaned up yet, so one
+    session's reset never undoes the next one's start. Returns [(id, phase, result)]."""
+    from pegaprox.api import vlab_reserve
     now = now or _local_now()
     pools = {p['id']: p for p in store.list_pools()}
-    out = []
+    due = []
     for sched in store.list_lab_schedules():
         phase = labs.due(sched, now)
         pool = pools.get(sched['pool_id'])
-        if not phase or not pool:
-            continue
-        result = _lab_phase(sched, pool, phase, after=sched['after'] if phase == 'finish' else None)
-        store.mark_lab_schedule(sched['id'], phase, now.date().isoformat())
-        log_audit('system', f'vlab.lab.{phase}', f"pool '{pool['name']}' ({sched['start_time']}-{sched['end_time']}): "
+        if phase and pool:
+            due.append(('schedule', sched, pool, phase))
+    due += [('reservation', r, pool, phase) for r, pool, phase in vlab_reserve.due_items(now, pools)]
+    out = []
+    for kind, item, pool, phase in sorted(due, key=lambda x: x[3] != 'finish'):
+        if kind == 'schedule':
+            if phase == 'prepare' and vlab_reserve.occupied_before(pool['id'], labs.occurrence(item, now.date())[0], now, item['id']):
+                continue
+            result = _lab_phase(item, pool, phase, after=item['after'] if phase == 'finish' else None)
+            store.mark_lab_schedule(item['id'], phase, now.date().isoformat())
+            what = f"{item['start_time']}-{item['end_time']}"
+        else:
+            if phase == 'prepare' and vlab_reserve.occupied_before(pool['id'], vlab_reserve.rsv.parse(item['start_at']), now, item['id']):
+                continue
+            result = vlab_reserve.run_phase(item, pool, phase)
+            what = f"booking {item['id']} {item['start_at']}-{item['end_at'][11:]}"
+        log_audit('system', f'vlab.lab.{phase}', f"pool '{pool['name']}' ({what}): "
                   f"{len(result['done'])} done, {len(result['skipped'])} skipped, {len(result['failed'])} failed")
-        out.append((sched['id'], phase, result))
+        out.append((item['id'], phase, result))
     return out
 
 
@@ -2890,6 +2911,9 @@ def _kiosk_view(t):
     for x in (current, upcoming):
         if x:
             x['pool'] = pools.get(x['pool_id'])
+    # a booking of the room (LAB > 예약) shows in place of the class
+    from pegaprox.api.vlab_reserve import kiosk_state
+    current, upcoming = kiosk_state(lab['id'], _local_now(), current, upcoming, pools)
     return {'terminal': {'id': t['id'], 'name': t['name']},
             'lab': {'id': lab['id'], 'name': lab['name'], 'location': lab['location']},
             'current': current, 'next': upcoming, 'now': _local_now().isoformat(timespec='minutes')}
@@ -2918,6 +2942,9 @@ def kiosk_start():
     if not cur:
         return jsonify({'error': 'No session in this LAB now', 'code': 'NO_SESSION', **view}), 409
     username = _user()
+    if cur.get('reservation_id'):
+        from pegaprox.api.vlab_reserve import kiosk_desktop
+        return kiosk_desktop(cur, username, t, view)
     desks = store.list_desktops(cur['pool_id'])
     mine = next((d for d in desks if d['assigned_user'] == username), None)
     if not mine:

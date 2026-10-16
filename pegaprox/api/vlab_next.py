@@ -1396,9 +1396,13 @@ def granted(pool_id, username, grants=None, dep=None, groups=None):
 
 def shared_member(desk, username):
     """The core connect route asks this for a desktop not assigned to the caller: a shared pool's
-    desktop is open to everyone the pool is granted to."""
+    desktop is open to everyone the pool is granted to, and to whom a booking running now
+    handed it (LAB > 예약)."""
     pool = store.get_pool(desk['pool_id']) or {}
-    return pool.get('type') == 'shared' and granted(pool['id'], username)
+    if pool.get('type') != 'shared':
+        return False
+    from pegaprox.api.vlab_reserve import reserved_desktop
+    return granted(pool['id'], username) or reserved_desktop(desk, username)
 
 
 def _max_sessions(pool):
