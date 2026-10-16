@@ -41,8 +41,8 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | 초기화 · 골든 이미지 | 기준 스냅숏 자동 생성, 데스크톱·풀 단위 초기화(접속 중인 데스크톱은 건너뜀), 골든 이미지 버전 · 배포, 새 버전으로 일괄 교체(할당 · 권한 이전) |
 | 접속 | 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
 | 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
-| GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU) |
-| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
+| GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
+| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
 | 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림 |
 | LAB | LAB · 단말 · 주간 시간표, 일정형 풀 준비 · 정리, 키오스크 |
 | 사용자 | 로컬 계정 만들기 · 수정 · 삭제 · 비밀번호 · 2단계 인증 초기화 · 잠금 해제, 역할 관리, 내 계정(비밀번호 · TOTP), AD/LDAP, 가입 심사, 부서, 유효 권한 조회(권한이 어디서 왔는지) |
