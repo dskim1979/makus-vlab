@@ -13,6 +13,8 @@
 
 ---
 
+> **MOAVI Desk는 100% 무료 오픈소스로 배포됩니다.** 엔진 · 콘솔 AGPL-3.0, Windows 클라이언트 MIT — 라이선스 비용 없이 설치하고, 고치고, 다시 배포할 수 있습니다.
+
 **MOAVI Desk** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·교육생·직원에게 데스크톱을 나눠 주고,
 GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 저장소는 vLAB 의 **엔진(API 서버)** 입니다.
 관리 콘솔과 사용자 작업 공간은 [makus-vlab-console](https://github.com/dskim1979/makus-vlab-console), Windows 클라이언트는 [moavi-desk](https://github.com/dskim1979/moavi-desk) 입니다.
