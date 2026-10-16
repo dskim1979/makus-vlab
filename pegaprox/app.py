@@ -1664,6 +1664,13 @@ def main(debug_mode=False):
     from pegaprox.vlab.loans import start_loan_thread
     start_loan_thread()
 
+    # MOAVI Desk - the Guacamole bundled with the compose install becomes a gateway by itself
+    try:
+        from pegaprox.vlab.catalog import sync_builtin_guacamole
+        sync_builtin_guacamole()
+    except Exception as e:
+        print(f"Built-in Guacamole gateway not set up: {e}")
+
     start_cross_cluster_lb_thread()
     print("Started cross-cluster load balancer thread")
 

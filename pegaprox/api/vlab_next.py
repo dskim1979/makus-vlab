@@ -60,7 +60,7 @@ import time
 from datetime import datetime
 from urllib.parse import quote as _quote
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, has_request_context, jsonify, request
 
 from pegaprox.api import vlab as core
 from pegaprox.globals import cluster_managers
@@ -493,7 +493,10 @@ def check_gateway(gid):
     gw = catalog.get_gateway(gid)
     if not gw:
         return _bad('Gateway not found', 404)
-    ok, ms, err = _tcp_probe(gw['address'], gw['port'])
+    if gid == catalog.BUILTIN_GUAC_ID:      # the bundled one: the engine reaches it inside compose
+        ok, ms, err = _tcp_probe('guacamole', 8080)
+    else:
+        ok, ms, err = _tcp_probe(gw['address'], gw['port'])
     gw = catalog.mark_gateway(gid, ok, f'{ms} ms' if ok else err)
     return jsonify({'gateway': gw, 'ok': ok, 'ms': ms, 'error': err})
 
@@ -1297,8 +1300,12 @@ def guac_link(gw, username, name, host, port, minutes=5):
     padder = padding.PKCS7(128).padder()
     enc = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).encryptor()
     data = enc.update(padder.update(signed) + padder.finalize()) + enc.finalize()
+    q = _quote(base64.b64encode(data).decode())
+    if gw['id'] == catalog.BUILTIN_GUAC_ID and has_request_context():
+        # the bundled one sits behind the console's own address: use the name the user came in by
+        return f"https://{request.host}/guacamole/?data={q}"
     scheme = 'http' if gw['port'] in (80, 8080) else 'https'
-    return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={_quote(base64.b64encode(data).decode())}"
+    return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={q}"
 
 
 def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):

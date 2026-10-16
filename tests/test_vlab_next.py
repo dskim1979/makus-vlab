@@ -371,6 +371,27 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     assert r.status_code == 200 and _decrypt_guac(r.get_json()['url'], key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
 
 
+
+def test_bundled_guacamole_registers_itself_and_links_to_the_console_address(env, monkeypatch, tmp_path):
+    _, _, admin, _, _, _ = env
+    key = 'ffeeddccbbaa99887766554433221100'
+    keyfile = tmp_path / 'json-secret-key'
+    keyfile.write_text(key + '\n')
+    monkeypatch.setenv('VLAB_GUAC_KEY_FILE', str(keyfile))
+    monkeypatch.setenv('VLAB_HOSTNAME', 'desk.lab.example')
+    monkeypatch.delenv('VLAB_GUAC_BUILTIN', raising=False)
+    assert catalog.sync_builtin_guacamole() is None              # off unless the install turns it on
+    monkeypatch.setenv('VLAB_GUAC_BUILTIN', '1')
+    gw = catalog.sync_builtin_guacamole()
+    assert gw['enabled'] and gw['has_key'] and (gw['address'], gw['port'], gw['kind']) == ('desk.lab.example', 443, 'guacamole')
+    ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'root'}).get_json()['desktop']
+    r = admin.get(f"/api/vlab/me/external/{ext['id']}/guac")
+    url = r.get_json()['url']
+    assert url.startswith('https://localhost/guacamole/?data=')   # the address the user came in by, not VLAB_HOSTNAME
+    assert _decrypt_guac(url, key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
+    monkeypatch.setenv('VLAB_GUAC_BUILTIN', '0')
+    assert catalog.sync_builtin_guacamole()['enabled'] == 0
+
 def test_golden_rollout_moves_users_to_the_new_version(env, monkeypatch):
     import pegaprox.api.vlab as core
     _, mgr, admin, _, _, _ = env

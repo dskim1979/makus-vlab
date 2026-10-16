@@ -10,6 +10,7 @@ store.py's. Each list here is small (tens to hundreds of rows), so reads load wh
 """
 
 import json
+import os
 import re
 import threading
 
@@ -382,6 +383,42 @@ def save_gateway(gid, name, kind, address, port, notes, enabled, secret_key=None
     if secret_key is not None:
         db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (secret_key, gid))
     return get_gateway(gid)
+
+
+# The Guacamole bundled with the docker compose install (deploy/docker-compose.yml in
+# makus-vlab-console): served by vlab-proxy at /guacamole/ on the console's own address, its
+# key made on first start in a file both containers mount. VLAB_GUAC_BUILTIN=0 turns it off.
+BUILTIN_GUAC_ID = 'gw_builtin_guac'
+
+
+def sync_builtin_guacamole():
+    """Create or refresh the bundled Guacamole gateway from the environment, at start.
+    The key file wins over whatever is stored (the file is what Guacamole itself reads)."""
+    on = os.environ.get('VLAB_GUAC_BUILTIN', '').strip() not in ('', '0', 'false', 'no')
+    row = get_gateway(BUILTIN_GUAC_ID)
+    key = ''
+    path = os.environ.get('VLAB_GUAC_KEY_FILE', '/etc/vlab/guac/json-secret-key')
+    if on:
+        try:
+            with open(path, encoding='ascii') as f:
+                key = f.read().strip().lower()
+        except OSError:
+            key = ''
+        if not re.match(r'^[0-9a-f]{32}$', key):
+            on = False
+    if not on:
+        if row and row['enabled']:
+            db().execute('UPDATE vlab_gateways SET enabled = 0 WHERE id = ?', (BUILTIN_GUAC_ID,))
+        return get_gateway(BUILTIN_GUAC_ID)
+    if not row:
+        port = os.environ.get('VLAB_HTTPS_PORT', '443')
+        db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+                     (BUILTIN_GUAC_ID, 'MOAVI Desk 내장 Guacamole', 'guacamole', os.environ.get('VLAB_HOSTNAME') or 'vlab.local',
+                      int(port) if port.isdigit() else 443, '설치 묶음에 함께 들어 있는 브라우저 RDP (/guacamole/, 콘솔과 같은 주소)', now()))
+    elif not row['enabled']:
+        db().execute('UPDATE vlab_gateways SET enabled = 1 WHERE id = ?', (BUILTIN_GUAC_ID,))
+    db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (key, BUILTIN_GUAC_ID))
+    return get_gateway(BUILTIN_GUAC_ID)
 
 
 def mark_gateway(gid, ok, detail):
