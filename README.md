@@ -28,6 +28,8 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | ![골든 롤아웃](docs/images/golden-rollout.png) | ![빌드 작업 큐](docs/images/build-jobs.png) |
 | **VM 관리 창** | **서포트 번들 (기간 지정)** |
 | ![VM 관리](docs/images/vm-manage.png) | ![서포트 번들](docs/images/support-bundle.png) |
+| **LAB 예약** | **단말 관리 (MOAVI Desk Agent)** |
+| ![LAB 예약](docs/images/reservations.png) | ![단말 관리](docs/images/terminals.png) |
 
 화면 전체는 [콘솔 저장소](https://github.com/dskim1979/makus-vlab-console#화면)에 있습니다.
 
@@ -44,7 +46,8 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
 | FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
 | 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림 |
-| LAB | LAB · 단말 · 주간 시간표, 일정형 풀 준비 · 정리, 키오스크 |
+| LAB | LAB · 주간 시간표, 일정형 풀 준비 · 정리, 키오스크, LAB 예약(충돌 검사 · 승인 · 반복 · 참가자 · 자동 준비 · 노쇼 보고서), 단말 에이전트(MOAVI Desk Agent: 등록 코드 · 하트비트 · 키 자동 전달 · 1파일 설치) |
+| 공유 저장소 | 풀마다 NFS(autofs) · SMB, 사용자별 home · project · scratch 폴더(엔진이나 사용자가 만들고 VM root는 쓰지 않음), Windows 로그온 드라이브, 빌드 작업은 scratch에서, 실패해도 접속은 막지 않음 |
 | 사용자 | 로컬 계정 만들기 · 수정 · 삭제 · 비밀번호 · 2단계 인증 초기화 · 잠금 해제, 역할 관리, 내 계정(비밀번호 · TOTP), AD/LDAP, 가입 심사, 부서, 유효 권한 조회(권한이 어디서 왔는지) |
 | 운영 | 대시보드, 시스템 요약, 작업 진행(Proxmox 작업 진행률 · 로그), 접속 끊기, 공지 배너, 사용률 보고서(일·풀·사용자별, CSV), 작업 기록(감사), 플랫폼 설정(폐쇄망 모드 포함), 서포트 번들(기간 지정 · 비밀 정보 제거 · IP/사용자 가리기) |
 | 클러스터 | Proxmox 클러스터 연결, 노드·스토리지 개요, 노드 유지보수 · 재시작, Proxmox HA 리소스 · 그룹, MOAVI Desk 서버 이중화(활성 · 대기) |
