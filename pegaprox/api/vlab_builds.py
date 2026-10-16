@@ -101,6 +101,8 @@ def _download(job, i, username, check_rule=True):
         except ValueError:
             root = None
         if root and os.path.isfile(root):
+            if vd._probe():
+                return jsonify({'ok': True, 'size': os.path.getsize(root)})
             return vd._send_path(root, name, username, log)
     desk = store.get_desktop(job['desktop_id']) if job.get('desktop_id') else None
     mgr = cluster_managers.get(desk['cluster_id']) if desk else None
@@ -109,6 +111,8 @@ def _download(job, i, username, check_rule=True):
     if f['size'] > ds_mod.AGENT_MAX_BYTES:
         return _bad(f"Larger than {ds_mod.AGENT_MAX_BYTES // 1048576} MB - take it from 데이터 › 내 폴더 or SFTP "
                     "(or ask the admin for the NAS admin mount)", 413, code='TOO_BIG')
+    if vd._probe():
+        return jsonify({'ok': True, 'size': f['size']})
     node = vn._job_node(desk)
     user = nas.guest_name(job['username'])
     q = vd._q
