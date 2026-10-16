@@ -47,6 +47,9 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   PUT    /api/vlab/admin/terminals/<terminal_id>      {name?, lab_id?, state?}                  vlab.pool.manage
   DELETE /api/vlab/admin/terminals/<terminal_id>      remove it                                 vlab.pool.manage
   POST   /api/vlab/terminals/register                 a client asks to be known {mac, name?} (waits for approval)  signed in
+  POST   /api/vlab/admin/terminals/<terminal_id>/key  a new kiosk key for it (shown once)       vlab.pool.manage
+  GET    /api/vlab/kiosk                              the kiosk's room and session (header X-Terminal-Key)  terminal key
+  POST   /api/vlab/kiosk/start                        a desktop of the session for the signed-in user (+ key)  vlab.desk
   GET    /api/vlab/admin/lab-schedules                schedules (?lab_id)                       vlab.pool.view
   POST   /api/vlab/admin/lab-schedules                {lab_id, pool_id, weekdays, start_time, end_time, prepare_min?, after?, title?}  vlab.pool.manage
   PUT    /api/vlab/admin/lab-schedules/<id>           change it                                 vlab.pool.manage
@@ -2613,6 +2616,10 @@ def _lab_phase(sched, pool, phase, after=None):
             done.append({'id': d['id'], 'name': d['name']})
         else:
             failed.append({'id': d['id'], 'name': d['name'], 'error': str((r or {}).get('error') if isinstance(r, dict) else r)})
+    if phase == 'finish' and pool.get('type') == 'classroom':
+        for d in store.list_desktops(pool['id']):
+            if d['assigned_user'] and d['id'] not in busy and _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False):
+                store.set_assignment(d['id'], None)
     return {'phase': phase, 'done': done, 'skipped': skipped, 'failed': failed}
 
 
@@ -2633,6 +2640,95 @@ def lab_tick(now=None):
                   f"{len(result['done'])} done, {len(result['skipped'])} skipped, {len(result['failed'])} failed")
         out.append((sched['id'], phase, result))
     return out
+
+
+# --- LAB kiosk: a browser in full screen on a room's PC (/kiosk) --------------------------
+# An admin makes the terminal a key (shown once) and types it into the PC's kiosk page.
+# The page shows the room and its session; a user signs in with their own account and gets a
+# free desktop of the session's pool, assigned to them until the session's clean-up.
+# MOAVI Desk Client keeps registering by MAC (/api/vlab/terminals/register).
+
+KIOSK_HEADER = 'X-Terminal-Key'
+
+
+def _key_hash(key):
+    import hashlib
+    return hashlib.sha256(str(key).encode()).hexdigest() if key else ''
+
+
+@bp.route('/api/vlab/admin/terminals/<terminal_id>/key', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def make_terminal_key(terminal_id):
+    """A new key for this terminal's kiosk page (the old one stops working); approves it."""
+    import secrets
+    t = store.get_terminal(terminal_id)
+    if not t:
+        return _bad('Terminal not found', 404)
+    key = 'mdt_' + secrets.token_urlsafe(24)
+    store.set_terminal_key(terminal_id, _key_hash(key))
+    log_audit(_user(), 'vlab.terminal.key', f"terminal {t['mac']} '{t['name']}': new kiosk key", get_client_ip())
+    return jsonify({'key': key, 'terminal': store.get_terminal(terminal_id)})
+
+
+def _kiosk_terminal():
+    t = store.terminal_by_key(_key_hash(request.headers.get(KIOSK_HEADER, '').strip()))
+    if not t or t['state'] != 'approved':
+        return None, (jsonify({'error': 'This terminal key is not valid', 'code': 'BAD_KEY'}), 401)
+    if not t.get('lab_id') or not store.get_lab(t['lab_id']):
+        return None, (jsonify({'error': 'This terminal belongs to no LAB', 'code': 'NO_LAB'}), 409)
+    store.update_terminal(t['id'], last_seen=store.now(), ip=get_client_ip() or t.get('ip') or '')
+    return t, None
+
+
+def _kiosk_view(t):
+    lab = store.get_lab(t['lab_id'])
+    pools = {p['id']: p['name'] for p in store.list_pools()}
+    current, upcoming = labs.state_at(store.list_lab_schedules(lab['id']), _local_now())
+    for x in (current, upcoming):
+        if x:
+            x['pool'] = pools.get(x['pool_id'])
+    return {'terminal': {'id': t['id'], 'name': t['name']},
+            'lab': {'id': lab['id'], 'name': lab['name'], 'location': lab['location']},
+            'current': current, 'next': upcoming, 'now': _local_now().isoformat(timespec='minutes')}
+
+
+@bp.route('/api/vlab/kiosk', methods=['GET'])
+def kiosk_info():
+    """The kiosk page before anyone signs in: its room and what runs now and next.
+    Reached with the terminal key alone (header X-Terminal-Key)."""
+    t, err = _kiosk_terminal()
+    if err:
+        return err
+    return jsonify(_kiosk_view(t))
+
+
+@bp.route('/api/vlab/kiosk/start', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def kiosk_start():
+    """The signed-in user at a kiosk gets a desktop of the session's pool: theirs if they hold
+    one there, else a free one, assigned to them (the clean-up after the session frees it)."""
+    t, err = _kiosk_terminal()
+    if err:
+        return err
+    view = _kiosk_view(t)
+    cur = view['current']
+    if not cur:
+        return jsonify({'error': 'No session in this LAB now', 'code': 'NO_SESSION', **view}), 409
+    username = _user()
+    desks = store.list_desktops(cur['pool_id'])
+    mine = next((d for d in desks if d['assigned_user'] == username), None)
+    if not mine:
+        busy = store.open_session_desktops()
+        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
+        if not free:
+            return jsonify({'error': 'Every desktop of this session is taken', 'code': 'FULL', **view}), 409
+        mine = free[0]
+        if not _acl_set(mine['cluster_id'], mine['vmid'], username, True):
+            return _bad('VM access list unavailable - try again', 503)
+        store.set_assignment(mine['id'], username)
+        log_audit(username, 'vlab.kiosk.assign', f"{mine['vm_type']}/{mine['vmid']} '{mine['name']}' at terminal "
+                  f"'{t['name'] or t['mac']}' (LAB {view['lab']['name']})", get_client_ip())
+    return jsonify({'desktop': {'id': mine['id'], 'name': mine['name']}, **view})
 
 
 # --- directory (AD / LDAP) ---------------------------------------------------------

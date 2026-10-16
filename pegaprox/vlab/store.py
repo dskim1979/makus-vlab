@@ -97,7 +97,8 @@ _SCHEMA = (
         state TEXT NOT NULL DEFAULT 'pending',
         registered_by TEXT NOT NULL DEFAULT '',
         last_seen TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        key_hash TEXT NOT NULL DEFAULT ''
     )''',
     '''CREATE TABLE IF NOT EXISTS vlab_lab_schedules (
         id TEXT PRIMARY KEY,
@@ -129,6 +130,10 @@ def db():
             if not getattr(d, '_vlab_schema', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                # columns added after a table first shipped
+                cols = {r['name'] for r in d.query('PRAGMA table_info(vlab_terminals)')}
+                if 'key_hash' not in cols:
+                    d.execute("ALTER TABLE vlab_terminals ADD COLUMN key_hash TEXT NOT NULL DEFAULT ''")
                 d._vlab_schema = True
     return d
 
@@ -417,22 +422,28 @@ def delete_lab(lab_id):
     d.execute('DELETE FROM vlab_labs WHERE id = ?', (lab_id,))
 
 
+def _terminal_row(r):
+    t = dict(r)
+    t['has_key'] = bool(t.pop('key_hash', ''))
+    return t
+
+
 def list_terminals(lab_id=None):
     if lab_id:
         rows = db().query('SELECT * FROM vlab_terminals WHERE lab_id = ? ORDER BY name, mac', (lab_id,))
     else:
         rows = db().query('SELECT * FROM vlab_terminals ORDER BY state DESC, name, mac')
-    return [dict(r) for r in rows]
+    return [_terminal_row(r) for r in rows]
 
 
 def get_terminal(terminal_id):
     r = db().query_one('SELECT * FROM vlab_terminals WHERE id = ?', (terminal_id,))
-    return dict(r) if r else None
+    return _terminal_row(r) if r else None
 
 
 def terminal_by_mac(mac):
     r = db().query_one('SELECT * FROM vlab_terminals WHERE mac = ?', (mac,))
-    return dict(r) if r else None
+    return _terminal_row(r) if r else None
 
 
 def add_terminal(mac, name='', lab_id=None, ip='', state='pending', registered_by=''):
@@ -494,3 +505,14 @@ def delete_lab_schedule(schedule_id):
 
 def schedules_of_pool(pool_id):
     return [dict(r) for r in db().query('SELECT * FROM vlab_lab_schedules WHERE pool_id = ?', (pool_id,))]
+
+
+def set_terminal_key(terminal_id, key_hash):
+    db().execute("UPDATE vlab_terminals SET key_hash = ?, state = 'approved' WHERE id = ?", (key_hash, terminal_id))
+
+
+def terminal_by_key(key_hash):
+    if not key_hash:
+        return None
+    r = db().query_one('SELECT * FROM vlab_terminals WHERE key_hash = ?', (key_hash,))
+    return dict(r) if r else None

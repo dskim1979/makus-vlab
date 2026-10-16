@@ -51977,6 +51977,124 @@
         ]
       }
     },
+    "/api/vlab/admin/terminals/{terminal_id}/key": {
+      "post": {
+        "operationId": "vlab.make_terminal_key_post",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A new key for this terminal's kiosk page (the old one stops working); approves it.",
+        "parameters": [
+          {
+            "name": "terminal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/kiosk": {
+      "get": {
+        "operationId": "vlab.kiosk_info_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The kiosk page before anyone signs in: its room and what runs now and next. Reached with the terminal key alone (header X-Terminal-Key).",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/kiosk/start": {
+      "post": {
+        "operationId": "vlab.kiosk_start_post",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The signed-in user at a kiosk gets a desktop of the session's pool: theirs if they hold one there, else a free one, assigned to them (the clean-up after the session frees it).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
     "/api/vlab/admin/directory": {
       "get": {
         "operationId": "vlab.get_directory_get",

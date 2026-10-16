@@ -1432,3 +1432,42 @@ def test_labs_terminals_and_schedules(connectable, monkeypatch):
     assert admin.delete(f"/api/vlab/admin/labs/{lab['id']}").status_code == 200
     assert admin.get('/api/vlab/admin/lab-schedules').get_json()['schedules'] == []
     assert admin.get('/api/vlab/admin/terminals').get_json()['terminals'][0]['lab_id'] is None
+
+
+def test_kiosk_hands_out_a_desktop_of_the_session(connectable, api, monkeypatch):
+    admin, alice, bob, _, desk, stopped = connectable
+    import pegaprox.api.vlab as vlab_api
+    from datetime import datetime
+    lab = admin.post('/api/vlab/admin/labs', json={'name': '교육장 A'}).get_json()['lab']
+    t = admin.post('/api/vlab/admin/terminals', json={'mac': '52:54:00:00:00:01', 'name': 'A-PC-01', 'lab_id': lab['id']}).get_json()['terminal']
+    assert t['has_key'] is False and 'key_hash' not in t
+    key = admin.post(f"/api/vlab/admin/terminals/{t['id']}/key").get_json()['key']
+    hdr = {'X-Terminal-Key': key}
+
+    assert api.anon().get('/api/vlab/kiosk', headers={'X-Terminal-Key': 'mdt_wrong'}).status_code == 401
+    info = api.anon().get('/api/vlab/kiosk', headers=hdr).get_json()
+    assert info['lab']['name'] == '교육장 A' and info['current'] is None
+
+    # a classroom pool with one free desktop, in session now
+    pool = admin.post('/api/vlab/admin/pools', json={'name': '수업용', 'type': 'classroom', 'cluster_id': CID}).get_json()['pool']
+    free = admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': 301}).get_json()
+    assert 'desktop' in free or free.get('error'), free
+    now = datetime(2026, 10, 12, 10, 0)      # Monday
+    monkeypatch.setattr(vlab_api, '_local_now', lambda: now)
+    monkeypatch.setattr(vlab_api, '_acl_set', lambda *a: True)
+    admin.post('/api/vlab/admin/lab-schedules', json={'lab_id': lab['id'], 'pool_id': pool['id'], 'weekdays': [0],
+                                                      'start_time': '09:00', 'end_time': '12:00', 'prepare_min': 0, 'after': 'off'})
+    assert alice.post('/api/vlab/kiosk/start', headers={'X-Terminal-Key': 'mdt_wrong'}).status_code == 401
+    descs = vlab_api.store.list_desktops(pool['id'])
+    if not descs:   # vmid 301 sits in another pool of the fixture: give the session pool its own
+        vlab_api.store.add_desktop(vlab_api.store.get_pool(pool['id']), 'pve1', 310, 'class-01')
+    r = alice.post('/api/vlab/kiosk/start', headers=hdr)
+    assert r.status_code == 200, r.get_json()
+    got = r.get_json()['desktop']
+    assert vlab_api.store.get_desktop(got['id'])['assigned_user'] == 'alice'
+    assert alice.post('/api/vlab/kiosk/start', headers=hdr).get_json()['desktop']['id'] == got['id']   # the same one again
+    r = bob.post('/api/vlab/kiosk/start', headers=hdr)
+    assert r.status_code == 409 and r.get_json()['code'] == 'FULL'
+    # the clean-up after the session frees it
+    vlab_api.lab_tick(datetime(2026, 10, 12, 12, 5))
+    assert vlab_api.store.get_desktop(got['id'])['assigned_user'] is None
