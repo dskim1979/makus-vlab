@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""version.json 을 MAKUS vLAB 쪽(HEAD)과 업스트림(vendor)에서 합친다.
+"""version.json 을 MOAVI Desk 쪽(HEAD)과 업스트림(vendor)에서 합친다.
 
-  - 버전 번호·min_python 은 업스트림을 따른다 (MAKUS vLAB 버전 = 병합한 PegaProx 버전)
-  - 업데이트 주소(download_url, update_archive, update_mirror)는 MAKUS vLAB 저장소 그대로
-  - changelog: 맨 앞에 MAKUS vLAB 항목(없으면 자동 문구), 업스트림의 새 항목은 기존 PegaProx 항목들 앞에
-  - update_files: 업스트림 목록 + MAKUS vLAB 에만 있는 파일(디스크에 있는 것만)
+  - 버전 번호·min_python 은 업스트림을 따른다 (MOAVI Desk 버전 = 병합한 PegaProx 버전)
+  - 업데이트 주소(download_url, update_archive, update_mirror)는 MOAVI Desk 저장소 그대로
+  - changelog: 맨 앞에 MOAVI Desk 항목(없으면 자동 문구), 업스트림의 새 항목은 기존 PegaProx 항목들 앞에
+  - update_files: 업스트림 목록 + MOAVI Desk 에만 있는 파일(디스크에 있는 것만)
 
 사용: python3 scripts/upstream/merge_version.py [업스트림 ref, 기본 vendor] [이전 vendor 커밋]
 """
@@ -57,8 +57,8 @@ def main():
     new_up = [c for c in up_log if not any(head_words(c) == head_words(o) for o in log)]
     at = next((i for i, c in enumerate(log) if c.startswith('PegaProx')), len(log))
     log = log[:at] + new_up + log[at:]
-    if not any(head_words(c) == ['MAKUS vLAB', v] for c in log):
-        log.insert(0, f'MAKUS vLAB {v} — PegaProx {v} 업스트림 병합. 바뀐 내용은 아래 PegaProx {v} 항목을 보세요.')
+    if not any(head_words(c) == ['MOAVI Desk', v] for c in log):
+        log.insert(0, f'MOAVI Desk {v} — PegaProx {v} 업스트림 병합. 바뀐 내용은 아래 PegaProx {v} 항목을 보세요.')
     d['changelog'] = log
 
     files = list(theirs.get('update_files', []))

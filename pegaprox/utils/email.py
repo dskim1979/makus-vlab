@@ -33,8 +33,8 @@ def get_email_logo_html(settings: dict = None) -> str:
             return ''
         port = settings.get('port', 5000)
         base = f"https://{domain}" if port in (443, '443') else f"https://{domain}:{port}"
-        logo_path = settings.get('logo_url') or '/images/vlab-symbol-512.png'  # MAKUS vLAB 심볼 (메일은 PNG)
-        app_name = settings.get('app_name') or 'MAKUS vLAB'
+        logo_path = settings.get('logo_url') or '/images/vlab-symbol-512.png'  # MOAVI Desk 심볼 (메일은 PNG)
+        app_name = settings.get('app_name') or 'MOAVI Desk'
         import html as _html_lib
         return (
             f'<div style="text-align:center;margin-bottom:16px;">'
@@ -84,7 +84,7 @@ def send_email(to_addresses: list, subject: str, body: str, html_body: str = Non
                 return False, "SMTP password could not be decrypted (re-enter it in Settings)"
             smtp_password = raw_smtp_password  # genuinely legacy unencrypted value
     from_email = settings.get('smtp_from_email', '')
-    from_name = settings.get('smtp_from_name', '') or settings.get('app_name', '') or 'MAKUS vLAB'
+    from_name = settings.get('smtp_from_name', '') or settings.get('app_name', '') or 'MOAVI Desk'
     use_tls = settings.get('smtp_tls', True)
     use_ssl = settings.get('smtp_ssl', False)
     

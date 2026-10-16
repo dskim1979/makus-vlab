@@ -48,7 +48,7 @@ def test_a_tenant_falls_back_to_default_and_disabled_shows_defaults(admin):
     c.put('/api/frontend/branding', headers=h, json={'tenant': 't_a', 'branding': {'enabled': True, 'appName': 'Tenant A'}})
     assert c.get('/api/frontend/branding/resolved?tenant=t_a', headers=h).get_json()['appName'] == 'Tenant A'
     c.put('/api/frontend/branding', headers=h, json={'tenant': 't_a', 'branding': {'enabled': False, 'appName': 'Tenant A'}})
-    assert c.get('/api/frontend/branding/resolved?tenant=t_a', headers=h).get_json()['appName'] == 'MAKUS vLAB'
+    assert c.get('/api/frontend/branding/resolved?tenant=t_a', headers=h).get_json()['appName'] == 'MOAVI Desk'
 
 
 def test_images_are_checked_by_content(admin):

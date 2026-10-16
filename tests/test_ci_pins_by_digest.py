@@ -1,6 +1,6 @@
 """What the workflows run is fixed by commit and digest, not by a tag that can move.
 
-MAKUS vLAB: the image and APT publishing workflows of the upstream are not in this
+MOAVI Desk: the image and APT publishing workflows of the upstream are not in this
 repository; the pin rules still hold for every workflow that is.
 
 apt-repo.yml was the one workflow still on version tags (checkout@v4,

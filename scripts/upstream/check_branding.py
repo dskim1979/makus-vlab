@@ -5,7 +5,7 @@
   - AGPL-3.0 §7(b) 저작자 표시 (NOTICE): LegalNotice 줄, 설정 > 정보의 법적 고지, 고객 포털의
     "Powered by PegaProx" — 지우거나 바꾸면 라이선스 위반
   - 내부 이름 (PegaProxApiErrors, generatePegaProxPDF, PEGAPROX_*, pegaprox-theme 등)
-남은 것 중 화면 문구만 MAKUS vLAB 로 바꾸면 된다.
+남은 것 중 화면 문구만 MOAVI Desk 로 바꾸면 된다.
 
 사용: python3 scripts/upstream/check_branding.py
 """
@@ -42,7 +42,7 @@ def main():
                 if 'PegaProx' in line and visible(line):
                     hits.append(f'{os.path.relpath(path, ROOT)}:{n}: {line.strip()[:160]}')
     if hits:
-        print(f'화면에 보일 수 있는 PegaProx {len(hits)}곳 — 법적 고지가 아니면 MAKUS vLAB 로 바꾸세요:')
+        print(f'화면에 보일 수 있는 PegaProx {len(hits)}곳 — 법적 고지가 아니면 MOAVI Desk 로 바꾸세요:')
         print('\n'.join(hits))
     else:
         print('화면 문구에 남은 PegaProx 없음 (법적 고지·내부 이름 제외)')

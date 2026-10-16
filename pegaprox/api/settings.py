@@ -1848,7 +1848,7 @@ def update_server_settings():
             # tab title, so length is the only guard needed here).
             if 'app_name' in request.form:
                 _app_name = request.form.get('app_name', '').strip()[:80]
-                settings['app_name'] = _app_name or 'MAKUS vLAB'
+                settings['app_name'] = _app_name or 'MOAVI Desk'
             if 'app_tagline' in request.form:
                 settings['app_tagline'] = request.form.get('app_tagline', '').strip()[:120]
             
@@ -2039,7 +2039,7 @@ def get_branding():
     setting; this is the ONLY settings data exposed without auth."""
     settings = load_server_settings()
     return jsonify({
-        'app_name': settings.get('app_name') or 'MAKUS vLAB',
+        'app_name': settings.get('app_name') or 'MOAVI Desk',
         'app_tagline': settings.get('app_tagline') or '',
         'logo_url': settings.get('logo_url') or '',
         'favicon_url': settings.get('favicon_url') or '',

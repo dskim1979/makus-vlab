@@ -1,6 +1,6 @@
 {
-  "name": "MAKUS vLAB",
-  "short_name": "MAKUS vLAB",
+  "name": "MOAVI Desk",
+  "short_name": "MOAVI Desk",
   "description": "Proxmox VE · XCP-ng 멀티 클러스터 통합 관리",
   "start_url": "/",
   "scope": "/",

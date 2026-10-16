@@ -43,7 +43,7 @@ def test_the_constant_is_declared_before_the_report_uses_it():
     report would then say 'version unknown', so pin the order."""
     h = _BUNDLE.read_text(encoding='utf-8')
     decl = h.find('const PEGAPROX_VERSION=')
-    use = h.find("'MAKUS vLAB '+(typeof PEGAPROX_VERSION")  # MAKUS vLAB names its own report tool
+    use = h.find("'MOAVI Desk '+(typeof PEGAPROX_VERSION")  # MOAVI Desk names its own report tool
     assert decl != -1, 'the version constant is not in the bundle at all'
     assert use != -1, 'the report no longer builds its tool field the expected way'
     assert decl < use, 'constants.js is concatenated after dashboard.js - the report would ' \

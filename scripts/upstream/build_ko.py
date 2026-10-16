@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """web/src/translations.js 를 업스트림 PegaProx 의 한국어(ko) 블록으로 다시 만든다.
 
-MAKUS vLAB 는 한국어만 싣는다(web/src/contexts.js SUPPORTED_LANGS = ['ko']). 업스트림이 새 버전을
+MOAVI Desk 는 한국어만 싣는다(web/src/contexts.js SUPPORTED_LANGS = ['ko']). 업스트림이 새 버전을
 낼 때마다 이 파일은 충돌하므로 손으로 고치지 않고 매번 새로 만든다.
   - 업스트림 ko 블록을 그대로 가져온다 (새 문구가 자동으로 따라온다)
   - 중복 키 정리: 업스트림 ko 블록에는 이탈리아어·영어 사본이 뒤에 남아 있어 한국어를 덮어쓴다.
     한글이 든 쪽을 남긴다
-  - 화면 문구의 'PegaProx' -> 'MAKUS vLAB'
-  - KO_EXTRA: 업스트림에 한국어가 없어 MAKUS vLAB 가 채우는 키 (Cloud 화면의 cloud.* 등)
+  - 화면 문구의 'PegaProx' -> 'MOAVI Desk'
+  - KO_EXTRA: 업스트림에 한국어가 없어 MOAVI Desk 가 채우는 키 (Cloud 화면의 cloud.* 등)
 
 사용: python3 scripts/upstream/build_ko.py [업스트림 ref, 기본 vendor]
 """
@@ -83,15 +83,15 @@ def main():
             ko = [i for i in idx if HANGUL.search(body[i])]
             keep = ko[-1] if ko else idx[-1]
             drop.update(i for i in idx if i != keep)
-    body = [l.replace('PegaProx', 'MAKUS vLAB') for i, l in enumerate(body) if i not in drop]
+    body = [l.replace('PegaProx', 'MOAVI Desk') for i, l in enumerate(body) if i not in drop]
 
     have = {KEY.match(l).group(1).strip('\'"') for l in body if KEY.match(l)}
     extra = [f"                '{k}': '{v}'," for k, v in KO_EXTRA.items() if k not in have]
     if extra:
-        extra.insert(0, '                // MAKUS vLAB — 업스트림에 한국어가 없는 키 (scripts/upstream/build_ko.py KO_EXTRA)')
+        extra.insert(0, '                // MOAVI Desk — 업스트림에 한국어가 없는 키 (scripts/upstream/build_ko.py KO_EXTRA)')
 
     out = ['        // ═══════════════════════════════════════════════',
-           '        // MAKUS vLAB - Translations',
+           '        // MOAVI Desk - Translations',
            f'        // 한국어 전용 — 업스트림 PegaProx {version} 의 ko 블록을 scripts/upstream/build_ko.py 로 만든 파일.',
            '        // 직접 고치지 말고 build_ko.py(KO_EXTRA)를 고친 뒤 다시 만드세요.',
            '        // ═══════════════════════════════════════════════',
@@ -99,7 +99,7 @@ def main():
            '            ko: {'] + body + extra + ['            }', '        };', '']
     with open(OUT, 'w', encoding='utf-8', newline='\r\n') as fh:
         fh.write('\n'.join(out))
-    print(f'translations.js: PegaProx {version} ko, 키 {len(have)}개, 중복 {len(drop)}개 정리, MAKUS vLAB 추가 {len(extra) and len(extra) - 1}개')
+    print(f'translations.js: PegaProx {version} ko, 키 {len(have)}개, 중복 {len(drop)}개 정리, MOAVI Desk 추가 {len(extra) and len(extra) - 1}개')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 # API description
 
-`docs/openapi.json` is an OpenAPI 3.1 description of the MAKUS vLAB HTTP API. It
+`docs/openapi.json` is an OpenAPI 3.1 description of the MOAVI Desk HTTP API. It
 exists so that integrations (an Ansible collection, a community Terraform
 provider, your own scripts) do not have to reverse engineer the API from the
 web UI.

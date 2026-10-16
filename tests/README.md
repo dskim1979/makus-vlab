@@ -1,4 +1,4 @@
-# MAKUS vLAB test suite
+# MOAVI Desk test suite
 
 ## Authorization / tenant-isolation regression suite
 

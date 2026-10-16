@@ -1,4 +1,4 @@
-// MAKUS vLAB 한국형 보고서 → HWPX(한글 문서, KS X 6101 OWPML)
+// MOAVI Desk 한국형 보고서 → HWPX(한글 문서, KS X 6101 OWPML)
 //
 //  PDF 와 같은 보고서 HTML(html.js)을 읽어 한글 문단·표로 옮김 → 양식 수정은 html.js 한 곳에서
 //  뼈대(header·설정 등)는 한글에서 저장된 검증 파일(hwpxSkeleton.ts)을 쓰고, 글자·문단·테두리 모양을 덧붙인 뒤 본문(section0)만 생성
@@ -343,7 +343,7 @@ export function reportHtmlToHwpx(html: string, opts: { title: string; landscape?
   const iso = new Date().toISOString().replace(/\.\d+Z$/, "Z")
   const hpf = CONTENT_HPF
     .replace("<opf:title/>", `<opf:title>${x(opts.title)}</opf:title>`)
-    .replace(/synthetic-fixture-author/g, x(opts.author || "MAKUS vLAB"))
+    .replace(/synthetic-fixture-author/g, x(opts.author || "MOAVI Desk"))
     .replace(/(name="CreatedDate" content="text">)[^<]*/, `$1${iso}`)
     .replace(/(name="ModifiedDate" content="text">)[^<]*/, `$1${iso}`)
     .replace(/(name="date" content="text">)[^<]*/, `$1${iso}`)

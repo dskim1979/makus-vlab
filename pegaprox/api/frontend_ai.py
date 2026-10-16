@@ -2,7 +2,7 @@
 """
 AI assistant settings of a trusted web front end (MAKUS).
 
-A front end that runs its own AI assistant (for example the MAKUS vLAB operations
+A front end that runs its own AI assistant (for example the MOAVI Desk operations
 assistant) keeps the model connection here: provider, address, model and API
 key. The front end reads it server to server and calls the model itself.
 

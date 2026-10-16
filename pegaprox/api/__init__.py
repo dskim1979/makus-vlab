@@ -43,19 +43,19 @@ def register_blueprints(app):
     from pegaprox.api.topology import bp as topology_bp
     from pegaprox.api.power import bp as power_bp
     from pegaprox.api.gpu import bp as gpu_bp
-    from pegaprox.api.korean_reports import bp as korean_reports_bp  # 한국형 보고서 (MAKUS vLAB 이식)
+    from pegaprox.api.korean_reports import bp as korean_reports_bp  # 한국형 보고서 (MOAVI Desk 이식)
     from pegaprox.api.dr_drill import bp as dr_drill_bp
     from pegaprox.api.multi_sdn import bp as multi_sdn_bp, start_scanner as start_multi_sdn_scanner
     from pegaprox.api.auto_install import bp as auto_install_bp
     from pegaprox.api.ha import bp as ha_bp
     from pegaprox.api.banners import bp as banners_bp
-    from pegaprox.api.directory_verify import bp as directory_verify_bp  # MAKUS: 앞단(MAKUS vLAB 화면)의 LDAP 확인
-    from pegaprox.api.frontend_branding import bp as frontend_branding_bp  # MAKUS: 앞단(MAKUS vLAB 화면)의 화이트라벨
-    from pegaprox.api.frontend_audit import bp as frontend_audit_bp  # MAKUS: 앞단(MAKUS vLAB 화면)의 감사 기록
-    from pegaprox.api.frontend_ai import bp as frontend_ai_bp  # MAKUS: 앞단(MAKUS vLAB 화면)의 AI 도우미 설정
+    from pegaprox.api.directory_verify import bp as directory_verify_bp  # MAKUS: 앞단(MOAVI Desk 화면)의 LDAP 확인
+    from pegaprox.api.frontend_branding import bp as frontend_branding_bp  # MAKUS: 앞단(MOAVI Desk 화면)의 화이트라벨
+    from pegaprox.api.frontend_audit import bp as frontend_audit_bp  # MAKUS: 앞단(MOAVI Desk 화면)의 감사 기록
+    from pegaprox.api.frontend_ai import bp as frontend_ai_bp  # MAKUS: 앞단(MOAVI Desk 화면)의 AI 도우미 설정
     from pegaprox.api.flows import bp as flows_bp  # MAKUS: sFlow 네트워크 흐름
     from pegaprox.api.microseg import bp as microseg_bp  # MAKUS: 마이크로 세그멘테이션
-    from pegaprox.api.vlab import bp as vlab_bp  # MAKUS vLAB: 데스크톱·자원 할당 (vLAB 콘솔용)
+    from pegaprox.api.vlab import bp as vlab_bp  # MOAVI Desk: 데스크톱·자원 할당 (vLAB 콘솔용)
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)

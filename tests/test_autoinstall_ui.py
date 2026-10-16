@@ -294,7 +294,7 @@ def test_no_form_element_wraps_a_root_password(modal):
     """A submitted form that then clears or disappears is what makes a browser offer
     to save the node's root password as the PegaProx login."""
     start = modal.index('function AutoInstallPanel(')
-    end = modal.index('// MAKUS vLAB - Settings Modal')
+    end = modal.index('// MOAVI Desk - Settings Modal')
     block = modal[start:end]
     # comments explain why there is no form and say "<form>" doing so
     code = '\n'.join(l for l in block.splitlines() if not l.lstrip().startswith('//'))

@@ -104,7 +104,7 @@ def check_password_expiry():
             # Send notification - bilingual DE/EN because we dont track user language
             # NS: some users might want english only but this works for everyone
             display_name = user.get('display_name', username)
-            _app_name = load_server_settings().get('app_name', 'MAKUS vLAB')
+            _app_name = load_server_settings().get('app_name', 'MOAVI Desk')
             
             if days_until_expiry <= 0:
                 subject = f"[{_app_name}] Password expired / Passwort abgelaufen"

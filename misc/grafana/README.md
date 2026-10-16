@@ -1,7 +1,7 @@
-# MAKUS vLAB Grafana Dashboard
+# MOAVI Desk Grafana Dashboard
 
-## MAKUS vLAB API Token
-Access to metrics exposed by MAKUS vLAB is secured and requires proper authentication. This ensures that only authorized systems or users can retrieve monitoring data from the exporter endpoint.
+## MOAVI Desk API Token
+Access to metrics exposed by MOAVI Desk is secured and requires proper authentication. This ensures that only authorized systems or users can retrieve monitoring data from the exporter endpoint.
 
 To authenticate against the exporter, an API token must be provided with each request. This token acts as a credential and is required for all metric queries.
 
@@ -9,16 +9,16 @@ To authenticate against the exporter, an API token must be provided with each re
 It is recommended to create a dedicated technical account for monitoring purposes. Using a separate account improves security, auditability, and avoids unintended side effects from personal user accounts.
 
 Follow these steps to generate a suitable API token:
-* Log in to MAKUS vLAB with an administrative or authorized user account.
+* Log in to MOAVI Desk with an administrative or authorized user account.
 * Navigate to the User Settings section.
 * Create a new API key for the technical account.
 * Assign read-only permissions to the API key to restrict access strictly to metric retrieval.
 * Copy and securely store the generated API token.
 
 ## Prometheus Exporter
-To collect metrics from MAKUS vLAB, you need to configure Prometheus to scrape the built-in exporter endpoint. Since the metrics endpoint is secured, a few additional settings are required compared to a default scrape job.
+To collect metrics from MOAVI Desk, you need to configure Prometheus to scrape the built-in exporter endpoint. Since the metrics endpoint is secured, a few additional settings are required compared to a default scrape job.
 
-MAKUS vLAB exposes its metrics over HTTPS on port 5000 under the path /api/metrics. Because of this, you must explicitly enable TLS in your Prometheus configuration. In addition, authentication is required, so you need to create an API token in MAKUS vLAB and pass it along with each request.
+MOAVI Desk exposes its metrics over HTTPS on port 5000 under the path /api/metrics. Because of this, you must explicitly enable TLS in your Prometheus configuration. In addition, authentication is required, so you need to create an API token in MOAVI Desk and pass it along with each request.
 
 ```
 - job_name: 'pegaprox'

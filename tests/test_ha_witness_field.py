@@ -514,7 +514,7 @@ def test_an_install_from_a_branch_writes_down_which(tmp_path, script, start):
 
 
 def test_every_testing_image_says_so_and_the_release_images_do_not():
-    # MAKUS vLAB: the upstream's image workflows are not in this repository; the image itself
+    # MOAVI Desk: the upstream's image workflows are not in this repository; the image itself
     docker = _read('Dockerfile')
     assert 'ARG PEGAPROX_BRANCH=main\nENV PEGAPROX_BRANCH=${PEGAPROX_BRANCH}\n' in docker
     # it carries the witness: the code, the installer and the unit

@@ -1,6 +1,6 @@
 name: Tests
 
-# MAKUS vLAB - the engine's pytest suite (vLAB API, accelerators, the route permission
+# MOAVI Desk - the engine's pytest suite (vLAB API, accelerators, the route permission
 # contract and the core) on every pull request and on pushes to main and feature branches.
 
 on:

@@ -1,4 +1,4 @@
-# MAKUS vLAB APT repository — prototype
+# MOAVI Desk APT repository — prototype
 
 A **self-hosted, GPG-signed APT repository on GitHub Pages**, so users can
 
@@ -33,7 +33,7 @@ postinst + service) is honoured verbatim.
    Key-Type: eddsa
    Key-Curve: ed25519
    Key-Usage: sign
-   Name-Real: MAKUS vLAB Repository Signing Key
+   Name-Real: MOAVI Desk Repository Signing Key
    Name-Email: apt@pegaprox.com
    Expire-Date: 0
    %commit

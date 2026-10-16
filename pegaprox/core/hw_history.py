@@ -117,7 +117,7 @@ def record(cluster_id, node, summ, now_ms=None):
 
 def incidents_in_period(events, from_ms, to_ms):
     """노드 하나의 이벤트(시간순 정렬 무관) → 보고 기간 [from_ms, to_ms) 의 이상 목록
-    MAKUS vLAB incidentsInPeriod 와 같은 규칙: 기간 전에 생겨 이어진 것은 carried, 'new' 만 횟수로 셈, 복구 시각은 기간 뒤 것까지"""
+    MOAVI Desk incidentsInPeriod 와 같은 규칙: 기간 전에 생겨 이어진 것은 carried, 'new' 만 횟수로 셈, 복구 시각은 기간 뒤 것까지"""
     evs = sorted(events, key=lambda e: e['ts'])
     done, cur, before = [], {}, {}
     for e in evs:

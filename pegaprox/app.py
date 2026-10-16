@@ -435,7 +435,7 @@ def create_app():
         ('POST', '/api/sse/subscribe'),
         # a read that takes its filter in the body; the GET beside it is open anyway
         ('POST', '/api/snapshots/overview'),
-        # MAKUS vLAB Korean reports: the same, a read of PVE data for a period given in the body
+        # MOAVI Desk Korean reports: the same, a read of PVE data for a period given in the body
         ('POST', '/api/korean-reports/data'),
         # the ESXi VM detail watch: which VMs the live stream pushes details for, a dict
         # in this process like the SSE subscription (vmware.vm.view, the per-server
@@ -1660,7 +1660,7 @@ def main(debug_mode=False):
     start_password_expiry_thread()
     print("Started password expiry check thread")
 
-    # MAKUS vLAB - loaned GPU/FPGA cards go back when their loan ends (pegaprox/vlab/loans.py)
+    # MOAVI Desk - loaned GPU/FPGA cards go back when their loan ends (pegaprox/vlab/loans.py)
     from pegaprox.vlab.loans import start_loan_thread
     start_loan_thread()
 

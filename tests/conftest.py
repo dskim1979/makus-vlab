@@ -470,7 +470,7 @@ def make_fake_manager_fixture():
     return make_fake_manager
 
 
-# ── MAKUS vLAB: the build ships Korean only ─────────────────────────────────────────────────────
+# ── MOAVI Desk: the build ships Korean only ─────────────────────────────────────────────────────
 # web/src/contexts.js SUPPORTED_LANGS = ['ko'] and web/src/translations.js holds the ko block
 # alone (scripts/upstream/build_ko.py). Upstream's translation tests assert that every key is
 # in all nine language blocks; in this build they fail by design, and every upstream release
@@ -509,4 +509,4 @@ def pytest_runtest_makereport(item, call):
     if (_LANG_FAILURE.search(text) or _LANG_TEST.search(item.name)
             or any('lang' in f.lower() for f in frames)):
         rep.outcome = 'skipped'
-        rep.wasxfail = 'MAKUS vLAB ko-only build: upstream checks all nine language blocks'
+        rep.wasxfail = 'MOAVI Desk ko-only build: upstream checks all nine language blocks'

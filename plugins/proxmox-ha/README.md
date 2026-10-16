@@ -1,8 +1,8 @@
-# proxmox-ha — MAKUS vLAB Plugin
+# proxmox-ha — MOAVI Desk Plugin
 
-Adds Proxmox native HA (High Availability) resource management to MAKUS vLAB.
+Adds Proxmox native HA (High Availability) resource management to MOAVI Desk.
 
-MAKUS vLAB does not currently expose Proxmox's `/cluster/ha/resources` API surface. This plugin bridges that gap by routing HA operations through the existing authenticated cluster manager session — no additional credentials required.
+MOAVI Desk does not currently expose Proxmox's `/cluster/ha/resources` API surface. This plugin bridges that gap by routing HA operations through the existing authenticated cluster manager session — no additional credentials required.
 
 ## Features
 
@@ -13,7 +13,7 @@ MAKUS vLAB does not currently expose Proxmox's `/cluster/ha/resources` API surfa
 
 ## Installation
 
-1. Copy the `proxmox-ha/` folder into your MAKUS vLAB `plugins/` directory:
+1. Copy the `proxmox-ha/` folder into your MOAVI Desk `plugins/` directory:
    ```
    plugins/
    └── proxmox-ha/
@@ -22,7 +22,7 @@ MAKUS vLAB does not currently expose Proxmox's `/cluster/ha/resources` API surfa
        └── README.md
    ```
 
-2. In the MAKUS vLAB UI go to **Settings → Plugins** and enable **Proxmox HA Resources**.
+2. In the MOAVI Desk UI go to **Settings → Plugins** and enable **Proxmox HA Resources**.
 
 3. The plugin registers the route `/api/plugins/proxmox-ha/api/ha` automatically.
 
@@ -34,7 +34,7 @@ MAKUS vLAB does not currently expose Proxmox's `/cluster/ha/resources` API surfa
 
 ## Authentication
 
-All requests require a valid MAKUS vLAB Bearer token (the same token used for all other MAKUS vLAB API calls):
+All requests require a valid MOAVI Desk Bearer token (the same token used for all other MOAVI Desk API calls):
 
 ```
 Authorization: Bearer <your-pegaprox-token>
@@ -96,7 +96,7 @@ Content-Type: application/json
 
 | Field | Required | Values | Default |
 |---|---|---|---|
-| `cluster_id` | yes | MAKUS vLAB cluster ID | — |
+| `cluster_id` | yes | MOAVI Desk cluster ID | — |
 | `sid` | yes | `vm:<vmid>` or `ct:<vmid>` | — |
 | `state` | no | `started`, `stopped`, `enabled`, `disabled` | `started` |
 | `max_restart` | no | integer | Proxmox default |
@@ -164,5 +164,5 @@ Example error:
 
 ## Compatibility
 
-- **MAKUS vLAB:** 0.9.3 Beta or later
+- **MOAVI Desk:** 0.9.3 Beta or later
 - **Proxmox VE:** 7.x and 8.x

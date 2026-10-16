@@ -3,7 +3,7 @@
 // Live data is NEVER cached — only static shell + images.
 // On push event we fetch /api/push/inbox to show the freshest notification.
 
-const CACHE_NAME = 'pegaprox-shell-v4';  // v4: MAKUS vLAB 아이콘
+const CACHE_NAME = 'pegaprox-shell-v4';  // v4: MOAVI Desk 아이콘
 const SHELL_ASSETS = [
   '/',
   '/manifest.webmanifest',

@@ -1,15 +1,15 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Contexts
+        // MOAVI Desk - Contexts
         // LanguageContext + AuthContext providers
         // ═══════════════════════════════════════════════
         // ═══════════════════════════════════════════════
-        // Branding Context — white-label support (MAKUS vLAB)
+        // Branding Context — white-label support (MOAVI Desk)
         // Fetches /api/branding (public, no auth) once on boot and applies it
         // to <title>, favicon, and exposes it to any component that wants a
         // custom logo instead of the bundled default.
         // ═══════════════════════════════════════════════
         const BrandingContext = createContext({
-            appName: 'MAKUS vLAB',
+            appName: 'MOAVI Desk',
             appTagline: 'for Proxmox Virtual Environment',
             logoUrl: '',
             faviconUrl: '',
@@ -18,7 +18,7 @@
 
         function BrandingProvider({ children }) {
             const [branding, setBranding] = useState({
-                appName: 'MAKUS vLAB',
+                appName: 'MOAVI Desk',
                 appTagline: 'for Proxmox Virtual Environment',
                 logoUrl: '',
                 faviconUrl: '',
@@ -32,7 +32,7 @@
                     .then(data => {
                         if (cancelled || !data) return;
                         const next = {
-                            appName: data.app_name || 'MAKUS vLAB',
+                            appName: data.app_name || 'MOAVI Desk',
                             appTagline: data.app_tagline || '',
                             logoUrl: data.logo_url || '',
                             faviconUrl: data.favicon_url || '',

@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Node Modals
+        // MOAVI Desk - Node Modals
         // NodeShell terminal, NodeModal, ConsoleModal
         // ═══════════════════════════════════════════════
         function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
@@ -595,7 +595,7 @@
 
         // NS May 2026 — Proxmox termproxy terminal (xterm.js native).
         // Connects directly via PVE's built-in termproxy — no second SSH login.
-        // The MAKUS vLAB session is already authorized to act as the cluster
+        // The MOAVI Desk session is already authorized to act as the cluster
         // user, so the backend WS proxy fetches a termproxy ticket and does
         // the `user:ticket\n` handshake on our behalf.
         //
@@ -2596,11 +2596,11 @@
                                                     </div>
                                                     {/* MK May 2026 — SSH unavailable: render a single explainer
                                                         instead of five question-mark service cards. Surfaces
-                                                        in dev / fresh-install setups where the MAKUS vLAB user
+                                                        in dev / fresh-install setups where the MOAVI Desk user
                                                         has no SSH key to the PVE nodes yet. */}
                                                     {data.clusterHealth.ssh_unavailable ? (
                                                         <div className="text-sm text-gray-400 italic">
-                                                            {t('clusterHealthSshMissing') || 'Cluster Health needs SSH access to the node from MAKUS vLAB (corosync-cfgtool, pvecm, systemctl). Configure the cluster\'s Node-Shell SSH credentials and refresh.'}
+                                                            {t('clusterHealthSshMissing') || 'Cluster Health needs SSH access to the node from MOAVI Desk (corosync-cfgtool, pvecm, systemctl). Configure the cluster\'s Node-Shell SSH credentials and refresh.'}
                                                         </div>
                                                     ) : (<>
                                                     {/* pvecm quorum */}
@@ -4335,7 +4335,7 @@
                     'width=1280,height=860,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes'
                 );
                 if (!win) {                      // blocked by a popup blocker — keep the tab
-                    alert(t('popupBlocked') || 'Your browser blocked the console window. Allow popups for MAKUS vLAB and try again.');
+                    alert(t('popupBlocked') || 'Your browser blocked the console window. Allow popups for MOAVI Desk and try again.');
                     return;
                 }
                 try { win.focus(); } catch (_) {}
@@ -4868,7 +4868,7 @@
                                     <div className="p-4 space-y-3">
                                         <p className="text-[13px]" style={sub}>{t('hwIpmitoolMissing') || 'ipmitool is not installed on this node.'}</p>
                                         <div className="border rounded p-2 text-[11px]" style={{borderColor: 'rgba(239,192,6,0.3)', background: 'rgba(239,192,6,0.05)', color: '#efc006'}}>
-                                            {t('hwInstallHint') || 'MAKUS vLAB will run apt-get install ipmitool on the node and may load the IPMI kernel modules. Read-only, local IPMI only.'}
+                                            {t('hwInstallHint') || 'MOAVI Desk will run apt-get install ipmitool on the node and may load the IPMI kernel modules. Read-only, local IPMI only.'}
                                         </div>
                                         <button onClick={install} disabled={installing}
                                             className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"

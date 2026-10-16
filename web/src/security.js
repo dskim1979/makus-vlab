@@ -1,8 +1,8 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Security & Compliance
+        // MOAVI Desk - Security & Compliance
         // SecuritySettings, Compliance, IPWhitelist, Backup, UpdateManager
         // ═══════════════════════════════════════════════
-        // Security Settings Section Component (for MAKUS vLAB Settings)
+        // Security Settings Section Component (for MOAVI Desk Settings)
         // LW: The locked IPs table was AI-generated (Claude), I just styled it - Oct 2025
         function SecuritySettingsSection({ addToast }) {
             const { t } = useTranslation();
@@ -599,7 +599,7 @@
                         </div>
                         
                         <p className="text-sm text-gray-400 mb-4">
-                            {t('force2FADesc') || 'Require all users to set up Two-Factor Authentication before they can use MAKUS vLAB.'}
+                            {t('force2FADesc') || 'Require all users to set up Two-Factor Authentication before they can use MOAVI Desk.'}
                         </p>
                         
                         {settings.force_2fa && (
@@ -617,7 +617,7 @@
                                     />
                                     <div>
                                         <span className="text-sm text-yellow-400 font-medium">{t('force2FAExcludeAdmins') || 'Exclude admin accounts'}</span>
-                                        <p className="text-xs text-gray-500">{t('force2FAExcludeAdminsDesc') || 'Admins can use MAKUS vLAB without 2FA'}</p>
+                                        <p className="text-xs text-gray-500">{t('force2FAExcludeAdminsDesc') || 'Admins can use MOAVI Desk without 2FA'}</p>
                                     </div>
                                 </label>
                                 
@@ -986,7 +986,7 @@
                             {hardening.air_gap_mode && (
                                 <div className="mt-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
                                     <p className="text-xs text-yellow-300">
-                                        ⚠ {t('airGapModeActive') || 'Active — MAKUS vLAB will not contact external services. OIDC auto-discovery against public IdPs may break; pin discovery URLs to internal endpoints.'}
+                                        ⚠ {t('airGapModeActive') || 'Active — MOAVI Desk will not contact external services. OIDC auto-discovery against public IdPs may break; pin discovery URLs to internal endpoints.'}
                                     </p>
                                 </div>
                             )}
@@ -1008,7 +1008,7 @@
                         </div>
                         
                         <p className="text-xs text-gray-500 mb-4">
-                            {t('securitySelfCheckDisclaimer') || 'Internal self-check across MAKUS vLAB security settings — not a formal HIPAA or ISO 27001 assessment, attestation, or certification.'}
+                            {t('securitySelfCheckDisclaimer') || 'Internal self-check across MOAVI Desk security settings — not a formal HIPAA or ISO 27001 assessment, attestation, or certification.'}
                         </p>
 
                         {compliance && (

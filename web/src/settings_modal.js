@@ -2690,10 +2690,10 @@
         }
 
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Settings Modal
+        // MOAVI Desk - Settings Modal
         // PegaProxSettingsModal (Server, SSL, SMTP, RBAC, Audit, Tenants)
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB Settings Modal with User Management and Audit Log
+        // MOAVI Desk Settings Modal with User Management and Audit Log
         function PegaProxSettingsModal({ isOpen, onClose, addToast, onGroupsChanged }) {
             const { t } = useTranslation();
             // haStandby: the saves below that no standby carries out, forwarding or not (#625)
@@ -2858,7 +2858,7 @@
                 proxy_bind_address: '',
                 logo_url: '',
                 favicon_url: '',
-                app_name: 'MAKUS vLAB',
+                app_name: 'MOAVI Desk',
                 app_tagline: 'for Proxmox Virtual Environment',
                 default_theme: 'proxmoxDark',  // NS: Default theme for new users - Jan 2026
                 login_background: '',
@@ -2869,7 +2869,7 @@
                 smtp_user: '',
                 smtp_password: '',
                 smtp_from_email: '',
-                smtp_from_name: 'MAKUS vLAB Alerts',
+                smtp_from_name: 'MOAVI Desk Alerts',
                 smtp_tls: true,
                 smtp_ssl: false,
                 alert_email_recipients: [],
@@ -3161,7 +3161,7 @@
             
             // NS: Perform rollback - Jan 2026
             const performRollback = async (backupName) => {
-                if (!confirm(t('confirmRollback') || `This will restore MAKUS vLAB from backup "${backupName}". The server will restart. Continue?`)) return;
+                if (!confirm(t('confirmRollback') || `This will restore MOAVI Desk from backup "${backupName}". The server will restart. Continue?`)) return;
                 setUpdateLoading(true);
                 setUpdateProgress({ status: 'restoring', message: t('restoringBackup') || 'Restoring from backup...' });
                 try {
@@ -3710,7 +3710,7 @@
                             login_background: data.login_background || '',
                             logo_url: data.logo_url || '',
                             favicon_url: data.favicon_url || '',
-                            app_name: data.app_name || 'MAKUS vLAB',
+                            app_name: data.app_name || 'MOAVI Desk',
                             app_tagline: data.app_tagline || 'for Proxmox Virtual Environment',
                             // SMTP settings
                             smtp_enabled: data.smtp_enabled || false,
@@ -3719,7 +3719,7 @@
                             smtp_user: data.smtp_user || '',
                             smtp_password: data.smtp_password || '',
                             smtp_from_email: data.smtp_from_email || '',
-                            smtp_from_name: data.smtp_from_name || 'MAKUS vLAB Alerts',
+                            smtp_from_name: data.smtp_from_name || 'MOAVI Desk Alerts',
                             smtp_tls: data.smtp_tls !== false,
                             smtp_ssl: data.smtp_ssl || false,
                             // Alert settings
@@ -3949,7 +3949,7 @@
                     formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('proxy_bind_address', serverSettings.proxy_bind_address || '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');
-                    formData.append('app_name', serverSettings.app_name || 'MAKUS vLAB');
+                    formData.append('app_name', serverSettings.app_name || 'MOAVI Desk');
                     formData.append('app_tagline', serverSettings.app_tagline || '');
                     // NS: alert recipients live in the same tab - must send them too (#131)
                     formData.append('alert_email_recipients', JSON.stringify(serverSettings.alert_email_recipients || []));
@@ -4168,7 +4168,7 @@
                             smtp_user: serverSettings.smtp_user || '',
                             smtp_password: serverSettings.smtp_password || '',
                             smtp_from_email: serverSettings.smtp_from_email,
-                            smtp_from_name: serverSettings.smtp_from_name || 'MAKUS vLAB Alerts',
+                            smtp_from_name: serverSettings.smtp_from_name || 'MOAVI Desk Alerts',
                             smtp_tls: serverSettings.smtp_tls !== false,
                             smtp_ssl: serverSettings.smtp_ssl || false
                         })
@@ -7418,7 +7418,7 @@
                                                 <Icons.Plus className="w-3 h-3" /> Add Mapping
                                             </button>
                                         </div>
-                                        <p className="text-xs text-gray-500">Map AD/LDAP groups to MAKUS vLAB roles (including custom roles). Use full Distinguished Name (DN).</p>
+                                        <p className="text-xs text-gray-500">Map AD/LDAP groups to MOAVI Desk roles (including custom roles). Use full Distinguished Name (DN).</p>
                                         
                                         {ldapConfig.ldap_group_mappings.length === 0 ? (
                                             <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">No group mappings configured. Click "Add Mapping" to map an AD group to a role.</p>
@@ -7733,7 +7733,7 @@
                                                 <Icons.Plus className="w-3 h-3" /> Add Mapping
                                             </button>
                                         </div>
-                                        <p className="text-xs text-gray-500">{oidcConfig.oidc_provider === 'entra' ? 'Map Entra groups to MAKUS vLAB roles. Use group Object IDs (Azure Portal ↑ Groups ↑ Overview).' : 'Map provider groups to MAKUS vLAB roles (including custom roles).'}</p>
+                                        <p className="text-xs text-gray-500">{oidcConfig.oidc_provider === 'entra' ? 'Map Entra groups to MOAVI Desk roles. Use group Object IDs (Azure Portal ↑ Groups ↑ Overview).' : 'Map provider groups to MOAVI Desk roles (including custom roles).'}</p>
                                         
                                         {oidcConfig.oidc_group_mappings.length === 0 ? (
                                             <p className="text-gray-600 text-sm text-center py-4 border border-dashed border-proxmox-border rounded-lg">No group mappings configured. Click "Add Mapping" to map a group to a role.</p>
@@ -7855,7 +7855,7 @@
                                                     {t('syslogEnabled') || 'Syslog receiver'}
                                                 </h4>
                                                 <p className="text-sm text-gray-400 mt-1">
-                                                    {t('syslogEnabledDesc') || 'Listen for syslog messages on UDP/TCP port 1514. Disable to close the port if MAKUS vLAB does not ingest syslog from your nodes.'}
+                                                    {t('syslogEnabledDesc') || 'Listen for syslog messages on UDP/TCP port 1514. Disable to close the port if MOAVI Desk does not ingest syslog from your nodes.'}
                                                 </p>
                                             </div>
                                             <label className="flex items-center gap-2 cursor-pointer shrink-0">
@@ -7992,7 +7992,7 @@
                                         </p>
                                     </div>
 
-                                    {/* White-label branding - MAKUS vLAB */}
+                                    {/* White-label branding - MOAVI Desk */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <h4 className="font-medium text-white flex items-center gap-2">
                                             <Icons.Image />
@@ -8009,7 +8009,7 @@
                                                     type="text"
                                                     value={serverSettings.app_name}
                                                     onChange={e => setServerSettings({...serverSettings, app_name: e.target.value})}
-                                                    placeholder="MAKUS vLAB"
+                                                    placeholder="MOAVI Desk"
                                                     maxLength={80}
                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
                                                 />
@@ -8767,7 +8767,7 @@
                                                             type="text"
                                                             value={serverSettings.smtp_from_name}
                                                             onChange={e => setServerSettings({...serverSettings, smtp_from_name: e.target.value})}
-                                                            placeholder="MAKUS vLAB Alerts"
+                                                            placeholder="MOAVI Desk Alerts"
                                                             className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                         />
                                                     </div>
@@ -8922,7 +8922,7 @@
                                                     onChange={e => setServerSettings({...serverSettings, alert_update_available: e.target.checked})}
                                                     className="w-4 h-4"
                                                 />
-                                                <span className="text-sm text-white">{t('alertUpdateAvailable') || 'Email me when a MAKUS vLAB update is available'}</span>
+                                                <span className="text-sm text-white">{t('alertUpdateAvailable') || 'Email me when a MOAVI Desk update is available'}</span>
                                             </label>
                                             <p className="text-xs text-gray-500 mt-1 ml-6">{t('alertUpdateAvailableDesc') || 'Polled once a day. Notifies once per new version to the recipients listed above.'}</p>
                                         </div>
@@ -8953,7 +8953,7 @@
                                         </div>
                                         <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
                                             <p className="text-xs text-yellow-400">
-                                                {t('pluginDisclaimer') || 'MAKUS vLAB takes no responsibility or liability for community plugins. Administrators should always review and scan plugin code before enabling. Only install plugins from trusted sources.'}
+                                                {t('pluginDisclaimer') || 'MOAVI Desk takes no responsibility or liability for community plugins. Administrators should always review and scan plugin code before enabling. Only install plugins from trusted sources.'}
                                             </p>
                                         </div>
                                         {discoveredPlugins.length === 0 ? (
@@ -9437,7 +9437,7 @@
                                                 </h3>
                                                 <div className="mt-2 space-y-1">
                                                     <p className="text-2xl font-bold text-proxmox-orange">
-                                                        MAKUS vLAB {updateInfo?.current_version || PEGAPROX_VERSION}
+                                                        MOAVI Desk {updateInfo?.current_version || PEGAPROX_VERSION}
                                                     </p>
                                                     <p className="text-sm text-gray-400">
                                                         Build: {updateInfo?.current_build || '2026.01'}
@@ -9589,7 +9589,7 @@
                                             <Icons.CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-3" />
                                             <h3 className="text-lg font-semibold text-white">You're up to date!</h3>
                                             <p className="text-gray-400 mt-1">
-                                                MAKUS vLAB {updateInfo.current_version} is the latest version.
+                                                MOAVI Desk {updateInfo.current_version} is the latest version.
                                             </p>
                                         </div>
                                     )}
@@ -9842,9 +9842,9 @@
                                     {/* Version Info */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 text-center">
                                         <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl mb-4">
-                                            <img src={getLogoSrc()} alt="MAKUS vLAB" className="w-20 h-20 object-contain" />
+                                            <img src={getLogoSrc()} alt="MOAVI Desk" className="w-20 h-20 object-contain" />
                                         </div>
-                                        <h2 className="text-3xl font-bold text-white">MAKUS vLAB</h2>
+                                        <h2 className="text-3xl font-bold text-white">MOAVI Desk</h2>
                                         <p className="text-xl text-proxmox-orange mt-1">{PEGAPROX_VERSION}</p>
                                         <p className="text-sm text-gray-400 mt-2">Multi-Cluster Proxmox Management</p>
                                         <p className="text-xs text-gray-500 mt-1">© 2025-2026 PegaProx Team · Portions © 2026 Makus Systems</p>
@@ -9907,13 +9907,13 @@
                                                 className="text-proxmox-orange hover:underline">NOTICE</a>
                                         </p>
                                         <p className="text-center text-gray-500 pt-1">Made with ❤️ in Austria and Germany</p>
-                                        {/* MAKUS vLAB is a modified version of PegaProx — its own copyright line and the §13 offer for
+                                        {/* MOAVI Desk is a modified version of PegaProx — its own copyright line and the §13 offer for
                                             the modified source sit below the upstream notice, which stays unchanged above. */}
                                         <p className="text-center text-gray-500 border-t border-proxmox-border pt-3">
-                                            MAKUS vLAB — a modified version of PegaProx · Portions © 2026 Makus Systems ·{' '}
+                                            MOAVI Desk — a modified version of PegaProx · Portions © 2026 Makus Systems ·{' '}
                                             <a href="https://github.com/dskim1979/makus-virt"
                                                 target="_blank" rel="noopener noreferrer"
-                                                className="text-proxmox-orange hover:underline">MAKUS vLAB source code</a>
+                                                className="text-proxmox-orange hover:underline">MOAVI Desk source code</a>
                                         </p>
                                     </div>
                                 </div>

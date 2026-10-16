@@ -2,7 +2,7 @@
 """
 Audit events of a trusted web front end (MAKUS).
 
-A front end that performs actions itself (for example the MAKUS vLAB screens, which
+A front end that performs actions itself (for example the MOAVI Desk screens, which
 talk to Proxmox directly for many of them) sends its audit events here, so one
 audit log holds both and the SIEM / syslog targets of this server forward them
 too (log_audit -> SIEM queue).

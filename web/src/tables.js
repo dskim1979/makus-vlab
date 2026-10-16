@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Tables & Cards
+        // MOAVI Desk - Tables & Cards
         // NodeCard + ResourceTable
         // ═══════════════════════════════════════════════
         function getProxmoxNodeHost(target = {}, fallbackName = '') {

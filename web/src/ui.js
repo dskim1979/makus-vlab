@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - UI Components
+        // MOAVI Desk - UI Components
         // Charts, Gauge, Toast, NodeJoin wizards
         // ═══════════════════════════════════════════════
 
@@ -10,7 +10,7 @@
         function getLogoSrc() {
             try {
                 if (window.__NEXUS_CUSTOM_LOGO__) return window.__NEXUS_CUSTOM_LOGO__;
-                // MAKUS vLAB 심볼 — 자체 파란 배경이라 어두운·밝은 테마 모두 그대로 (화이트라벨 로고가 있으면 그것)
+                // MOAVI Desk 심볼 — 자체 파란 배경이라 어두운·밝은 테마 모두 그대로 (화이트라벨 로고가 있으면 그것)
                 return '/images/vlab-symbol.svg';
             } catch (_) {
                 return '/images/vlab-symbol.svg';
@@ -26,7 +26,7 @@
         async function _loadPdfLogo() {
             if (_pdfLogoCache) return _pdfLogoCache;
             try {
-                const resp = await fetch('/images/vlab-symbol-512.png');  // MAKUS vLAB 심볼 (jsPDF 는 PNG)
+                const resp = await fetch('/images/vlab-symbol-512.png');  // MOAVI Desk 심볼 (jsPDF 는 PNG)
                 const blob = await resp.blob();
                 return new Promise((resolve) => {
                     const reader = new FileReader();
@@ -36,7 +36,7 @@
             } catch(e) { return null; }
         }
 
-        // NS: main entry point for all MAKUS vLAB PDF exports
+        // NS: main entry point for all MOAVI Desk PDF exports
         async function generatePegaProxPDF({ title, subtitle, clusterName, content, filename, orientation }) {
             if (typeof window.jspdf === 'undefined') {
                 console.error('[PDF] jsPDF not loaded');
@@ -65,7 +65,7 @@
             doc.setFont('helvetica', 'bold');
             doc.setFontSize(16);
             doc.setTextColor(233, 236, 239); // #e9ecef
-            doc.text(title || 'MAKUS vLAB Report', margin + 24, 12);
+            doc.text(title || 'MOAVI Desk Report', margin + 24, 12);
             doc.setFontSize(9);
             doc.setFont('helvetica', 'normal');
             doc.setTextColor(150, 160, 170);
@@ -196,7 +196,7 @@
                 doc.setFont('helvetica', 'normal');
                 doc.setFontSize(7);
                 doc.setTextColor(140, 140, 140);
-                doc.text(`MAKUS vLAB ${PEGAPROX_VERSION ? 'v' + PEGAPROX_VERSION : ''}`, margin, pageH - 4);
+                doc.text(`MOAVI Desk ${PEGAPROX_VERSION ? 'v' + PEGAPROX_VERSION : ''}`, margin, pageH - 4);
                 doc.text('Confidential', pageW / 2, pageH - 4, { align: 'center' });
                 doc.text(`Page ${i} / ${totalPages}`, pageW - margin, pageH - 4, { align: 'right' });
             }
@@ -919,7 +919,7 @@
             );
         }
 
-        // Sponsor Slot Component - disabled for MAKUS vLAB rebrand
+        // Sponsor Slot Component - disabled for MOAVI Desk rebrand
         function SponsorSlot({ num }) {
             return null;
         }
@@ -3185,7 +3185,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                     </div>
                                     <div style={{ background: 'rgba(245,79,71,0.08)', border: '1px solid rgba(245,79,71,0.4)',
                                                   borderRadius: '4px', padding: '8px 10px', fontSize: '12px', color: '#f54f47' }}>
-                                        ⚠ {t('pbsEncryptionKeyShown') || 'The key is shown'} <strong>{t('pbsOnce') || 'once'}</strong>. {t('pbsEncryptionKeyNotRetained') || 'MAKUS vLAB does not retain a copy.'}
+                                        ⚠ {t('pbsEncryptionKeyShown') || 'The key is shown'} <strong>{t('pbsOnce') || 'once'}</strong>. {t('pbsEncryptionKeyNotRetained') || 'MOAVI Desk does not retain a copy.'}
                                     </div>
                                     {err && <div style={{ color: '#f54f47', fontSize: '12px' }}>{err}</div>}
                                     <div className="flex justify-end">

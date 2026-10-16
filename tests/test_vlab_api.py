@@ -1106,7 +1106,7 @@ def branding(env, tmp_path, monkeypatch):
 
 def test_white_label_is_saved_and_shown_to_everyone(branding):
     api, admin, alice, _, _ = branding
-    assert api.anon().get('/api/vlab/branding').get_json()['appName'] == 'MAKUS vLAB'     # defaults, no sign-in
+    assert api.anon().get('/api/vlab/branding').get_json()['appName'] == 'MOAVI Desk'     # defaults, no sign-in
     r = admin.put('/api/vlab/admin/branding', json={'enabled': True, 'appName': '연구소 VDI', 'primaryColor': 'e63946',
                                                     'footerText': '© 한빛연구원', 'docsUrl': 'javascript:alert(1)',
                                                     'logoUrl': 'http://evil/x.png', 'whatever': 1})

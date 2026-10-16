@@ -1,10 +1,10 @@
-# MAKUS vLAB - Encryption Architecture (Operator Guide)
+# MOAVI Desk - Encryption Architecture (Operator Guide)
 
 > For **vulnerability reporting** see [`SECURITY.md`](../SECURITY.md) in the repo root.
 > This document covers the technical design: how keys are loaded, where the DB
 > is encrypted, what to do when things go wrong.
 
-MAKUS vLAB persists secrets in two places:
+MOAVI Desk persists secrets in two places:
 
 1. **Application database** (`config/pegaprox.db`) - users, sessions, audit
    log, cluster credentials, scheduler state.
@@ -27,7 +27,7 @@ the first hit for the lifetime of the process.
 | 2 | `${CREDENTIALS_DIRECTORY}/db-key` | systemd `LoadCredentialEncrypted=` | TPM2- or host-key-bound. Strongest at-rest option |
 | 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | chmod 0600 (or 0640 root:pegaprox) |
 | 4 | `/etc/pegaprox/secret.key` | **System-service install default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
-| 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running MAKUS vLAB) |
+| 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running MOAVI Desk) |
 | 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot |
 
 The loader **rejects** any file-based tier whose permissions have group-write,
@@ -122,7 +122,7 @@ posture for high-entropy raw keys.
 
 ## 3. Migrating an existing install (plain → encrypted)
 
-MAKUS vLAB 0.9.9.3+ **auto-encrypts on first boot** when:
+MOAVI Desk 0.9.9.3+ **auto-encrypts on first boot** when:
 
 - `sqlcipher3` is importable (Linux x86_64 default), **and**
 - the master key resolves to a usable tier, **and**
@@ -210,7 +210,7 @@ somewhere safe right after the migration and delete that copy yourself.
 
 ## 4. Recovery / disaster scenarios
 
-> **The master key is non-recoverable.** MAKUS vLAB does not implement key
+> **The master key is non-recoverable.** MOAVI Desk does not implement key
 > escrow or shamir-shared rebuilds. If the key is lost and the DB is
 > encrypted, the DB is permanently unreadable.
 
@@ -222,7 +222,7 @@ If you take backups of `config/`, **also** back up the master key - but
 - DB → encrypted nightly snapshot to S3 (versioned, KMS-encrypted bucket).
 - Master key → printed once, sealed in a tamper-evident envelope, kept in
   the on-call lead's safe. Plus: stored in your password manager's shared
-  vault under "Infra / MAKUS vLAB / master-key".
+  vault under "Infra / MOAVI Desk / master-key".
 
 If both live in the same backup tarball, encrypting the DB bought you
 nothing against backup theft.
@@ -240,7 +240,7 @@ corrupt DB - corruption manifests as `OperationalError: file is not a
 database` at first query. Use `--migrate-db --dry-run` to detect the
 `corrupt` state.
 
-If you can still get an old backup readable: stop MAKUS vLAB, swap the
+If you can still get an old backup readable: stop MOAVI Desk, swap the
 corrupt DB out, restore the backup, re-run `--migrate-db`.
 
 ---
@@ -330,7 +330,7 @@ exactly this case.
    acceptable since both rely on the same master key - when the master
    key changes, both layers change together.
 3. **No second-factor at the DB layer.** A compromised host running
-   MAKUS vLAB can read the DB. Compartmentalization (running clusters in
+   MOAVI Desk can read the DB. Compartmentalization (running clusters in
    separate VMs with separate keys) is the only mitigation.
 4. **Plugin compatibility.** First-party plugins use `dbcrypto.connect()`
    and work transparently. Third-party community plugins that call

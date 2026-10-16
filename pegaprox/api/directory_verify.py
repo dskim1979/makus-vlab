@@ -2,7 +2,7 @@
 """
 Directory credential check for a trusted front end (MAKUS).
 
-A web front end that keeps its own users and sessions (for example the MAKUS vLAB
+A web front end that keeps its own users and sessions (for example the MOAVI Desk
 screens) can let people sign in with their LDAP / Active Directory account
 without holding a directory configuration of its own: LDAP is configured once
 here (Settings > LDAP), and the front end asks this server whether a user name

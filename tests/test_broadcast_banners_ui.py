@@ -44,7 +44,7 @@ def bar(dash):
 
 @pytest.fixture(scope='module')
 def editor(modal):
-    return _block(modal, '// LW Oct 2026 - Settings > Banners', '// MAKUS vLAB - Settings Modal')
+    return _block(modal, '// LW Oct 2026 - Settings > Banners', '// MOAVI Desk - Settings Modal')
 
 
 # -- source ------------------------------------------------------------------------------------------

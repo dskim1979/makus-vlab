@@ -506,7 +506,7 @@ def check_and_send_alerts():
 
         if triggered:
             # Send alert
-            _app_name = load_server_settings().get('app_name', 'MAKUS vLAB')
+            _app_name = load_server_settings().get('app_name', 'MOAVI Desk')
             alert_name = alert.get('name', f'{metric} Alert')
             subject = f"[{_app_name} Alert] {alert_name}"
             body = f"""
@@ -666,7 +666,7 @@ def check_update_available_alert():
         return  # already told the user about this one
 
     # compose + send
-    _app_name = settings.get('app_name', 'MAKUS vLAB')
+    _app_name = settings.get('app_name', 'MOAVI Desk')
     release_date = remote.get('release_date') or ''
     changelog = remote.get('changelog', []) or []
     subject = f"[{_app_name}] Update available — {latest}"
@@ -788,7 +788,7 @@ def _emit_node_status_event(cluster_id, node, new_status, message, severity, rec
 
     if recipients:
         try:
-            _app_name = load_server_settings().get('app_name', 'MAKUS vLAB')
+            _app_name = load_server_settings().get('app_name', 'MOAVI Desk')
             subject = f"[{_app_name}] {alert_data['alert_name']}"
             body = f"{message}\n\nCluster: {cluster_id}\nNode: {node}\nTime: {alert_data['timestamp']}\n"
             # MK May 2026 - alert_data['alert_name'] is user-defined; message comes

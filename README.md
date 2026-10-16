@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/vlab-logo.svg" alt="MAKUS vLAB" height="56">
+  <img src="images/vlab-logo.svg" alt="MOAVI Desk" height="56">
 </p>
 
 <h3 align="center">연구소·기업·교육 기관의 LAB과 FPGA 개발을 위한 가상 데스크톱(VDI) 플랫폼</h3>
@@ -13,7 +13,7 @@
 
 ---
 
-**MAKUS vLAB** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·교육생·직원에게 데스크톱을 나눠 주고,
+**MOAVI Desk** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·교육생·직원에게 데스크톱을 나눠 주고,
 GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 저장소는 vLAB 의 **엔진(API 서버)** 입니다.
 관리 콘솔과 사용자 작업 공간은 [makus-vlab-console](https://github.com/dskim1979/makus-vlab-console), 전용 클라이언트는 `makus-vlab-client` 입니다.
 
@@ -81,7 +81,7 @@ vGPU 는 NVIDIA vGPU 호스트 드라이버와 라이선스 서버(DLS/CLS)가 �
 
 ## 라이선스와 출처
 
-MAKUS vLAB 은 GNU Affero General Public License v3.0([LICENSE](LICENSE))으로 배포합니다.
+MOAVI Desk 은 GNU Affero General Public License v3.0([LICENSE](LICENSE))으로 배포합니다.
 
 이 엔진은 오픈소스 프로젝트 **PegaProx**(© 2025-2026 PegaProx Team, AGPL-3.0)를 바탕으로 (주)매커스시스템즈가
 수정·확장한 버전입니다. AGPL-3.0 제7조(b)에 따른 저작자 표시는 [NOTICE](NOTICE) 에 있으며, 제품 화면의

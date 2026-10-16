@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Storage
+        // MOAVI Desk - Storage
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
         // Datastore Tab Component - with Storage Clusters for balancing

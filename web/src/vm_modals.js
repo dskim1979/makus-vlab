@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - VM Modals
+        // MOAVI Desk - VM Modals
         // Delete, Clone, Detail, Migrate, Snapshots, Replication
         // ═══════════════════════════════════════════════
 

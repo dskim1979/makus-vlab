@@ -1,7 +1,7 @@
 FROM python:3.12-slim@sha256:ddb0207ae1f0356c2b724d740769b0c5f5f51cc54a0525178f721825f78fe74c
 
-LABEL org.label-schema.name="MAKUS vLAB engine"
-LABEL org.label-schema.description="MAKUS vLAB - VDI for labs, research and FPGA development (API engine)"
+LABEL org.label-schema.name="MOAVI Desk engine"
+LABEL org.label-schema.description="MOAVI Desk - VDI for labs, research and FPGA development (API engine)"
 LABEL org.label-schema.vendor="Makus Systems"
 LABEL org.label-schema.url="https://github.com/dskim1979/makus-vlab"
 LABEL org.label-schema.vcs-url="https://github.com/dskim1979/makus-vlab"
@@ -59,12 +59,12 @@ ARG PEGAPROX_BRANCH=main
 ENV PEGAPROX_BRANCH=${PEGAPROX_BRANCH}
 
 # MAKUS - WEB_UI=0 builds an API-only image: the bundled admin UI (web/) is dropped and "/" answers
-# with a one-line notice. For a deployment whose users work in another front end (the MAKUS vLAB open
+# with a one-line notice. For a deployment whose users work in another front end (the MOAVI Desk open
 # edition) and never sign in here. images/ and static/ stay - branding and API routes serve from them.
 ARG WEB_UI=1
 RUN if [ "$WEB_UI" = "0" ]; then \
         rm -rf /app/web && mkdir -p /app/web \
-        && echo '<!doctype html><meta charset="utf-8"><title>makus-virt API</title><p>This server is API-only. It is managed from the MAKUS vLAB console.</p>' > /app/web/index.html \
+        && echo '<!doctype html><meta charset="utf-8"><title>makus-virt API</title><p>This server is API-only. It is managed from the MOAVI Desk console.</p>' > /app/web/index.html \
         && chown -R pegaprox:pegaprox /app/web; \
     fi
 

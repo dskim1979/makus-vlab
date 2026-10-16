@@ -79,7 +79,7 @@
                     fd.append('acme_allow_private_ca', settings.acme_allow_private_ca ? 'true' : 'false');
                     fd.append('audit_retention_days', String(settings.audit_retention_days || 90));
                     fd.append('air_gap_mode', settings.air_gap_mode ? 'true' : 'false');
-                    fd.append('app_name', settings.app_name || 'MAKUS vLAB');
+                    fd.append('app_name', settings.app_name || 'MOAVI Desk');
                     fd.append('app_tagline', settings.app_tagline || '');
                     fd.append('alert_email_recipients', JSON.stringify(settings.alert_email_recipients || []));
                     fd.append('alert_update_available', settings.alert_update_available ? 'true' : 'false');
@@ -140,7 +140,7 @@
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
                             <CloudField label="앱 이름">
                                 <input className="cloud-input" value={settings.app_name || ''} maxLength={80}
-                                    onChange={e => setSettings({ ...settings, app_name: e.target.value })} placeholder="MAKUS vLAB" />
+                                    onChange={e => setSettings({ ...settings, app_name: e.target.value })} placeholder="MOAVI Desk" />
                             </CloudField>
                             <CloudField label="태그라인">
                                 <input className="cloud-input" value={settings.app_tagline || ''} maxLength={120}

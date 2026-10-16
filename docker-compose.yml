@@ -1,4 +1,4 @@
-# MAKUS vLAB engine, API only. The full install (console + HTTPS proxy) is in the
+# MOAVI Desk engine, API only. The full install (console + HTTPS proxy) is in the
 # console repository's deploy/ folder; this file runs the engine by itself.
 #   docker build --build-arg WEB_UI=0 -t vlab-engine:dev .
 #   docker compose up -d

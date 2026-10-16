@@ -1,4 +1,4 @@
-// MAKUS vLAB 한국형 보고서 → XLSX(엑셀 통합 문서, Office Open XML)
+// MOAVI Desk 한국형 보고서 → XLSX(엑셀 통합 문서, Office Open XML)
 //
 //  PDF·한글·워드와 같은 보고서 HTML(html.js)을 읽어 옮김 → 양식 수정은 html.js 한 곳에서
 //  시트 구성: 첫 시트 '개요'(제목·작성 정보·핵심 지표·요약·본문 문장, 표 자리에는 해당 시트로 가는 링크)
@@ -356,10 +356,10 @@ export function reportHtmlToXlsx(html: string, opts: { title: string; classifica
   const iso = new Date().toISOString().replace(/\.\d+Z$/, "Z")
   const core = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`
-    + `<dc:title>${x(opts.title)}</dc:title><dc:creator>${x(opts.author || "MAKUS vLAB")}</dc:creator><cp:lastModifiedBy>${x(opts.author || "MAKUS vLAB")}</cp:lastModifiedBy>`
+    + `<dc:title>${x(opts.title)}</dc:title><dc:creator>${x(opts.author || "MOAVI Desk")}</dc:creator><cp:lastModifiedBy>${x(opts.author || "MOAVI Desk")}</cp:lastModifiedBy>`
     + `<dcterms:created xsi:type="dcterms:W3CDTF">${iso}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${iso}</dcterms:modified></cp:coreProperties>`
   const app = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>MAKUS vLAB</Application></Properties>`
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>MOAVI Desk</Application></Properties>`
 
   return zip([
     { name: "[Content_Types].xml", data: enc(types) },

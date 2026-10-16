@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Datacenter
+        // MOAVI Desk - Datacenter
         // DatacenterTab (HA, multipath, corosync, bridges)
         // ═══════════════════════════════════════════════
         // Datacenter Tab Component (embedded in main view)
@@ -1697,7 +1697,7 @@
                             addToast(err.error || 'Failed to create replication job', 'error');
                         }
                     } else {
-                        // snapshot-based via MAKUS vLAB DB
+                        // snapshot-based via MOAVI Desk DB
                         const selectedVm = replVms.find(v => String(v.vmid) === String(newReplication.vmid));
                         const payload = {
                             source_cluster: clusterId,
@@ -3212,7 +3212,7 @@
                                                             <strong>StarWind shared LVM:</strong> the volume group must already exist on the shared SAN LUN, and the <code>starwind-proxmox-plugin</code> must be installed on every node. Gives thin snapshots + live migration on shared block storage.
                                                         </div>
                                                         <div className="col-span-2 p-3 bg-amber-900/30 border border-amber-500/50 rounded text-xs text-amber-200">
-                                                            ⚠️ {t('starwindThirdPartyNote') || 'StarWind LVM is a third-party product by StarWind Software, not part of MAKUS vLAB. MAKUS vLAB gives no support or warranty for it — for problems, contact StarWind directly:'}{' '}
+                                                            ⚠️ {t('starwindThirdPartyNote') || 'StarWind LVM is a third-party product by StarWind Software, not part of MOAVI Desk. MOAVI Desk gives no support or warranty for it — for problems, contact StarWind directly:'}{' '}
                                                             <a href="https://www.starwindsoftware.com/" target="_blank" rel="noopener noreferrer" className="underline text-amber-300 hover:text-amber-100">starwindsoftware.com</a>
                                                         </div>
                                                         <div className="col-span-2 flex items-center gap-3 flex-wrap">
@@ -5482,7 +5482,7 @@
                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                         </div>
                                                         <p className="text-[11px] text-gray-500">
-                                                            Per-protocol details (wireguard endpoints, BGP ASN, OSPF area etc.) need to be set via the PVE web UI — MAKUS vLAB exposes the basic create here for inventory, you'll finish the config in PVE.
+                                                            Per-protocol details (wireguard endpoints, BGP ASN, OSPF area etc.) need to be set via the PVE web UI — MOAVI Desk exposes the basic create here for inventory, you'll finish the config in PVE.
                                                         </p>
                                                     </div>
                                                     <div className="flex justify-end gap-2 mt-4">

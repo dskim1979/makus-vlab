@@ -1,4 +1,4 @@
-// MAKUS vLAB 한국형 보고서 — 수집 데이터(collect.ts) → 공문서 형식 HTML (브라우저 인쇄로 PDF)
+// MOAVI Desk 한국형 보고서 — 수집 데이터(collect.ts) → 공문서 형식 HTML (브라우저 인쇄로 PDF)
 //
 //  형식: A4 세로, 머리부·핵심 지표·보고 요지, Ⅰ/□/○/- 개조식, (단위: …) 표, 붙임, '끝.' 표시
 //  글꼴: 나눔명조(본문)·나눔고딕(제목·표) — 설치돼 있으면 사용, 없으면 브라우저 기본 글꼴
@@ -317,7 +317,7 @@ function header(d, title) {
   const org = [m.org, m.dept].filter(Boolean).map(esc).join(' ')
   const writer = [m.author ? esc(m.author) : '', m.contact ? `☎ ${esc(m.contact)}` : ''].filter(Boolean).join(' · ')
   return `<div class="head">
-<div class="kicker">${tt(`${org || 'MAKUS vLAB 가상화 인프라'} 보고`, org ? `${org} Report` : 'MAKUS vLAB Virtualization Infrastructure')}</div>
+<div class="kicker">${tt(`${org || 'MOAVI Desk 가상화 인프라'} 보고`, org ? `${org} Report` : 'MOAVI Desk Virtualization Infrastructure')}</div>
 <h1>${esc(title)}</h1>
 <div class="info"><span><b>${tt('보고 기간', 'Period')}</b>${krDate(d.period.from, false)} ~ ${krDate(d.period.to, false)}</span><span><b>${tt('작성일', 'Date')}</b>${krDate(d.generatedAt)}</span>${writer ? `<span><b>${tt('작성', 'Prepared by')}</b>${writer}</span>` : ''}</div>
 </div>`
@@ -360,7 +360,7 @@ function doc(d, title, body, landscape = false) {
 <style>${css(landscape, d.meta?.classification)}</style></head><body>
 ${header(d, title)}
 ${body}
-<div class="footer-note">${tt(`본 보고서는 MAKUS vLAB 가상화 통합 관리 플랫폼에서 ${krDateTime(d.generatedAt)}에 자동 생성되었습니다.`, `This report was generated automatically by the MAKUS vLAB virtualization management platform on ${krDateTime(d.generatedAt)} (KST).`)}</div>
+<div class="footer-note">${tt(`본 보고서는 MOAVI Desk 가상화 통합 관리 플랫폼에서 ${krDateTime(d.generatedAt)}에 자동 생성되었습니다.`, `This report was generated automatically by the MOAVI Desk virtualization management platform on ${krDateTime(d.generatedAt)} (KST).`)}</div>
 </body></html>`
 }
 

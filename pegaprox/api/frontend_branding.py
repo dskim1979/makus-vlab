@@ -2,7 +2,7 @@
 """
 White label for a trusted web front end (MAKUS).
 
-A front end that renders its own screens (for example the MAKUS vLAB screens) keeps
+A front end that renders its own screens (for example the MOAVI Desk screens) keeps
 its white label here: one record per front-end tenant with the app name,
 colours, footer, login page texts and links, plus three images (sidebar logo,
 login logo, favicon). The front end reads and writes it server to server and
@@ -54,7 +54,7 @@ _ICON = re.compile(r'^ri-[a-z0-9-]{1,60}$')
 _FILE = re.compile(r'^(logo|loginLogo|favicon)\.(png|jpg|webp|ico)$')
 
 DEFAULTS = {
-    'enabled': False, 'appName': 'MAKUS vLAB', 'browserTitle': '', 'logoUrl': '', 'loginLogoUrl': '', 'faviconUrl': '',
+    'enabled': False, 'appName': 'MOAVI Desk', 'browserTitle': '', 'logoUrl': '', 'loginLogoUrl': '', 'faviconUrl': '',
     'primaryColor': '', 'footerText': '', 'poweredByVisible': True, 'showAbout': True, 'showSubscription': True,
     'loginTagline': '', 'loginHighlights': [], 'docsUrl': '', 'supportUrl': '', 'changelogUrl': '', 'hideVersion': False,
 }
@@ -121,7 +121,7 @@ def clean(b):
             break
     return {
         'enabled': bool(b.get('enabled')),
-        'appName': _str(b.get('appName'), 60) or 'MAKUS vLAB',
+        'appName': _str(b.get('appName'), 60) or 'MOAVI Desk',
         'browserTitle': _str(b.get('browserTitle'), 80),
         'logoUrl': _image_ref(b.get('logoUrl')),
         'loginLogoUrl': _image_ref(b.get('loginLogoUrl')),

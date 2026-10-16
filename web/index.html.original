@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-    MAKUS vLAB - Cluster Management for Proxmox Virtual Environment
+    MOAVI Desk - Cluster Management for Proxmox Virtual Environment
     Version: 0.9.0.1 Beta
     Website: https://vlab.example.com
     GitHub:  https://github.com/dskim1979/makus-virt
@@ -10,7 +10,7 @@
     ═══════════════════════════════════════════════════════════════
     
     Copyright (C) 2025-2026 PegaProx Team
-    Portions Copyright (C) 2026 Makus Systems (MAKUS vLAB modifications)
+    Portions Copyright (C) 2026 Makus Systems (MOAVI Desk modifications)
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
@@ -69,7 +69,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MAKUS vLAB • Cluster Management for Proxmox VE</title>
+    <title>MOAVI Desk • Cluster Management for Proxmox VE</title>
     <meta name="google" content="notranslate">
     
     <!-- LW May 2026 — preconnect removed. We're local-first now (libs are bundled
@@ -90,7 +90,7 @@
     <meta name="theme-color" content="#1668E3">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="MAKUS vLAB">
+    <meta name="apple-mobile-web-app-title" content="MOAVI Desk">
     <script>
         // Register service worker as soon as possible. SW handles offline shell + push.
         if ('serviceWorker' in navigator) {
@@ -3697,7 +3697,7 @@
             animation: spin 1s linear infinite;
         "></div>
         <div style="color: #e26d41; font-size: 24px; font-weight: 600; margin-top: 24px;">
-            MAKUS vLAB
+            MOAVI Desk
         </div>
         <div style="color: #888; font-size: 14px; margin-top: 8px;">
             Loading...

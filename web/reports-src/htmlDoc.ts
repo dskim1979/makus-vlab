@@ -1,8 +1,8 @@
-// MAKUS vLAB 한국형 보고서 — 문서 변환 공용: 보고서 HTML(html.js) 읽기 + ZIP 묶기 (브라우저용)
+// MOAVI Desk 한국형 보고서 — 문서 변환 공용: 보고서 HTML(html.js) 읽기 + ZIP 묶기 (브라우저용)
 // 한글(hwpx.ts)·워드(docx.ts)·엑셀(xlsx.ts)이 같은 HTML 을 각 형식으로 옮길 때 씀 → 양식 수정은 html.js 한 곳에서
 // 외부 라이브러리 없이 브라우저에서 동작 (격리망에서도 같게). ZIP 은 무압축(store) 항목 — HWPX·DOCX·XLSX 모두 그대로 열림
 //
-// 원본: MAKUS vLAB 한국형 보고서 (Makus Systems). 이 저장소는 AGPL-3.0 — LICENSE·NOTICE 참고
+// 원본: MOAVI Desk 한국형 보고서 (Makus Systems). 이 저장소는 AGPL-3.0 — LICENSE·NOTICE 참고
 // 빌드: web/reports-src/build.sh → static/js/makus-reports.js
 
 // ---------------------------------------------------------------- 글자 → 바이트

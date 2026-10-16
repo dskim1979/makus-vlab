@@ -236,7 +236,7 @@
     // ────────────────────────────────────────────────────────────────────
     // PollingVncSocket — HTTPS POST/GET-based fallback transport. Same
     // crypto + same WebSocket-shaped interface, no WS upgrade. Used when
-    // the WSS leg between browser and MAKUS vLAB is killed by a security
+    // the WSS leg between browser and MOAVI Desk is killed by a security
     // middlebox (CrowdStrike WS DPI, Zscaler strict, etc.). Goes through
     // anything that allows plain HTTPS — at the cost of higher latency
     // (~30-80ms per round-trip vs ~1ms for WSS).

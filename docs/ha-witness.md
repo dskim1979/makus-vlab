@@ -1,21 +1,21 @@
-# The MAKUS vLAB witness
+# The MOAVI Desk witness
 
 > The witness belongs to automatic failover. A release that does not offer automatic
 > failover yet shows no "Add witness" on its HA page and refuses a witness code; this
 > page is for the release that does.
 
-Automatic failover needs at least three votes. A group of two MAKUS vLAB instances has
+Automatic failover needs at least three votes. A group of two MOAVI Desk instances has
 two. The witness is the third: a small process that votes, never leads, and holds no
 data of your deployment - no database, no cluster passwords, no users. It keeps its own
 key, its TLS certificate and its vote, nothing else.
 
 ## Where it runs
 
-- **At a third site**, with its own network path to every MAKUS vLAB instance of the
+- **At a third site**, with its own network path to every MOAVI Desk instance of the
   group. If it sits in the same room as one of them, losing that room loses two votes.
 - **On a host of its own.** A Raspberry Pi, a small VM, an LXC container or a VPS is
   plenty: about 40 MB of memory and one TCP port (5005).
-- **Never on a host that runs MAKUS vLAB.** The installer refuses that.
+- **Never on a host that runs MOAVI Desk.** The installer refuses that.
 - **With the right time.** Its clock has to be within 5 seconds of the members: run NTP
   (systemd-timesyncd or chrony) on it.
 
@@ -295,7 +295,7 @@ certificate from a CA has no pin, and the witness checks the chain instead.
 minutes and one witness. Make a new one with "Add witness". In Docker, a container that
 was never paired keeps restarting with the old code: remove it and run the new line.
 
-**"MAKUS vLAB runs on this host".** The installer found pegaprox.service or a MAKUS vLAB on
+**"MOAVI Desk runs on this host".** The installer found pegaprox.service or a MOAVI Desk on
 port 5000. Put the witness on another host.
 
 **The witness does not start after an update.** It goes back to the previous code on

@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Dashboard & App
+        // MOAVI Desk - Dashboard & App
         // TaskBar, Dashboard, App component, ReactDOM.render
         // ═══════════════════════════════════════════════
 
@@ -377,7 +377,7 @@
                                                 <th className="px-4 py-2 text-gray-400 font-medium">{t('startTime')}</th>
                                                 <th className="px-4 py-2 text-gray-400 font-medium">{t('endTime')}</th>
                                                 <th className="px-4 py-2 text-gray-400 font-medium">{t('node')}</th>
-                                                <th className="px-4 py-2 text-gray-400 font-medium" title={t('userColumnHint') || 'Shows MAKUS vLAB user if available, otherwise Proxmox user'}>{t('user')}</th>
+                                                <th className="px-4 py-2 text-gray-400 font-medium" title={t('userColumnHint') || 'Shows MOAVI Desk user if available, otherwise Proxmox user'}>{t('user')}</th>
                                                 <th className="px-4 py-2 text-gray-400 font-medium">{t('description')}</th>
                                                 <th className="px-4 py-2 text-gray-400 font-medium">{t('status')}</th>
                                             </tr>
@@ -418,7 +418,7 @@
                                                             {task.endtime ? fmtDate(task.endtime * 1000) : '-'}
                                                         </td>
                                                         <td className="px-4 py-2 text-white">{task.node || '-'}</td>
-                                                        <td className="px-4 py-2 text-gray-300" title={task.pegaprox_user ? `MAKUS vLAB: ${task.pegaprox_user}\nProxmox: ${task.user || '-'}` : (task.user || '-')}>
+                                                        <td className="px-4 py-2 text-gray-300" title={task.pegaprox_user ? `MOAVI Desk: ${task.pegaprox_user}\nProxmox: ${task.user || '-'}` : (task.user || '-')}>
                                                             {task.pegaprox_user || (task.user ? task.user.split('@')[0] : '-')}
                                                             {task.pegaprox_user && <span className="ml-1 text-proxmox-orange text-xs">●</span>}
                                                         </td>
@@ -2674,7 +2674,7 @@
                             <svg ref={svgRef}
                                 role="img"
                                 aria-label={isMultiCluster
-                                    ? `MAKUS vLAB multi-cluster topology diagram (${frozenMultiCluster.length} clusters)`
+                                    ? `MOAVI Desk multi-cluster topology diagram (${frozenMultiCluster.length} clusters)`
                                     : `Cluster topology for ${clusterName} — ${allNodes.length} node(s), ${totalGuests} guests`}
                                 viewBox={`${vbX.toFixed(1)} ${vbY.toFixed(1)} ${vbW.toFixed(1)} ${vbH.toFixed(1)}`}
                                 xmlns="http://www.w3.org/2000/svg"
@@ -2701,20 +2701,20 @@
                                                 strokeWidth={1.5} />
                                         ))}
 
-                                        {/* MAKUS vLAB brand at top — bigger pill on Corporate */}
+                                        {/* MOAVI Desk brand at top — bigger pill on Corporate */}
                                         {isCorporate ? (
                                             <React.Fragment>
                                                 <rect x={mcLayout.mcW / 2 - 110} y={MC_TIER.brand - 22}
                                                     width={220} height={42} rx={6}
                                                     fill={topoColor.section} stroke={topoColor.brand} strokeWidth={1.5} />
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand - 4} textAnchor="middle"
-                                                    fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="0.5">MAKUS vLAB</text>
+                                                    fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="0.5">MOAVI Desk</text>
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 12} textAnchor="middle"
                                                     fill={topoColor.muted} fontSize="9" letterSpacing="1">MULTI-CLUSTER TOPOLOGY</text>
                                             </React.Fragment>
                                         ) : (
                                             <React.Fragment>
-                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">MAKUS vLAB</text>
+                                                <text x={mcLayout.mcW / 2} y={MC_TIER.brand} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">MOAVI Desk</text>
                                                 <text x={mcLayout.mcW / 2} y={MC_TIER.brand + 14} textAnchor="middle" fill={topoColor.muted} fontSize="9">Multi-Cluster Topology</text>
                                             </React.Fragment>
                                         )}
@@ -2941,19 +2941,19 @@
                                     );
                                 })}
 
-                                {/* MAKUS vLAB branding — Corporate gets the pill style, Modern keeps the bold orange */}
+                                {/* MOAVI Desk branding — Corporate gets the pill style, Modern keeps the bold orange */}
                                 {isCorporate ? (
                                     <React.Fragment>
                                         <rect x={clusterX - 80} y={10} width={160} height={34} rx={4}
                                             fill={topoColor.section} stroke={topoColor.brand} strokeWidth={1} />
                                         <text x={clusterX} y={26} textAnchor="middle"
-                                            fill={topoColor.brand} fontSize="14" fontWeight="600" letterSpacing="0.4">MAKUS vLAB</text>
+                                            fill={topoColor.brand} fontSize="14" fontWeight="600" letterSpacing="0.4">MOAVI Desk</text>
                                         <text x={clusterX} y={39} textAnchor="middle"
                                             fill={topoColor.muted} fontSize="9" letterSpacing="0.3">CLUSTER TOPOLOGY</text>
                                     </React.Fragment>
                                 ) : (
                                     <React.Fragment>
-                                        <text x={clusterX} y={28} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">MAKUS vLAB</text>
+                                        <text x={clusterX} y={28} textAnchor="middle" fill={topoColor.brand} fontSize="16" fontWeight="700" letterSpacing="1.5">MOAVI Desk</text>
                                         <text x={clusterX} y={42} textAnchor="middle" fill={topoColor.muted} fontSize="9">Cluster Topology</text>
                                     </React.Fragment>
                                 )}
@@ -3969,7 +3969,7 @@
         }
 
         // LW #430 — one place to see every replication job's health: local PVE jobs
-        // across all connected clusters + MAKUS vLAB cross-cluster jobs, instead of
+        // across all connected clusters + MOAVI Desk cross-cluster jobs, instead of
         // drilling into each VM. CSV + PDF export.
         function ReplicationOverviewTab({ clusters, authFetch, addToast, t }) {
             const [local, setLocal] = React.useState([]);
@@ -6544,7 +6544,7 @@
                                     </div>
                                 </div>
                                 <div className="bg-yellow-500/5 border border-yellow-500/20 rounded p-2 mt-4 text-[11px] text-yellow-300">
-                                    {t('templateDeployHint') || 'MAKUS vLAB will SSH into the node, download the cloud image, create the VM and convert it to a template. This can take 1-3 minutes.'}
+                                    {t('templateDeployHint') || 'MOAVI Desk will SSH into the node, download the cloud image, create the VM and convert it to a template. This can take 1-3 minutes.'}
                                 </div>
                                 <div className="flex justify-end gap-2 mt-4">
                                     <button onClick={() => setShowDeploy(null)} disabled={submitting}
@@ -7981,8 +7981,8 @@
                         [t('hardeningProfile') || 'Hardening profile', profileLabel],
                         [t('reportingPeriod') || 'Reporting period',   reportingPeriod],
                         [t('classification') || 'Classification',      t('classificationInternal') || 'Internal Use — Audit Working Paper'],
-                        [t('generatedBy') || 'Generated by',           (user?.username || user?.email || 'MAKUS vLAB')],
-                        [t('reportTool') || 'Report tool',             'MAKUS vLAB ' + (typeof PEGAPROX_VERSION !== 'undefined' ? PEGAPROX_VERSION : 'version unknown')],
+                        [t('generatedBy') || 'Generated by',           (user?.username || user?.email || 'MOAVI Desk')],
+                        [t('reportTool') || 'Report tool',             'MOAVI Desk ' + (typeof PEGAPROX_VERSION !== 'undefined' ? PEGAPROX_VERSION : 'version unknown')],
                         [t('generatedAt') || 'Generated at',           isoTime],
                     ],
                 });
@@ -8073,7 +8073,7 @@
                     })
                     .join(' · ');
                 const controlSetSizeText =
-                    `${fw.controls.length} MAKUS vLAB control${fw.controls.length !== 1 ? 's' : ''} in profile, ` +
+                    `${fw.controls.length} MOAVI Desk control${fw.controls.length !== 1 ? 's' : ''} in profile, ` +
                     `mapped to ${allRefsForFw.size} ${fw.name} reference${allRefsForFw.size !== 1 ? 's' : ''}` +
                     (familySummary ? ` (${familySummary})` : '') +
                     `; ${overallChecked} data point${overallChecked !== 1 ? 's' : ''} evaluated across ${nodes.length} node${nodes.length !== 1 ? 's' : ''}`;
@@ -8106,7 +8106,7 @@
                             t('family') || 'Family',
                             t('familyName') || 'Name',
                             t('refsCovered') || 'References covered',
-                            t('pegaproxControls') || 'MAKUS vLAB controls',
+                            t('pegaproxControls') || 'MOAVI Desk controls',
                         ],
                         rows: Object.keys(refsByFamily).sort().map(fam => {
                             const refs = Array.from(refsByFamily[fam]).sort();
@@ -8132,7 +8132,7 @@
                         type: 'table',
                         title: (t('unmappedControls') || 'Controls without a direct framework mapping (informational)'),
                         columns: [
-                            t('pegaproxControl') || 'MAKUS vLAB control',
+                            t('pegaproxControl') || 'MOAVI Desk control',
                             t('description') || 'Description',
                             t('rationale') || 'Note',
                         ],
@@ -8204,7 +8204,7 @@
                         : `${familyCode} — ${label} (${passedCount}/${totalCtrls} ${t('fullySatisfied') || 'fully satisfied'})`;
                     blocks.push({
                         type: 'table', title: titleStr,
-                        columns: [t('ref') || 'Ref', t('controlTitle') || 'Control Title', t('severity') || 'Severity', t('pegaproxControl') || 'MAKUS vLAB control', ...nodes],
+                        columns: [t('ref') || 'Ref', t('controlTitle') || 'Control Title', t('severity') || 'Severity', t('pegaproxControl') || 'MOAVI Desk control', ...nodes],
                         rows: ctrls.map(ctrl => {
                             const refsStr = ctrl.refs.length ? ctrl.refs.map(r => r.ref).join('\n') : (t('noDirectMapping') || 'no direct mapping');
                             const titleStr2 = ctrl.refs.length ? ctrl.refs[0].title : ctrl.title;
@@ -8221,7 +8221,7 @@
                     blocks.push({
                         type: 'table',
                         title: `${t('appendixBRemediation') || 'Appendix B — Remediation Plan'} (${failedControls.length} ${failedControls.length === 1 ? (t('failedControl') || 'failed control') : (t('failedControls') || 'failed controls')})`,
-                        columns: [t('priority') || '#', t('severity') || 'Severity', t('timeline') || 'Timeline', t('ref') || 'Ref', t('controlTitle') || 'Title', t('pegaproxControl') || 'MAKUS vLAB control', t('affectedNodes') || 'Affected Nodes', t('recommendedAction') || 'Recommended Action'],
+                        columns: [t('priority') || '#', t('severity') || 'Severity', t('timeline') || 'Timeline', t('ref') || 'Ref', t('controlTitle') || 'Title', t('pegaproxControl') || 'MOAVI Desk control', t('affectedNodes') || 'Affected Nodes', t('recommendedAction') || 'Recommended Action'],
                         rows: failedControls.map((ctrl, i) => {
                             const refsStr = ctrl.refs.length ? ctrl.refs.map(r => r.ref).join(', ') : ctrl.cid;
                             const titleStr2 = ctrl.refs.length ? ctrl.refs[0].title : ctrl.title;
@@ -8230,14 +8230,14 @@
                             const rem = remediation[ctrl.cid];
                             const remStr = rem
                                 ? `${rem.summary}\n\n${t('howToFix') || 'How to fix'}: ${rem.how_to_fix}`
-                                : (t('useHardeningTool') || 'Use MAKUS vLAB Hardening tool to apply') + ` "${ctrl.cid}".`;
+                                : (t('useHardeningTool') || 'Use MOAVI Desk Hardening tool to apply') + ` "${ctrl.cid}".`;
                             return [String(i + 1), sevBadge(ctrl.severity), tl, refsStr, titleStr2, ctrl.cid, failNodes, remStr];
                         }),
                     });
                     // Operator-handoff hint — explicitly link the report back to the Hardening UI.
                     blocks.push({
                         type: 'text',
-                        value: t('hardeningUiHint') || 'Operator note: the values in the "MAKUS vLAB control" column match the checkbox names in Settings → Compliance → Harden PVE Node. To remediate, select the failed control by that name and click "Apply Selected".',
+                        value: t('hardeningUiHint') || 'Operator note: the values in the "MOAVI Desk control" column match the checkbox names in Settings → Compliance → Harden PVE Node. To remediate, select the failed control by that name and click "Apply Selected".',
                     });
                 }
 
@@ -8270,7 +8270,7 @@
                     blocks.push({
                         type: 'table',
                         title: `${t('appendixCEvidence') || 'Appendix C — Evidence'} (${evidenceRows.length} ${t('observations') || 'observations'})`,
-                        columns: [t('ref') || 'Ref', t('pegaproxControl') || 'MAKUS vLAB control', t('node') || 'Node', t('checkCommand') || 'Check command', t('expected') || 'Expected', t('observed') || 'Observed'],
+                        columns: [t('ref') || 'Ref', t('pegaproxControl') || 'MOAVI Desk control', t('node') || 'Node', t('checkCommand') || 'Check command', t('expected') || 'Expected', t('observed') || 'Observed'],
                         rows: evidenceRows,
                     });
                 }
@@ -8279,7 +8279,7 @@
                 // 10. Appendix D — Glossary (only terms relevant to this report)
                 // ──────────────────────────────────────────────────────────
                 const glossaryRows = [];
-                const baseTerms = ['MAKUS vLAB', 'PVE', 'CIS', 'BSI', fw.region === 'EU' ? 'IT-Grundschutz' : 'STIG'];
+                const baseTerms = ['MOAVI Desk', 'PVE', 'CIS', 'BSI', fw.region === 'EU' ? 'IT-Grundschutz' : 'STIG'];
                 const usedSlugs = new Set(baseTerms);
                 fw.controls.forEach(cid => {
                     const titleLow = (allTitles[cid] || cid).toLowerCase();
@@ -8316,7 +8316,7 @@
                 const dt = isoTime.slice(0, 10);
                 generatePegaProxPDF({
                     title:     `${fw.name} ${t('complianceReport') || 'Compliance Report'}`,
-                    subtitle:  c.name || 'MAKUS vLAB',
+                    subtitle:  c.name || 'MOAVI Desk',
                     clusterName: c.name,
                     filename:  `pegaprox-compliance-${fw.id}-${(c.id || 'cluster')}-${dt}.pdf`,
                     content:   blocks,
@@ -10797,7 +10797,7 @@
             const _DAY_MS = 86400000;
             const sponsorKeyRef = useRef('');
             useEffect(() => {
-                return; // NS: sponsor/donation nag disabled for MAKUS vLAB rebrand
+                return; // NS: sponsor/donation nag disabled for MOAVI Desk rebrand
                 if (!user || !isAdmin) return;
                 const key = `pegaprox_sponsor_v2:${user.username || user.id || 'anon'}`;
                 sponsorKeyRef.current = key;
@@ -12761,7 +12761,7 @@
 
             // NS May 2026 (#387): when the user enters the Logs subtab while a specific
             // node is in scope (sidebar selection), auto-populate the hostname filter
-            // so they see only that node's syslog instead of every host MAKUS vLAB ingests.
+            // so they see only that node's syslog instead of every host MOAVI Desk ingests.
             // User can clear / change the filter in the UI if they want the wider view.
             useEffect(() => {
                 if (resourcesSubTab !== 'logs') return;
@@ -13311,7 +13311,7 @@
                 if (!selectedCluster?.id || !hardenNode) return;
                 const toRoll = Object.keys(hardenSelected).filter(k => hardenSelected[k]);
                 if (!toRoll.length) { addToast(t('noControlsSelected') || 'No controls selected', 'warning'); return; }
-                if (!confirm(t('hardenRollbackConfirm') || `↩️ Restore ${toRoll.length} control(s) on "${hardenNode}" to their pre-apply state?\n\nOnly controls applied through MAKUS vLAB (with a saved snapshot) can be rolled back.`)) return;
+                if (!confirm(t('hardenRollbackConfirm') || `↩️ Restore ${toRoll.length} control(s) on "${hardenNode}" to their pre-apply state?\n\nOnly controls applied through MOAVI Desk (with a saved snapshot) can be rolled back.`)) return;
                 setHardenApplying(true);
                 try {
                     const resp = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/nodes/${hardenNode}/hardening/rollback`, {
@@ -14236,7 +14236,7 @@
 
             // MK Apr 2026: #273 — PBS Reports fetchers
             // NS May 2026 — vm-name lookup for PBS views. PBS only stores VMID,
-            // MAKUS vLAB knows the names from the linked PVE clusters. Memoised by
+            // MOAVI Desk knows the names from the linked PVE clusters. Memoised by
             // the dependency triple (linked clusters of selected PBS, plus the
             // cached guests-per-cluster map). Returns name or '' (never undefined).
             const pbsVmNameLookup = React.useMemo(() => {
@@ -17116,10 +17116,10 @@
                                     className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
                                     title={t('allClustersOverview') || 'All Clusters Overview'}
                                 >
-                                    {/* MAKUS vLAB Logo */}
+                                    {/* MOAVI Desk Logo */}
                                     <img
                                         src={getLogoSrc()}
-                                        alt="MAKUS vLAB"
+                                        alt="MOAVI Desk"
                                         className={`${isCorporate ? 'w-8 h-8' : 'w-12 h-12 rounded-xl'} object-contain`}
                                         onError={(e) => {
                                             e.target.style.display = 'none';
@@ -17132,10 +17132,10 @@
                                         </svg>
                                     </div>
                                     {isCorporate ? (
-                                        <span className="text-[13px] font-semibold">MAKUS vLAB</span>
+                                        <span className="text-[13px] font-semibold">MOAVI Desk</span>
                                     ) : (
                                         <div className="text-left">
-                                            <h1 className="text-xl font-bold">MAKUS vLAB</h1>
+                                            <h1 className="text-xl font-bold">MOAVI Desk</h1>
                                             <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
                                         </div>
                                     )}
@@ -20143,7 +20143,7 @@
                                                                 value={hardenProfile}
                                                                 onChange={e => { setHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
-                                                                title={t('hardenProfileHint') || 'Filter controls by compliance framework. All controls = full CIS+Lynis+STIG+MAKUS vLAB set.'}>
+                                                                title={t('hardenProfileHint') || 'Filter controls by compliance framework. All controls = full CIS+Lynis+STIG+MOAVI Desk set.'}>
                                                                 <option value="">{t('hardenProfileAll') || 'All controls'}</option>
                                                                 <optgroup label={t('regionEU') || 'EU / DACH'}>
                                                                     <option value="bsi">BSI IT-Grundschutz</option>
@@ -20227,7 +20227,7 @@
                                                                 mem_protection: { ref: 'Kernel', title: t('stigMemProt') || 'Memory Protection - Kernel Hardening', desc: t('stigMemProtDesc') || 'Kernel parameters: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Prevents info leaks and use-after-free attacks.', impact: t('stigMemProtImpact') || '~1-3% performance overhead. Reboot required.', reboot: true },
                                                                 audit_immutable: { ref: 'V-270832', title: t('stigAuditLock') || 'Audit Rules Immutable', desc: t('stigAuditLockDesc') || 'Locks audit configuration with -e 2 flag. Rules cannot be modified without reboot, preventing attackers from disabling auditing.', impact: t('stigAuditLockImpact') || 'Audit rule changes require reboot' },
                                                             };
-                                                            // MAKUS vLAB recommendations
+                                                            // MOAVI Desk recommendations
                                                             const pegaControls = {
                                                                 apparmor: { ref: 'MAC', title: t('pegaApparmor') || 'AppArmor (Mandatory Access Control)', desc: t('pegaApparmorDesc') || 'Enables AppArmor and enforces all profiles. Restricts what programs can access even if compromised — adds a security layer beyond standard file permissions.', impact: t('pegaApparmorImpact') || 'None for standard PVE — custom services may need profiles' },
                                                                 disable_services: { ref: 'SVC', title: t('pegaDisableSvc') || 'Disable Unnecessary Services', desc: t('pegaDisableSvcDesc') || 'Stops and disables bluetooth, CUPS (printing), and Avahi (mDNS). Fewer running services means less attack surface.', impact: t('pegaDisableSvcImpact') || 'No local printing or Bluetooth — irrelevant for servers' },
@@ -20310,7 +20310,7 @@
                                                                         </div>
                                                                         <div className="flex-1 min-w-0">
                                                                             <div className="flex items-center gap-2 flex-wrap">
-                                                                                <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${source === 'cis' ? 'text-blue-400 bg-blue-500/10' : source === 'lynis' ? 'text-purple-400 bg-purple-500/10' : source === 'pega' ? 'text-orange-400 bg-orange-500/10' : 'text-amber-400 bg-amber-500/10'}`}>{source === 'cis' ? 'CIS' : source === 'lynis' ? 'Lynis' : source === 'pega' ? 'MAKUS vLAB' : 'STIG'} {info.ref}</span>
+                                                                                <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${source === 'cis' ? 'text-blue-400 bg-blue-500/10' : source === 'lynis' ? 'text-purple-400 bg-purple-500/10' : source === 'pega' ? 'text-orange-400 bg-orange-500/10' : 'text-amber-400 bg-amber-500/10'}`}>{source === 'cis' ? 'CIS' : source === 'lynis' ? 'Lynis' : source === 'pega' ? 'MOAVI Desk' : 'STIG'} {info.ref}</span>
                                                                                 <span className="text-sm font-medium text-white">{info.title}</span>
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
@@ -20322,7 +20322,7 @@
                                                                             {id === 'default_umask' && (
                                                                                 <p className="text-[11px] text-yellow-400/80 mt-1 leading-tight">⚠ {t('cmUmaskToolingNote')}</p>
                                                                             )}
-                                                                            {/* MK #16745: this cluster is reached by password with no key -> sshd_hardening (prohibit-password) would cut off MAKUS vLAB's OWN root SSH, and the rollback needs SSH too. Warn before apply. */}
+                                                                            {/* MK #16745: this cluster is reached by password with no key -> sshd_hardening (prohibit-password) would cut off MOAVI Desk's OWN root SSH, and the rollback needs SSH too. Warn before apply. */}
                                                                             {id === 'sshd_hardening' && selectedCluster && selectedCluster.has_ssh_key === false && !applied && (
                                                                                 <p className="text-[11px] text-red-400/90 mt-1 leading-tight">⚠ {t('cmSshdRootLockoutNote')}</p>
                                                                             )}
@@ -20421,7 +20421,7 @@
                                                                     { name: 'CIS Debian Linux 13 Benchmark', ctrls: cisControls, src: 'cis' },
                                                                     { name: 'Lynis Security Auditing', ctrls: lynisControls, src: 'lynis' },
                                                                     { name: 'STIG — DoD Security Technical Implementation Guide', ctrls: stigControls, src: 'stig' },
-                                                                    { name: 'MAKUS vLAB ' + (t('recommendations') || 'Recommendations'), ctrls: pegaControls, src: 'pega' },
+                                                                    { name: 'MOAVI Desk ' + (t('recommendations') || 'Recommendations'), ctrls: pegaControls, src: 'pega' },
                                                                     { name: 'VS-NfD / BSI Grundschutz (' + (t('informational') || 'informational') + ')', ctrls: vsnfdControls, src: 'vsnfd' },
                                                                 ];
                                                                 const statusLbl = (applied, failed) => failed ? (t('failed') || 'Failed') : applied ? (t('applied') || 'Applied') : (t('notApplied') || 'Not applied');
@@ -20516,7 +20516,7 @@
                                                                     <button
                                                                         onClick={rollbackHardening}
                                                                         disabled={hardenApplying || selectedCount === 0}
-                                                                        title={t('hardenRollbackHint') || 'Restore the selected controls to their pre-apply state (only controls applied via MAKUS vLAB)'}
+                                                                        title={t('hardenRollbackHint') || 'Restore the selected controls to their pre-apply state (only controls applied via MOAVI Desk)'}
                                                                         className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 whitespace-nowrap ${
                                                                             hardenApplying || selectedCount === 0 ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-500 text-white'
                                                                         }`}
@@ -20537,7 +20537,7 @@
                                                                                     <p className="text-xs text-red-300 mb-2 leading-snug">⚠ {t('cmSshdRootLockoutNote')}</p>
                                                                                     <label className="flex items-start gap-2 text-xs text-red-200 cursor-pointer">
                                                                                         <input type="checkbox" checked={hardenLockoutAck} onChange={e => setHardenLockoutAck(e.target.checked)} className="mt-0.5 accent-red-500" />
-                                                                                        <span>{t('hardenLockoutAck') || "I understand this cuts off MAKUS vLAB's own password access to this cluster, and I have console / manual access to recover."}</span>
+                                                                                        <span>{t('hardenLockoutAck') || "I understand this cuts off MOAVI Desk's own password access to this cluster, and I have console / manual access to recover."}</span>
                                                                                     </label>
                                                                                 </div>
                                                                             )}
@@ -20602,12 +20602,12 @@
                                                                 </div>
                                                                 )}
 
-                                                                {/* MAKUS vLAB Recommendations section */}
+                                                                {/* MOAVI Desk Recommendations section */}
                                                                 {Object.entries(pegaControls).some(([id]) => id in controls) && (
                                                                 <div>
                                                                     <h3 className="text-sm font-semibold text-orange-400 mb-2 flex items-center gap-2">
                                                                         <Icons.Zap className="w-4 h-4" />
-                                                                        MAKUS vLAB {t('recommendations') || 'Recommendations'}
+                                                                        MOAVI Desk {t('recommendations') || 'Recommendations'}
                                                                     </h3>
                                                                     <div className="space-y-2">
                                                                         {Object.entries(pegaControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'pega'))}
@@ -20652,7 +20652,7 @@
                                                             <div className="text-center py-16">
                                                                 <Icons.Shield className="w-16 h-16 text-gray-700 mx-auto mb-4" />
                                                                 <p className="text-gray-400 mb-2">{t('hardenEmpty') || 'Select a node and click "Check Status"'}</p>
-                                                                <p className="text-gray-600 text-sm">{t('hardenEmptyDesc') || 'MAKUS vLAB checks which CIS controls are already applied and lets you enable the remaining ones.'}</p>
+                                                                <p className="text-gray-600 text-sm">{t('hardenEmptyDesc') || 'MOAVI Desk checks which CIS controls are already applied and lets you enable the remaining ones.'}</p>
                                                             </div>
                                                         )}
                                                     </div>
@@ -20667,7 +20667,7 @@
                                                 <div className={isCorporate ? 'corp-tab-strip' : 'flex gap-2 border-b border-proxmox-border pb-2'}>
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
-                                                        { id: 'korean', label: '공공 보고서', icon: Icons.FileText },  // 한국형 보고서 (MAKUS vLAB 이식, web/src/korean_reports.js)
+                                                        { id: 'korean', label: '공공 보고서', icon: Icons.FileText },  // 한국형 보고서 (MOAVI Desk 이식, web/src/korean_reports.js)
                                                         { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
                                                         { id: 'insights', label: t('insights') || 'Insights', icon: Icons.Zap },
                                                         { id: 'costs', label: t('costDashboard') || 'Costs', icon: Icons.DollarSign },
@@ -25528,7 +25528,7 @@
                                         </div>
                                         <div className="p-2">
                                             <TopologyView
-                                                clusterName="MAKUS vLAB"
+                                                clusterName="MOAVI Desk"
                                                 multiCluster={clusters.filter(c => c.connected).map(cluster => {
                                                     const metrics = sidebarClusterData[cluster.id]?.metrics || {};
                                                     let nodes = Object.entries(metrics)
@@ -26098,7 +26098,7 @@
                                             {pbsForm._showSsh && (
                                                 <div className="mt-3 space-y-3 p-3 bg-proxmox-dark/50 rounded-lg">
                                                     <p className="text-xs text-gray-400">
-                                                        {t('pbsSshHint') || 'SSH is only used for the Update Manager (apt dist-upgrade). If left blank, MAKUS vLAB falls back to the PBS web password. Use a dedicated key if your PBS has password-login disabled.'}
+                                                        {t('pbsSshHint') || 'SSH is only used for the Update Manager (apt dist-upgrade). If left blank, MOAVI Desk falls back to the PBS web password. Use a dedicated key if your PBS has password-login disabled.'}
                                                     </p>
                                                     <div className="grid grid-cols-2 gap-2">
                                                         <div>
@@ -27043,7 +27043,7 @@
                                 </div>
                             )}
                             <div className="corp-status-bar-item" style={{borderRight: 'none'}}>
-                                MAKUS vLAB {PEGAPROX_VERSION}
+                                MOAVI Desk {PEGAPROX_VERSION}
                             </div>
                         </div>
                     )}
@@ -27829,7 +27829,7 @@
                                             name="content" 
                                             required 
                                             rows={12}
-                                            defaultValue={editingScript?.content || (editingScript?.type === 'python' ? '#!/usr/bin/env python3\n# Your script here\n\nprint("Hello from MAKUS vLAB!")' : '#!/bin/bash\n# Your script here\n\necho "Hello from MAKUS vLAB!"')}
+                                            defaultValue={editingScript?.content || (editingScript?.type === 'python' ? '#!/usr/bin/env python3\n# Your script here\n\nprint("Hello from MOAVI Desk!")' : '#!/bin/bash\n# Your script here\n\necho "Hello from MOAVI Desk!"')}
                                             placeholder="#!/bin/bash"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg font-mono text-sm"
                                         />
@@ -27912,7 +27912,7 @@
                         addToast={addToast}
                     />
 
-                    {/* MAKUS vLAB Settings Modal */}
+                    {/* MOAVI Desk Settings Modal */}
                     <PegaProxSettingsModal
                         isOpen={showSettings}
                         onClose={() => setShowSettings(false)}
@@ -28294,7 +28294,7 @@
                                         </div>
                                     ) : (
                                         <>
-                                        <p className="text-xs text-gray-500 mb-4">{t('reconfigureHint') || 'Enter your MAKUS vLAB password to verify your identity.'}</p>
+                                        <p className="text-xs text-gray-500 mb-4">{t('reconfigureHint') || 'Enter your MOAVI Desk password to verify your identity.'}</p>
                                         <input
                                             type="password"
                                             value={reconfigurePassword}
@@ -28706,7 +28706,7 @@
                             status: 'ready', clusterId, vm,
                             info: { vmid: Number(vmid), node, type, host: cluster.host },
                         });
-                        document.title = `${label} — MAKUS vLAB`;
+                        document.title = `${label} — MOAVI Desk`;
                         // The header hides the vmid as soon as it has a name, so the name has to
                         // come from the cluster and not from the link — otherwise whoever writes
                         // the link chooses the label on someone else's root console. One small
@@ -28723,7 +28723,7 @@
                                 if (real) {
                                     setState(prev => prev.vm
                                         ? { ...prev, vm: { ...prev.vm, name: real } } : prev);
-                                    document.title = `${real} — MAKUS vLAB`;
+                                    document.title = `${real} — MOAVI Desk`;
                                 }
                             }
                         } catch (_) { /* label stays the vmid */ }

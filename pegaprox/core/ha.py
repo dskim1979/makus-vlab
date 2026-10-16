@@ -324,7 +324,7 @@ LOCAL_TABLES = (
     'balance_recommendations', 'logs', 'logs_fts',
     # who wrote what on the active, and the change counter behind cv_tick
     'ha_change_journal', 'ha_cv_dirty',
-    # MAKUS vLAB: hardware (BMC) health history this instance's metrics collector recorded
+    # MOAVI Desk: hardware (BMC) health history this instance's metrics collector recorded
     'hw_state', 'hw_events',
 )
 

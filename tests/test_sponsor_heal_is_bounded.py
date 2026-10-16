@@ -15,8 +15,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# MAKUS vLAB ships no sponsor footer, so the sponsor-logo self-heal (settings.py) is not part of it
-pytestmark = pytest.mark.skip(reason='MAKUS vLAB: no sponsor footer, sponsor self-heal removed')
+# MOAVI Desk ships no sponsor footer, so the sponsor-logo self-heal (settings.py) is not part of it
+pytestmark = pytest.mark.skip(reason='MOAVI Desk: no sponsor footer, sponsor self-heal removed')
 
 import pegaprox.api.settings as settings_api
 

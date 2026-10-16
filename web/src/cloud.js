@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB — Cloud console skin (Preview)
+        // MOAVI Desk — Cloud console skin (Preview)
         // Modern resource-first console: collapsible grouped nav, KPI dashboard,
         // data tables w/ bulk + per-row actions, full detail views with tabs.
         // self-contained: only React + global Icons + props passed from dashboard. -- LW
@@ -452,18 +452,18 @@
             return (
                 <nav className={'cloud-nav' + (collapsed ? ' cloud-nav-collapsed' : '')}>
                     <div className="cloud-nav-brand">
-                        {/* NS 2026-07: real MAKUS vLAB pegasus logo (was a generic Cloud icon).
+                        {/* NS 2026-07: real MOAVI Desk pegasus logo (was a generic Cloud icon).
                             Cloud-theme-aware: white pegasus on the dark shell, dark pegasus on
                             the light theme. Falls back to the Cloud icon if the asset 404s. */}
                         <span className="cloud-nav-brand-mark">
                             <img
                                 src={getLogoSrc()}
-                                alt="MAKUS vLAB"
+                                alt="MOAVI Desk"
                                 onError={(e) => { e.target.style.display = 'none'; const s = e.target.nextSibling; if (s) s.style.display = 'inline-flex'; }}
                             />
                             <span className="cloud-nav-brand-fallback" style={{ display: 'none' }}><Icons.Cloud /></span>
                         </span>
-                        {!collapsed && <span className="cloud-nav-brand-text">MAKUS vLAB</span>}
+                        {!collapsed && <span className="cloud-nav-brand-text">MOAVI Desk</span>}
                     </div>
                     <div className="cloud-nav-scroll">
                         {groups.map(group => (
@@ -1967,7 +1967,7 @@
                                     <div className="cloud-util-row"><span>{'2노드 모드'}</span><span>{sbp.two_node_mode ? 'Yes' : 'No'}</span></div>
                                     <div className="cloud-util-row"><span>{'스토리지 하트비트'}</span><span>{sbp.storage_heartbeat_enabled ? (sbp.storage_heartbeat_path || ('활성화됨')) : ('비활성화됨')}</span></div>
                                     <div className="cloud-util-row"><span>{'복구 지연시간'}</span><span>{sbp.recovery_delay != null ? sbp.recovery_delay + 's' : '—'}</span></div>
-                                    {sbp.pegaprox_vmid ? <div className="cloud-util-row"><span>MAKUS vLAB VM</span><span>#{sbp.pegaprox_vmid}</span></div> : null}
+                                    {sbp.pegaprox_vmid ? <div className="cloud-util-row"><span>MOAVI Desk VM</span><span>#{sbp.pegaprox_vmid}</span></div> : null}
                                 </div>
                             </div>
                         </React.Fragment>
@@ -2040,7 +2040,7 @@
             return (
                 <footer className="cloud-sponsors" style={{ marginTop: 28, paddingTop: 18, borderTop: '1px solid rgba(127,127,127,0.18)', textAlign: 'center' }}>
                     <div style={{ fontSize: 11, opacity: 0.5 }}>
-                        MAKUS vLAB &mdash; <a href="https://github.com/dskim1979/makus-virt" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{label}</a>
+                        MOAVI Desk &mdash; <a href="https://github.com/dskim1979/makus-virt" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{label}</a>
                     </div>
                     <LegalNotice style={{marginTop: 12}} />
                 </footer>
@@ -2335,7 +2335,7 @@
             const { ha, haStandby, haConsolesElsewhere } = useAuth();
             const canAutoInstall = !!(currentUser && currentUser.autoinstall_access) && !haStandby;
 
-            // MAKUS vLAB t() ECHOES the key back on a miss, so `''`
+            // MOAVI Desk t() ECHOES the key back on a miss, so `''`
             // would render the raw key. treat key-echo as "no translation". -- NS
             const tx = React.useCallback((k) => {
                 const v = (typeof t === 'function') ? t(k) : undefined;

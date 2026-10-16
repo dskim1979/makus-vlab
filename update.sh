@@ -36,7 +36,7 @@ GITHUB_ARCHIVE="https://github.com/dskim1979/makus-virt/archive/refs/heads/${GIT
 # Mirror (fallback if GitHub is down) — note: mirror only serves main, so
 # falling back to mirror when PEGAPROX_BRANCH≠main will land you on main content.
 # Acceptable trade-off since mirror is the offline-network fallback path.
-# MAKUS vLAB: 별도 미러가 없음 — 원본 PegaProx 미러(updates.pegaprox.com)를 쓰면 MAKUS vLAB 가 원본으로 덮이므로
+# MOAVI Desk: 별도 미러가 없음 — 원본 PegaProx 미러(updates.pegaprox.com)를 쓰면 MOAVI Desk 가 원본으로 덮이므로
 # 미러도 같은 GitHub 저장소로 (pegaprox/constants.py 의 MIRROR_* 와 같은 방식)
 MIRROR_URL="https://raw.githubusercontent.com/dskim1979/makus-virt/main"
 MIRROR_ARCHIVE="https://github.com/dskim1979/makus-virt/archive/refs/heads/main.tar.gz"

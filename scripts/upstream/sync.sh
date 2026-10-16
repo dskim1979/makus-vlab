@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# MAKUS vLAB — 업스트림 PegaProx 새 릴리스 반영
+# MOAVI Desk — 업스트림 PegaProx 새 릴리스 반영
 #
 #   scripts/upstream/sync.sh start [v1.4.0]   새 릴리스를 가져와 병합 시작 (태그 생략 = 최신)
 #   scripts/upstream/sync.sh finish           충돌 해결 뒤: 화면 빌드 · API 문서 · 점검 · 커밋
@@ -8,13 +8,13 @@
 #
 # 방식 (docs/upstream-sync.md):
 #   vendor 브랜치 = 업스트림 릴리스를 손대지 않고 쌓은 것 ("Vendor: PegaProx X (unmodified upstream)").
-#   새 릴리스마다 vendor 에 한 커밋 얹고, 그것을 MAKUS vLAB 브랜치에 병합한다.
+#   새 릴리스마다 vendor 에 한 커밋 얹고, 그것을 MOAVI Desk 브랜치에 병합한다.
 #   매번 충돌하는 파일은 자동 처리한다:
 #     web/src/translations.js  scripts/upstream/build_ko.py 로 새로 만듦
 #     version.json             scripts/upstream/merge_version.py 로 합침
 #     web/index.html           빌드 결과물 — finish 에서 다시 빌드
 #     docs/openapi.json        생성 결과물 — finish 에서 다시 생성
-#     README.md                MAKUS vLAB 것 유지, 버전 배지만 갱신
+#     README.md                MOAVI Desk 것 유지, 버전 배지만 갱신
 #   git rerere 를 켜 두어, 한 번 손으로 푼 충돌은 다음에 같은 모양이면 자동으로 풀린다.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -55,7 +55,7 @@ last_version() {
 
 fetch_upstream() {
     git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_URL"
-    # 업스트림 태그는 refs/upstream-tags 에 따로 — MAKUS vLAB 의 같은 이름 태그와 섞이지 않게
+    # 업스트림 태그는 refs/upstream-tags 에 따로 — MOAVI Desk 의 같은 이름 태그와 섞이지 않게
     git fetch -q --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
 }
 
@@ -141,8 +141,8 @@ cmd_start() {
 
   충돌 해결 원칙 (자세한 것은 docs/upstream-sync.md):
    - 업스트림의 보안·버그 수정과 새 기능은 받는다
-   - MAKUS vLAB 것은 지킨다: 한국어 문구, MAKUS vLAB 이름, 원화(KRW), GPU, 한국형 보고서, 하드웨어 이력,
-     화이트라벨, MAKUS vLAB 저장소 주소
+   - MOAVI Desk 것은 지킨다: 한국어 문구, MOAVI Desk 이름, 원화(KRW), GPU, 한국형 보고서, 하드웨어 이력,
+     화이트라벨, MOAVI Desk 저장소 주소
    - 법적 고지(LegalNotice, 설정 > 정보의 고지, "Powered by PegaProx")는 업스트림 그대로
    - 해결한 파일은 git add, 다 끝나면: scripts/upstream/sync.sh finish
 EOF
@@ -172,7 +172,7 @@ cmd_finish() {
     "$PY" scripts/upstream/check_branding.py
 
     git add -A
-    git commit -q -m "Merge PegaProx $final into MAKUS vLAB $final
+    git commit -q -m "Merge PegaProx $final into MOAVI Desk $final
 
 Upstream snapshot(s) on the vendor branch; merged with scripts/upstream/sync.sh.
 translations.js rebuilt (build_ko.py), version.json merged (merge_version.py),
@@ -183,7 +183,7 @@ web/index.html and docs/openapi.json regenerated."
 
 다음:
   1. 테스트:  python3 -m pytest tests -q
-  2. version.json 의 'MAKUS vLAB $final' changelog 문구를 다듬기 (선택)
+  2. version.json 의 'MOAVI Desk $final' changelog 문구를 다듬기 (선택)
   3. 올리기:  git push -u origin $(git branch --show-current) vendor
 EOF
 }

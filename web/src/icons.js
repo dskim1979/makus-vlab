@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════
-        // MAKUS vLAB - Icons
+        // MOAVI Desk - Icons
         // SVG icon components (Heroicons)
         // ═══════════════════════════════════════════════
         // Icons - mostly from Heroicons, some custom ones -- MK

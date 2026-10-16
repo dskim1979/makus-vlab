@@ -17,7 +17,7 @@ SRC = 'web/src/'
 # every surface that must carry the short notice, and the file it lives in
 SURFACES = [
     ('auth.js', 3),        # login screen + setup wizard (form and done states)
-    # MAKUS vLAB: 5 - the sponsor nag (and the copy upstream put in it, which it notes carries no
+    # MOAVI Desk: 5 - the sponsor nag (and the copy upstream put in it, which it notes carries no
     # weight under §7(b)) is not shipped; every permanent surface keeps the notice
     ('dashboard.js', 5),   # 2FA gate, layout picker, console window, sidebar, footer
     ('cloud.js', 2),       # cloud nav + cloud sponsor footer
@@ -147,7 +147,7 @@ def test_the_page_footer_and_the_notice_stay_coupled():
     footer = dash[start:end]
 
     assert '<LegalNotice' in footer, 'the notice left the footer — the coupling is gone'
-    # MAKUS vLAB ships the footer without the sponsor block (lawful, see the docstring); the
+    # MOAVI Desk ships the footer without the sponsor block (lawful, see the docstring); the
     # coupling that matters - the notice inside the footer - is asserted above
 
 
