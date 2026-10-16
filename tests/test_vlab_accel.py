@@ -95,6 +95,8 @@ def gpu(api, seed, monkeypatch):
     monkeypatch.setattr(accel, 'node_pci', lambda m, node: PCI.get(node))
     monkeypatch.setattr(accel, 'pci_mappings', lambda m: [accel.parse_mapping(x) for x in MAPPINGS])
     monkeypatch.setattr(accel, 'hostpci_of', lambda m, node, vmid: dict(configs.get(int(vmid), {})))
+    # the desktop VMs here are q35 (pcie=1 stays); test_pcie_follows_the_machine covers i440fx
+    monkeypatch.setattr(accel, 'vm_raw', lambda m, node, vmid: dict(configs.get(int(vmid), {}), machine=configs.get('machine', 'q35')))
     admin = api.as_user(seed.user('root', role='admin'))
     alice = api.as_user(seed.user('alice', role='user'))
     return api, mgr, admin, alice, configs
@@ -279,3 +281,72 @@ def test_due_loans_go_back_by_themselves(loans, gpu):
     assert store.get_lease(lease['id'])['state'] == 'returned'
     assert mgr.update_vm_config.call_args[0] == ('pve1', 301, 'qemu', {'delete': 'hostpci14'})
     assert loan_job.return_due() == (0, 0)
+
+
+# --- passthrough pitfalls (pegaprox/vlab/accel_checks.py) --------------------------
+
+def test_pcie_follows_the_machine():
+    assert accel.fit_slot('mapping=fpga-u250,pcie=1', {'machine': 'pc-q35-9.0'}) == 'mapping=fpga-u250,pcie=1'
+    assert accel.fit_slot('mapping=fpga-u250,pcie=1', {}) == 'mapping=fpga-u250'                 # i440fx default
+    assert accel.fit_slot('mapping=gpu-a16,pcie=1,mdev=nvidia-746', {'machine': 'pc-i440fx-9.0'}) == 'mapping=gpu-a16,mdev=nvidia-746'
+    assert accel.fit_slot(None, {}) is None
+
+
+def test_a_card_lent_to_an_i440fx_vm_goes_on_the_pci_bus_with_warnings(loans):
+    api, mgr, admin, _, desks = loans
+    from pegaprox.vlab import accel as a
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    raw = {'onboot': '1', 'bios': 'seabios', 'memory': '16384', 'balloon': '4096', 'name': 'ai-desk-01'}
+    mp.setattr(a, 'vm_raw', lambda m, node, vmid: dict(raw))
+
+    def write(node, vmid, kind, body):
+        raw.update(body)
+        return {'success': True}
+    mgr.update_vm_config.side_effect = write
+    try:
+        r = admin.post('/api/vlab/admin/leases', json={'desktop_id': desks[0]['id'], 'mapping': 'fpga-u250', 'ends_at': _later()})
+    finally:
+        mp.undo()
+    assert r.status_code == 201, r.get_json()
+    assert mgr.update_vm_config.call_args[0] == ('pve1', 300, 'qemu', {'hostpci14': 'mapping=fpga-u250'})
+    codes = {w['code'] for w in r.get_json()['warnings']}
+    assert {'PCIE_NOT_Q35', 'SEABIOS_BAR', 'ONBOOT', 'BALLOON', 'XILINX_RESET', 'XILINX_FUNCTION'} <= codes
+
+
+def test_the_checks_page_lists_desktops_boards_and_licence_servers(gpu, monkeypatch):
+    api, mgr, admin, alice, configs = gpu
+    from pegaprox.vlab import catalog
+    monkeypatch.setattr(accel, 'pci_mappings', lambda m: [accel.parse_mapping(x) for x in FPGA_MAPPINGS + [
+        {'id': 'w7900', 'description': 'W7900', 'map': ['id=1002:7448,node=pve1,path=0000:81:00']}]])
+    pool, desks = _pool(admin, vmids=(300, 301))
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/gpu", json={'mode': 'vgpu', 'mapping': 'gpu-a16', 'mdev_type': 'nvidia-746'})
+    configs[300] = {'hostpci15': 'mapping=gpu-a16,pcie=1,mdev=nvidia-746', 'hostpci14': 'mapping=gpu-a16,pcie=1', 'bios': 'ovmf'}
+    configs[301] = {'hostpci15': 'mapping=w7900,pcie=1', 'bios': 'ovmf'}
+    catalog.save_board(None, 'ZCU102 #1', CID, 'pve1', '03fd:0013', 'ZCU102', '')
+    catalog.save_license_server(None, 'Vivado FlexLM', 'lic01.example.com', [2100], CID, 400, '', '', False)
+    assert alice.get('/api/vlab/admin/accel/checks').status_code == 403
+    r = admin.get('/api/vlab/admin/accel/checks')
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    codes = [f['code'] for f in body['findings']]
+    for c in ('SAME_MAPPING', 'VGPU_LICENSE', 'AMD_GPU_RESET', 'JTAG_PID', 'LICENSE_MAC', 'LICENSE_UNWATCHED'):
+        assert c in codes, c
+    assert body['findings'][0]['severity'] == 'error' and body['counts']['error'] >= 1
+    one = admin.get(f"/api/vlab/admin/desktops/{desks[1]['id']}/accel-checks").get_json()['findings']
+    assert [f['code'] for f in one] == ['AMD_GPU_RESET']
+
+
+def test_no_ram_snapshot_with_a_passthrough_card(api, seed, monkeypatch):
+    from pegaprox.vlab import store
+    mgr = api.make_fake_manager(CID, get_vm_resources=RES, create_snapshot={'success': True},
+                                get_vm_config={'success': True, 'config': {'raw': {'hostpci14': 'mapping=fpga-u250,pcie=1', 'machine': 'q35'}}})
+    mgr.is_connected = True
+    api.set_manager(CID, mgr)
+    admin = api.as_user(seed.user('root', role='admin'))
+    pool = store.create_pool('FPGA', 'dedicated', CID)
+    desk = store.add_desktop(pool, 'pve1', 300, 'ai-desk-01')
+    url = f"/api/vlab/admin/desktops/{desk['id']}/snapshots"
+    r = admin.post(url, json={'name': 'before-test', 'vmstate': True})
+    assert r.status_code == 409 and r.get_json()['code'] == 'PASSTHROUGH_RAM'
+    assert admin.post(url, json={'name': 'before-test'}).status_code == 201

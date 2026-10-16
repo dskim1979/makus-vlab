@@ -247,11 +247,11 @@ def _apply_gpu(desk, node, policy):
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr:
         return 'cluster not connected'
-    want = accel.gpu_value(policy) if policy else None
-    have = accel.hostpci_of(mgr, node, desk['vmid'])
-    if have is None:
+    raw = accel.vm_raw(mgr, node, desk['vmid'])
+    if raw is None:
         return 'could not read the VM config'
-    if (have.get(accel.GPU_SLOT) or None) == want:
+    want = accel.fit_slot(accel.gpu_value(policy), raw) if policy else None
+    if (raw.get(accel.GPU_SLOT) or None) == want:
         return None
     body = {accel.GPU_SLOT: want} if want else {'delete': accel.GPU_SLOT}
     try:
@@ -1718,10 +1718,11 @@ def _set_slot(cluster_id, node, vmid, slot, value):
     mgr = cluster_managers.get(cluster_id)
     if not mgr:
         return 'cluster not connected'
-    have = accel.hostpci_of(mgr, node, vmid)
-    if have is None:
+    raw = accel.vm_raw(mgr, node, vmid)
+    if raw is None:
         return 'could not read the VM config'
-    if (have.get(slot) or None) == value:
+    value = accel.fit_slot(value, raw)
+    if (raw.get(slot) or None) == value:
         return None
     try:
         r = mgr.update_vm_config(node, int(vmid), 'qemu', {slot: value} if value else {'delete': slot})
@@ -1808,7 +1809,13 @@ def create_lease():
                             desk['cluster_id'], desk['vmid'], ends)
     log_audit(_user(), 'vlab.lease.create', f"{lease['resource_name']} ({mapping}) to qemu/{desk['vmid']} "
               f"({desk['assigned_user']}) until {ends}", get_client_ip())
-    return jsonify({'lease': lease, 'needs_restart': vm.get('status') == 'running'}), 201
+    from pegaprox.vlab import accel_checks
+    try:
+        warnings = accel_checks.for_vm(mgr, desk['cluster_id'], vm.get('node') or desk['node'], desk['vmid'], desk=desk)
+    except Exception as e:      # advice only: a loan never fails on it
+        logging.debug(f'[VLAB] accel checks of qemu/{desk["vmid"]}: {e}')
+        warnings = []
+    return jsonify({'lease': lease, 'needs_restart': vm.get('status') == 'running', 'warnings': warnings}), 201
 
 
 def _lease_or_error(lease_id):

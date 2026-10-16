@@ -2888,6 +2888,12 @@ def desktop_snapshot_take(desktop_id):
     except ValueError as e:
         return _bad(str(e))
     vmstate = bool(data.get('vmstate')) and desk['vm_type'] == 'qemu' and vm.get('status') == 'running'
+    if vmstate:
+        held = _passthrough(_raw_config(mgr, node, desk))
+        if held:
+            # PVE refuses it, and a rollback would restore device state the card no longer has
+            return jsonify({'error': 'A snapshot with RAM is not possible with a passthrough device ('
+                            + ', '.join(h['key'] for h in held) + ') - take it without RAM', 'code': 'PASSTHROUGH_RAM'}), 409
     e = _failed(mgr.create_snapshot(node, int(desk['vmid']), desk['vm_type'], name, description, vmstate), 'snapshot')
     if e:
         return e

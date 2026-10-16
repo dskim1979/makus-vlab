@@ -58280,6 +58280,84 @@
         ]
       }
     },
+    "/api/vlab/admin/accel/checks": {
+      "get": {
+        "operationId": "vlab_accel.accel_checks_all_get",
+        "tags": [
+          "vlab_accel"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktops/{desktop_id}/accel-checks": {
+      "get": {
+        "operationId": "vlab_accel.accel_checks_one_get",
+        "tags": [
+          "vlab_accel"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/shellws": {
       "get": {
         "operationId": "__flask_sock.node_shell_websocket_proxy_get",

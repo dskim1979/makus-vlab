@@ -188,6 +188,31 @@ def mdev_types(mgr, node, pciid):
     return [parse_profile(t) for t in (r.json().get('data') or []) if isinstance(t, dict)]
 
 
+def vm_raw(mgr, node, vmid):
+    """The VM's raw config {key: value}, or None when it cannot be read."""
+    try:
+        r = mgr.get_vm_config(node, int(vmid), 'qemu')
+    except Exception as e:
+        logging.debug(f'[VLAB] config of {vmid}: {e}')
+        return None
+    raw = r.get('config', {}).get('raw') if isinstance(r, dict) and r.get('success') else None
+    return raw if isinstance(raw, dict) else None
+
+
+def is_q35(raw):
+    """q35 machine ('q35', 'pc-q35-8.1', 'pc-q35-9.0+pve1', ...). PVE's default is i440fx."""
+    return 'q35' in str((raw or {}).get('machine') or '').split(',')[0]
+
+
+def fit_slot(value, raw):
+    """A hostpci value that the VM can start with: 'pcie=1' only exists on a q35 machine -
+    on the default i440fx PVE refuses to start the VM ('q35 machine model is not enabled'),
+    so the card goes on the PCI bus there instead."""
+    if not value or is_q35(raw):
+        return value
+    return ','.join(p for p in str(value).split(',') if p != 'pcie=1')
+
+
 def hostpci_of(mgr, node, vmid):
     """{slot: value} of the VM's hostpci entries, or None when the config cannot be read."""
     try:
