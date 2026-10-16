@@ -498,7 +498,17 @@ def agree_terms():
 _TERMS_GATED = ('/api/vlab/me/', '/api/vlab/desktops/')
 
 
-@bp.before_app_request
+def attach_terms_gate(app):
+    """Run _terms_gate before the requests of the MOAVI Desk blueprints only (every route it
+    gates lives there). Not app-wide: an app-level hook the HA lease fast path does not know
+    turns that fast path off (pegaprox/app.py _hooks_known, tests/test_ha_guard_answers.py)."""
+    for name in app.blueprints:
+        if name == 'vlab' or name.startswith('vlab_'):
+            hooks = app.before_request_funcs.setdefault(name, [])
+            if _terms_gate not in hooks:
+                hooks.append(_terms_gate)
+
+
 def _terms_gate():
     """While terms are on, a signed-in user who has not agreed to this version reaches
     neither the portal's own routes nor a desktop. API tokens are machines: not asked."""

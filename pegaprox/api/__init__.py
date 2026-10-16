@@ -128,6 +128,8 @@ def register_blueprints(app):
     app.register_blueprint(vlab_accounts_bp)
     app.register_blueprint(vlab_work_bp)
     app.register_blueprint(vlab_research_bp)
+    from pegaprox.api.vlab_accounts import attach_terms_gate
+    attach_terms_gate(app)   # after every vlab blueprint is registered
 
     # Initialize WebSocket support for realtime blueprint
     from pegaprox.api.realtime import sock
