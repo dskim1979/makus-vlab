@@ -17,6 +17,8 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/audit                        audit log (?q=&user=&date_from=&date_to=&vlab_only=&offset=&limit=)  admin role
   GET    /api/vlab/admin/summary                      counts for the dashboard / system summary  vlab.pool.view
   GET    /api/vlab/admin/sessions                     session log (?username=&pool_id=&limit=)  vlab.report.view
+  POST   /api/vlab/admin/sessions/<session_id>/end    end an open session (a VNC console is hung up)  vlab.pool.manage
+  POST   /api/vlab/admin/users/<username>/sessions/end  end every open session of the user  vlab.pool.manage
   GET    /api/vlab/admin/usage                        usage report (?days=1..90&pool_id=): per day, pool, user  vlab.report.view
   GET    /api/vlab/admin/clusters                   clusters the caller can reach         vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/guests  guests (no templates), desktop or not  vlab.pool.view
@@ -90,6 +92,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/desktops                     every desktop of the reachable pools  vlab.pool.view
   GET    /api/vlab/admin/pools                        pools with desktop counts             vlab.pool.view
   POST   /api/vlab/admin/pools                        {name, type, cluster_id, description} vlab.pool.manage
+  PUT    /api/vlab/admin/pools/<pool_id>              {name?, description?, enabled?, settings?} (cluster, type fixed)  vlab.pool.manage
   DELETE /api/vlab/admin/pools/<pool_id>              only an empty pool                    vlab.pool.manage
   GET    /api/vlab/admin/pools/<pool_id>/desktops     desktops of a pool                    vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/desktops     {node, vmid, type?, name?} add an existing guest   vlab.pool.manage
@@ -395,6 +398,8 @@ def connect_desktop(desktop_id):
     data = request.get_json(silent=True) or {}
     protocol = data.get('protocol') or 'vnc'
     pool = store.get_pool(desk['pool_id']) or {}
+    if not pool.get('enabled', True):
+        return jsonify({'error': 'This pool is switched off', 'code': 'POOL_DISABLED'}), 409
     pol = pool_policy.effective(pool.get('settings'))
     allowed = pol['protocols']
     if protocol not in allowed:
@@ -440,7 +445,7 @@ def connect_desktop(desktop_id):
             return _bad(str(result.get('error', 'Console failed')), 502)
         from pegaprox.utils.realtime import create_ws_token
         ws_token = create_ws_token(username, user.get('effective_role', user.get('role', 'viewer')),
-                                   sid=request_credential()[0])
+                                   sid=request_credential()[0], tag=desktop_ws_tag(desk))
         ticket, port = result.get('ticket') or '', result.get('port') or ''
         ws_path = (f"/api/clusters/{quote(desk['cluster_id'], safe='')}/vms/{quote(str(node), safe='')}/"
                    f"{vm_type}/{vmid}/vncwebsocket?token={quote(ws_token, safe='')}")
@@ -530,6 +535,62 @@ def session_log():
         if len(out) >= limit:
             break
     return jsonify({'sessions': out})
+
+
+def desktop_ws_tag(desk):
+    """The tag of the VNC websockets opened to a desktop, so ending its session hangs them up."""
+    return f"vlab-desk:{desk['id']}"
+
+
+# protocols whose connection the engine does not carry: ending the session only closes the record
+UNREACHED_PROTOCOLS = ('spice', 'rdp', 'guac')
+
+
+def _end_admin_session(s):
+    """Close an open session for an administrator. {id, username, protocol, hung_up, record_only}"""
+    from pegaprox.utils.realtime import hang_up_tagged
+    store.close_session(s['id'], result='terminated')
+    desk = store.get_desktop(s['desktop_id']) if s.get('desktop_id') else None
+    hung = 0
+    if desk and s.get('protocol') == 'vnc':
+        # the user's other VNC sessions on the same desktop go with it: one tag per desktop
+        hung = hang_up_tagged(s['username'], desktop_ws_tag(desk))
+    if desk:
+        _after_session(desk, by=_user())
+    return {'id': s['id'], 'username': s['username'], 'protocol': s.get('protocol') or '',
+            'hung_up': hung, 'record_only': (s.get('protocol') or '') in UNREACHED_PROTOCOLS}
+
+
+@bp.route('/api/vlab/admin/sessions/<session_id>/end', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def admin_end_session(session_id):
+    """End someone's open session. A VNC console through the engine is hung up; SPICE, RDP and
+    browser RDP go to the node or the desktop directly, so for them only the record closes
+    (record_only) - the viewer stays open until the user leaves or the desktop is reset."""
+    s = store.get_session(session_id)
+    pool = store.get_pool(s['pool_id']) if s and s.get('pool_id') else None
+    if not s or not pool or not _can_reach(pool['cluster_id']):
+        return _bad('Session not found', 404)
+    if s.get('ended_at'):
+        return jsonify({'error': 'The session has already ended', 'code': 'ENDED'}), 409
+    out = _end_admin_session(s)
+    log_audit(_user(), 'vlab.session.end', f"session {s['id']} of '{s['username']}' ({out['protocol']}) "
+              f"in pool '{pool['name']}' ended by admin" + (' - record only' if out['record_only'] else ''),
+              get_client_ip())
+    return jsonify({'success': True, 'session': out})
+
+
+@bp.route('/api/vlab/admin/users/<username>/sessions/end', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def admin_end_user_sessions(username):
+    """End every open session of a user in the pools the caller reaches."""
+    pools = {p['id']: p for p in store.list_pools() if _can_reach(p['cluster_id'])}
+    ended = [_end_admin_session(s) for s in store.open_sessions()
+             if s['username'] == username and s.get('pool_id') in pools]
+    if ended:
+        log_audit(_user(), 'vlab.session.end', f"{len(ended)} open session(s) of '{username}' ended by admin",
+                  get_client_ip())
+    return jsonify({'success': True, 'ended': ended})
 
 
 # --- admin: usage report ----------------------------------------------------------
@@ -2045,6 +2106,102 @@ def _pool_or_error(pool_id):
     if not pool or not _can_reach(pool['cluster_id']):
         return None, _bad('Pool not found', 404)
     return pool, None
+
+
+# settings the pool form changes; the policy, GPU, grants and templates have routes of their own
+GATEWAY_SETTINGS = {'rdp_gateway_id': ('rdpgw', 'msrdgw'), 'guac_gateway_id': ('guacamole',)}
+
+
+def _pool_settings_change(pool, data):
+    """(new settings, [changed keys]) from the request's `settings`, or raises ValueError."""
+    from pegaprox.vlab import catalog
+    if not isinstance(data, dict):
+        raise ValueError('settings must be an object')
+    unknown = set(data) - set(GATEWAY_SETTINGS) - {'max_sessions'}
+    if unknown:
+        raise ValueError(f"settings: unknown {', '.join(sorted(unknown))}")
+    settings = dict(pool.get('settings') or {})
+    changed = []
+    if 'max_sessions' in data:
+        if pool['type'] != 'shared':
+            raise ValueError('max_sessions is for shared pools only')
+        try:
+            ms = int(data['max_sessions'])
+        except (TypeError, ValueError):
+            raise ValueError('max_sessions must be a number')
+        if not 1 <= ms <= 500:
+            raise ValueError('max_sessions must be 1 to 500')
+        if ((settings.get('shared') or {}).get('max_sessions')) != ms:
+            settings['shared'] = dict(settings.get('shared') or {}, max_sessions=ms)
+            changed.append('max_sessions')
+    for key, kinds in GATEWAY_SETTINGS.items():
+        if key not in data:
+            continue
+        gid = str(data[key] or '').strip()
+        if gid:
+            g = catalog.get_gateway(gid)
+            if not g or g['kind'] not in kinds:
+                raise ValueError(f"{key}: no {' / '.join(kinds)} gateway {gid}")
+        if (settings.get(key) or '') == gid:
+            continue
+        if gid:
+            settings[key] = gid
+        else:
+            settings.pop(key, None)
+        changed.append(key)
+    return settings, changed
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def update_pool(pool_id):
+    """Rename a pool, change its description, switch it on or off, or its connection settings
+    (max_sessions of a shared pool, the RDP / Guacamole gateway). Its cluster and type stay:
+    the desktops, grants and schedules were made for them - make a new pool instead.
+    A switched-off pool hands out and connects no desktop; open sessions run on."""
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _bad('A JSON object is required')
+    for key in ('cluster_id', 'type'):
+        if key in data and data[key] != pool[key]:
+            return jsonify({'error': f'The {key} of a pool cannot be changed - create a new pool',
+                            'code': 'IMMUTABLE'}), 400
+    fields = {}
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name or len(name) > MAX_NAME:
+            return _bad(f'name is required (at most {MAX_NAME} characters)')
+        if name != pool['name']:
+            fields['name'] = name
+    if 'description' in data:
+        desc = str(data.get('description') or '').strip()[:500]
+        if desc != (pool.get('description') or ''):
+            fields['description'] = desc
+    if 'enabled' in data:
+        if not isinstance(data['enabled'], bool):
+            return _bad('enabled must be true or false')
+        if data['enabled'] != pool['enabled']:
+            fields['enabled'] = data['enabled']
+    settings, keys = None, []
+    if 'settings' in data:
+        try:
+            settings, keys = _pool_settings_change(pool, data['settings'])
+        except ValueError as e:
+            return _bad(str(e))
+    changed = list(fields) + keys
+    if not changed:
+        return jsonify({'pool': pool, 'changed': []})
+    if fields:
+        store.update_pool(pool_id, **fields)
+    if keys:
+        store.set_pool_settings(pool_id, settings)
+    after = next((p for p in store.list_pools() if p['id'] == pool_id), None) or store.get_pool(pool_id)
+    log_audit(_user(), 'vlab.pool.update', f"pool '{pool['name']}': " + ', '.join(
+        f"{k}={after[k]!r}" if k in ('name', 'enabled') else k for k in changed), get_client_ip())
+    return jsonify({'pool': after, 'changed': changed})
 
 
 @bp.route('/api/vlab/admin/pools/<pool_id>', methods=['DELETE'])

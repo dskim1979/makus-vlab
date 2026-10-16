@@ -10459,7 +10459,8 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
         print("Using geventwebsocket handler...")
         # #988 - counted against the account until the request ends, and hung up with
         # the session it was opened under (#1038)
-        hold_websocket(user['username'], ws, sid=auth.get('sid') if ws_token else session_id)
+        hold_websocket(user['username'], ws, sid=auth.get('sid') if ws_token else session_id,
+                       tag=auth.get('tag') if ws_token else None)
         handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid)
         return ''
     

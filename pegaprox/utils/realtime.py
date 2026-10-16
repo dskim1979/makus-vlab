@@ -239,10 +239,12 @@ def validate_sse_token(token: str) -> dict:
 # These are single-use and expire after 60s
 WS_TOKEN_TTL = 60
 
-def create_ws_token(username: str, role: str, api_token: bool = False, sid: str = None) -> str:
+def create_ws_token(username: str, role: str, api_token: bool = False, sid: str = None,
+                    tag: str = None) -> str:
     """Create a short-lived single-use WebSocket auth token. api_token: minted by an API
     token, whose role then bounds every console the ws token opens (#1116). sid: the
-    session it was minted under, see end_session_channels."""
+    session it was minted under, see end_session_channels. tag: what the socket it opens
+    is for, so it can be hung up on its own (hang_up_tagged)."""
     token = base64.urlsafe_b64encode(os.urandom(24)).decode('utf-8')
     expires = time.time() + WS_TOKEN_TTL
 
@@ -259,6 +261,7 @@ def create_ws_token(username: str, role: str, api_token: bool = False, sid: str 
             'api_token': bool(api_token),
             'expires': expires,
             'sid': sid,
+            'tag': tag,
         }
 
     return token
@@ -336,6 +339,7 @@ def end_session_channels(username: str, sids=None, keep: str = None) -> int:
         socks = [_held_ws.pop(k)[1] for k in gone]
         for k in gone:
             _held_ws_sid.pop(k, None)
+            _held_ws_tag.pop(k, None)
     for ws in socks:
         logging.info(f"[WS] hung up a WebSocket of '{_sl(username)}' - its session ended")
         _hang_up(ws)
@@ -352,6 +356,7 @@ def end_session_channels(username: str, sids=None, keep: str = None) -> int:
 MAX_WS_PER_USER = 10
 _held_ws = {}
 _held_ws_sid = {}      # key -> the session a socket was opened under, when one was
+_held_ws_tag = {}      # key -> the tag of the ws token that opened it, when it had one
 _held_ws_lock = threading.Lock()
 _held_ws_seq = itertools.count()
 # NS Oct 2026 (#1052) - request bodies taken off their clock, key -> account. A body that
@@ -365,19 +370,23 @@ def _bodies_of(username):
     return sum(1 for user in _held_bodies.values() if user == username)
 
 
-def hold_websocket(username, ws, sid=None):
+def hold_websocket(username, ws, sid=None, tag=None):
     """Count this request's open WebSocket against its account until the route returns.
     Past MAX_WS_PER_USER the account's oldest socket is hung up. sid: the session it was
-    opened under, hung up with it (end_session_channels)."""
+    opened under, hung up with it (end_session_channels). tag: see hang_up_tagged."""
     from flask import after_this_request
     key = next(_held_ws_seq)
     with _held_ws_lock:
         mine = sorted(k for k, (user, _) in _held_ws.items() if user == username)
         over = len(mine) + _bodies_of(username) - MAX_WS_PER_USER + 1
         gone = [_held_ws.pop(k)[1] for k in mine[:max(0, over)]]
+        for k in mine[:max(0, over)]:
+            _held_ws_tag.pop(k, None)
         _held_ws[key] = (username, ws)
         if sid:
             _held_ws_sid[key] = sid
+        if tag:
+            _held_ws_tag[key] = tag
 
     # per request, not an app-wide hook: the lease fast path in app.py stands in for the
     # app-wide ones and turns itself off for any it does not know
@@ -395,6 +404,29 @@ def release_websocket(key):
     with _held_ws_lock:
         _held_ws.pop(key, None)
         _held_ws_sid.pop(key, None)
+        _held_ws_tag.pop(key, None)
+
+
+def hang_up_tagged(username, tag):
+    """Drop the user's pending ws tokens with this tag and hang up the sockets they opened
+    on this port: one console ended by someone else (an administrator ending a vLAB
+    session), the user's other sockets left alone. How many went."""
+    if not tag:
+        return 0
+    with ws_tokens_lock:
+        gone = [t for t, d in ws_tokens.items() if d.get('user') == username and d.get('tag') == tag]
+        for t in gone:
+            del ws_tokens[t]
+    with _held_ws_lock:
+        keys = [k for k, (user, _ws) in _held_ws.items() if user == username and _held_ws_tag.get(k) == tag]
+        socks = [_held_ws.pop(k)[1] for k in keys]
+        for k in keys:
+            _held_ws_sid.pop(k, None)
+            _held_ws_tag.pop(k, None)
+    for ws in socks:
+        logging.info(f"[WS] hung up a WebSocket of '{_sl(username)}' ({_sl(tag)})")
+        _hang_up(ws)
+    return len(gone) + len(socks)
 
 
 def hold_body(username):

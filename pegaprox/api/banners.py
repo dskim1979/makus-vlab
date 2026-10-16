@@ -40,6 +40,8 @@ from pegaprox.api.helpers import acting_user
 bp = Blueprint('banners', __name__)
 
 BANNERS_KEY = 'broadcast_banners'
+# MAKUS - {banner id: start time} the MOAVI Desk console sets (api/vlab_next.py); written there only
+VLAB_STARTS_KEY = 'vlab_banner_starts'
 TEXT_MAX = 500
 MAX_BANNERS = 20
 # tenants or roles one banner names

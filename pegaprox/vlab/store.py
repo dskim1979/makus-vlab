@@ -190,6 +190,17 @@ def set_pool_settings(pool_id, settings):
     db().execute('UPDATE vlab_pools SET settings = ? WHERE id = ?', (json.dumps(settings or {}), pool_id))
 
 
+def update_pool(pool_id, **fields):
+    """Change a pool's name, description or enabled flag (the cluster and type stay)."""
+    cols = {k: v for k, v in fields.items() if k in ('name', 'description', 'enabled')}
+    if 'enabled' in cols:
+        cols['enabled'] = 1 if cols['enabled'] else 0
+    if cols:
+        db().execute('UPDATE vlab_pools SET ' + ', '.join(f'{k} = ?' for k in cols) + ' WHERE id = ?',
+                     tuple(cols.values()) + (pool_id,))
+    return get_pool(pool_id)
+
+
 def delete_pool(pool_id):
     db().execute('DELETE FROM vlab_lab_schedules WHERE pool_id = ?', (pool_id,))
     d = db()
@@ -358,6 +369,11 @@ def sessions_overlapping(since_iso, until_iso):
     rows = db().query('SELECT * FROM vlab_sessions WHERE started_at < ? AND (ended_at IS NULL OR ended_at >= ?)'
                       ' ORDER BY started_at', (until_iso, since_iso))
     return [dict(r) for r in rows]
+
+
+def get_session(session_id):
+    r = db().query_one('SELECT * FROM vlab_sessions WHERE id = ?', (session_id,))
+    return dict(r) if r else None
 
 
 def open_sessions():

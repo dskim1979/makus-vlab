@@ -614,3 +614,145 @@ def test_build_console_starts_the_vm_then_opens_and_template_needs_it_off(env, m
     r = admin.post(f'/api/vlab/admin/clusters/{CID}/vms/500/template')
     assert r.status_code == 200, r.get_json()
     assert mgr._api_post.call_args[0][0].endswith('/nodes/pve1/qemu/500/template')
+
+
+# --- pool edit, ending sessions, notices ------------------------------------------------
+
+def test_pool_edit_changes_name_state_and_settings_but_not_cluster_or_type(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    _, _, admin, alice, _, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    pool = _granted_pool(admin, '실습실', 'reset', [{'subject_type': 'user', 'subject_id': 'alice'}])
+    url = f"/api/vlab/admin/pools/{pool['id']}"
+    r = admin.put(url, json={'name': '  실습실 B ', 'description': '2층', 'enabled': False})
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    assert body['pool']['name'] == '실습실 B' and body['pool']['description'] == '2층' and body['pool']['enabled'] is False
+    assert sorted(body['changed']) == ['description', 'enabled', 'name']
+    assert admin.put(url, json={'name': '실습실 B'}).get_json()['changed'] == []
+    r = admin.put(url, json={'type': 'shared'})
+    assert r.status_code == 400 and r.get_json()['code'] == 'IMMUTABLE'
+    assert admin.put(url, json={'cluster_id': 'other'}).get_json()['code'] == 'IMMUTABLE'
+    assert admin.put(url, json={'type': 'reset', 'cluster_id': CID}).status_code == 200   # the same values pass
+    assert admin.put(url, json={'name': ''}).status_code == 400
+    assert admin.put(url, json={'enabled': 'no'}).status_code == 400
+    assert admin.put(url, json={'settings': {'max_sessions': 3}}).status_code == 400       # shared pools only
+    assert admin.put(url, json={'settings': {'policy': {}}}).status_code == 400            # has its own route
+    assert alice.put(url, json={'name': 'x'}).status_code == 403
+    # a switched-off pool hands out and connects nothing
+    store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'lab-01')
+    r = alice.post(f"/api/vlab/me/pools/{pool['id']}/claim")
+    assert r.status_code == 409 and r.get_json()['code'] == 'POOL_DISABLED'
+    assert alice.get('/api/vlab/me/pools').get_json()['pools'] == []
+    assert admin.put(url, json={'enabled': True}).get_json()['pool']['enabled'] is True
+    d = alice.post(f"/api/vlab/me/pools/{pool['id']}/claim").get_json()['desktop']
+    admin.put(url, json={'enabled': False})
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'vnc'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'POOL_DISABLED'
+
+
+def test_pool_edit_sets_shared_seats_and_gateways(env):
+    _, _, admin, _, _, _ = env
+    shared = store.create_pool('공유', 'shared', CID)
+    url = f"/api/vlab/admin/pools/{shared['id']}"
+    rdp = catalog.save_gateway(None, 'rdgw', 'msrdgw', 'gw.lab', 443, '', True)
+    guac = catalog.save_gateway(None, 'guac', 'guacamole', 'guac.lab', 8080, '', True)
+    r = admin.put(url, json={'settings': {'max_sessions': 4, 'rdp_gateway_id': rdp['id'], 'guac_gateway_id': guac['id']}})
+    assert r.status_code == 200, r.get_json()
+    s = store.get_pool(shared['id'])['settings']
+    assert s['shared']['max_sessions'] == 4 and s['rdp_gateway_id'] == rdp['id'] and s['guac_gateway_id'] == guac['id']
+    assert admin.put(url, json={'settings': {'rdp_gateway_id': guac['id']}}).status_code == 400   # wrong kind
+    assert admin.put(url, json={'settings': {'max_sessions': 0}}).status_code == 400
+    r = admin.put(url, json={'settings': {'rdp_gateway_id': None}})
+    assert r.get_json()['changed'] == ['rdp_gateway_id'] and 'rdp_gateway_id' not in store.get_pool(shared['id'])['settings']
+    assert store.get_pool(shared['id'])['settings']['shared']['max_sessions'] == 4
+
+
+def test_admin_ends_a_vnc_session_and_its_console_token(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    import pegaprox.utils.rbac as rbac
+    from pegaprox.utils import realtime
+    _, mgr, admin, alice, bob, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    pool = _granted_pool(admin, '빌드', 'shared', [{'subject_type': 'user', 'subject_id': 'alice'}])
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'shared-01')
+    mgr.get_vnc_ticket.return_value = {'success': True, 'ticket': 't', 'port': '5900'}
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'vnc'})
+    assert r.status_code == 200, r.get_json()
+    sid = r.get_json()['session_id']
+    tag = core.desktop_ws_tag(d)
+    assert any(t.get('tag') == tag for t in realtime.ws_tokens.values())
+    # a console socket opened with such a token, held on the main port, and another of hers
+    realtime._held_ws['k-test'] = ('alice', object())
+    realtime._held_ws_tag['k-test'] = tag
+    realtime._held_ws['k-other'] = ('alice', object())
+    try:
+        assert bob.post(f'/api/vlab/admin/sessions/{sid}/end').status_code == 403
+        r = admin.post(f'/api/vlab/admin/sessions/{sid}/end')
+        assert r.status_code == 200, r.get_json()
+        out = r.get_json()['session']
+        assert out['protocol'] == 'vnc' and out['record_only'] is False and out['hung_up'] == 2
+        assert not any(t.get('tag') == tag for t in realtime.ws_tokens.values())
+        assert 'k-test' not in realtime._held_ws and 'k-other' in realtime._held_ws
+    finally:
+        realtime._held_ws.pop('k-other', None)
+        realtime._held_ws.pop('k-test', None)
+        realtime._held_ws_tag.pop('k-test', None)
+    row = store.get_session(sid)
+    assert row['ended_at'] and row['result'] == 'terminated'
+    assert admin.post(f'/api/vlab/admin/sessions/{sid}/end').get_json()['code'] == 'ENDED'
+    assert admin.post('/api/vlab/admin/sessions/nope/end').status_code == 404
+
+
+def test_admin_ends_every_session_of_a_user_spice_only_on_record(env):
+    _, _, admin, _, _, _ = env
+    pool = store.create_pool('개발', 'dedicated', CID)
+    d1 = store.add_desktop(pool, 'pve1', 300, 'dev-01')
+    d2 = store.add_desktop(pool, 'pve2', 301, 'dev-02')
+    s1 = store.start_session('bob', d1, 'spice', '10.0.0.5')
+    s2 = store.start_session('bob', d2, 'rdp', '10.0.0.5')
+    other = store.start_session('alice', d1, 'vnc', '10.0.0.6')
+    r = admin.post('/api/vlab/admin/users/bob/sessions/end')
+    assert r.status_code == 200
+    ended = {e['id']: e for e in r.get_json()['ended']}
+    assert set(ended) == {s1, s2} and all(e['record_only'] for e in ended.values())
+    assert store.get_session(other)['ended_at'] is None
+    assert admin.post('/api/vlab/admin/users/bob/sessions/end').get_json()['ended'] == []
+
+
+def test_notices_have_a_start_an_audience_and_a_kind(env):
+    from datetime import datetime, timedelta, timezone
+    _, _, admin, alice, _, _ = env
+
+    def iso(h):
+        return (datetime.now(timezone.utc) + timedelta(hours=h)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def seen(c):
+        return {b['id'] for b in c.get('/api/vlab/banners').get_json()['banners']}
+
+    assert alice.get('/api/vlab/admin/banners').status_code == 403
+    r = admin.post('/api/vlab/admin/banners', json={'text': '점검 예정', 'severity': 'warning', 'audience': 'all',
+                                                    'starts_at': iso(2), 'expires_at': iso(5)})
+    assert r.status_code == 201, r.get_json()
+    later = r.get_json()['banner']
+    assert later['state'] == 'scheduled' and later['audience'] == 'all' and later['starts_at']
+    everyone = admin.post('/api/vlab/admin/banners', json={'text': '모두에게', 'audience': 'all'}).get_json()['banner']
+    admins = admin.post('/api/vlab/admin/banners', json={'text': '관리자만', 'audience': 'admins'}).get_json()['banner']
+    assert admins['audience'] == 'admins' and everyone['state'] == 'running'
+    assert seen(alice) == {everyone['id']}
+    assert seen(admin) == {everyone['id'], admins['id']}
+    # a start after the end is refused; the start can go
+    assert admin.put(f"/api/vlab/admin/banners/{later['id']}", json={'starts_at': iso(6)}).status_code == 400
+    r = admin.put(f"/api/vlab/admin/banners/{later['id']}", json={'starts_at': None, 'text': '점검 중'})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()['banner']['rev'] == 2 and r.get_json()['banner']['state'] == 'running'
+    assert later['id'] in seen(alice)
+    r = admin.put(f"/api/vlab/admin/banners/{everyone['id']}", json={'audience': 'admins'})
+    assert r.get_json()['banner']['audience'] == 'admins' and everyone['id'] not in seen(alice)
+    assert admin.post('/api/vlab/admin/banners', json={'text': 'x', 'audience': 'tenants'}).status_code == 400
+    assert admin.post('/api/vlab/admin/banners', json={'text': ''}).status_code == 400
+    assert admin.delete(f"/api/vlab/admin/banners/{later['id']}").status_code == 200
+    listed = admin.get('/api/vlab/admin/banners').get_json()['banners']
+    assert later['id'] not in {b['id'] for b in listed} and len(listed) == 2
+    assert admin.delete(f"/api/vlab/admin/banners/{later['id']}").status_code == 404

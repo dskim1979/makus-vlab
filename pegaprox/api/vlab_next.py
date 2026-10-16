@@ -59,6 +59,12 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   .../nodes/<node>/vms                                         a new VM from an ISO   vm.create
   POST   /api/vlab/admin/clusters/<id>/vms/<vmid>/console             noVNC while installing vm.console
   POST   /api/vlab/admin/clusters/<id>/vms/<vmid>/template            make it a template     vm.template
+
+  GET    /api/vlab/banners                            notices for the caller that run now     signed in
+  GET    /api/vlab/admin/banners                      every notice (the core banner list)     admin.settings
+  POST   /api/vlab/admin/banners                      {text, severity?, starts_at?, expires_at?, audience: all|admins}  admin.settings
+  PUT    /api/vlab/admin/banners/<id>                 change it (fields left out stay)        admin.settings
+  DELETE /api/vlab/admin/banners/<id>                 remove it                               admin.settings
 """
 
 import base64
@@ -1219,6 +1225,8 @@ def claim_desktop(pool_id):
     pool = store.get_pool(pool_id)
     if not pool or not core._can_reach(pool['cluster_id']) or not granted(pool_id, username):
         return _bad('Pool not found', 404)
+    if not pool.get('enabled', True):
+        return jsonify({'error': 'This pool is switched off', 'code': 'POOL_DISABLED'}), 409
     if pool['type'] not in CLAIM_TYPES:
         return _bad('Desktops of this pool are not handed out on request', 409)
     desks = store.list_desktops(pool_id)
@@ -2090,3 +2098,234 @@ def build_make_template(cluster_id, vmid):
         upid = None
     log_audit(_user(), 'vm.template', f"VM build: qemu/{vmid} ({vm.get('name') or ''}) made a template", get_client_ip())
     return jsonify({'success': True, 'vmid': vmid, 'task': upid})
+
+
+# --- notices (플랫폼 설정 > 공지) -------------------------------------------------------
+# The core broadcast banners (api/banners.py) with what the console asks of them: a start
+# time, kept next to the list under its own key, and the audience everyone or the
+# administrators (the core scope roles with the role admin). The core checks, limits and
+# write lock are used as they are; a banner made elsewhere with another scope shows as
+# audience 'other' and keeps its scope until the audience is set here.
+
+BANNER_AUDIENCES = ('all', 'admins')
+ADMIN_ROLE = 'admin'
+
+
+def _banner_starts():
+    from pegaprox.api import banners as bn
+    from pegaprox.core.db import get_db
+    try:
+        raw = get_db().get_server_setting(bn.VLAB_STARTS_KEY, {})
+    except Exception as e:
+        logging.warning(f'[VLAB] notice start times unreadable: {e}')
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_banner_starts(starts):
+    from pegaprox.api import banners as bn
+    from pegaprox.core.db import get_db
+    get_db().save_server_setting(bn.VLAB_STARTS_KEY, starts)
+
+
+def _audience_of(b):
+    if b.get('scope') == 'everyone':
+        return 'all'
+    if b.get('scope') == 'roles' and b.get('roles') == [ADMIN_ROLE]:
+        return 'admins'
+    return 'other'
+
+
+def _not_started(start, now):
+    from pegaprox.api import banners as bn
+    try:
+        return bool(start) and bn.parse_expiry(start) > now
+    except ValueError:
+        return False
+
+
+def _notice(b, starts, now):
+    from pegaprox.api import banners as bn
+    start = starts.get(b['id'])
+    expires, readable = bn._expiry(b)
+    if not readable or (expires is not None and expires <= now):
+        state = 'ended'
+    elif _not_started(start, now):
+        state = 'scheduled'
+    else:
+        state = 'running'
+    return {'id': b['id'], 'text': b['text'], 'severity': b['severity'], 'audience': _audience_of(b),
+            'starts_at': start or None, 'expires_at': b.get('expires_at'), 'rev': b['rev'], 'state': state,
+            'created_at': b.get('created_at'), 'created_by': b.get('created_by'),
+            'updated_at': b.get('updated_at'), 'updated_by': b.get('updated_by')}
+
+
+def _notice_fields(data, current=None):
+    """(core fields, start ISO or None, start given) from a request body over the current banner.
+    Raises the core's _Refused."""
+    from pegaprox.api import banners as bn
+    merged = {k: current[k] for k in bn.FIELDS} if current else {}
+    for k in ('text', 'severity', 'expires_at'):
+        if k in data:
+            merged[k] = data[k]
+    if 'audience' in data or not current:
+        audience = data.get('audience') or 'all'
+        if audience not in BANNER_AUDIENCES:
+            raise bn._Refused('audience is all or admins')
+        if audience == 'all':
+            merged.update(scope='everyone', tenants=[], roles=[])
+        else:
+            merged.update(scope='roles', tenants=[], roles=[ADMIN_ROLE])
+    fields = bn._validated(merged, new_expiry=not current or 'expires_at' in data)
+    start = None
+    if data.get('starts_at'):
+        try:
+            start = bn.parse_expiry(data['starts_at'])
+        except ValueError:
+            raise bn._Refused('starts_at is an ISO 8601 time with a timezone, or empty')
+        if fields['expires_at'] and start >= bn.parse_expiry(fields['expires_at']):
+            raise bn._Refused('The notice must start before it ends')
+    return fields, (bn._iso(start) if start else None), 'starts_at' in data
+
+
+@bp.route('/api/vlab/banners', methods=['GET'])
+@require_auth()
+def my_notices():
+    """The core's banners for the caller, less those that have not started yet."""
+    from pegaprox.api import banners as bn
+    resp = bn.list_my_banners()
+    rows = (resp.get_json(silent=True) or {}).get('banners') or []
+    starts, now = _banner_starts(), bn._now()
+    out = []
+    for b in rows:
+        start = starts.get(b['id'])
+        if _not_started(start, now):
+            continue
+        out.append(dict(b, starts_at=start or None))
+    return jsonify({'banners': out})
+
+
+@bp.route('/api/vlab/admin/banners', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def list_notices():
+    from pegaprox.api import banners as bn
+    refusal = bn._refuse_confined()
+    if refusal:
+        return refusal
+    banners = bn.stored_banners()
+    if banners is None:
+        return _bad('The notices cannot be read right now', 503)
+    starts, now = _banner_starts(), bn._now()
+    return jsonify({'banners': [_notice(b, starts, now) for b in banners],
+                    'limits': {'text': bn.TEXT_MAX, 'count': bn.MAX_BANNERS}})
+
+
+@bp.route('/api/vlab/admin/banners', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def create_notice():
+    import secrets
+    from pegaprox.api import banners as bn
+    refusal = bn._refuse_confined()
+    if refusal:
+        return refusal
+    try:
+        fields, start, _ = _notice_fields(_body())
+    except bn._Refused as e:
+        return _bad(str(e), e.status)
+    user, now = _user(), bn._now()
+    with bn._write_lock:
+        banners = bn.stored_banners()
+        if banners is None:
+            return _bad('The notices cannot be read right now', 503)
+        if len(banners) >= bn.MAX_BANNERS:
+            return _bad(f'There are already {bn.MAX_BANNERS} notices - delete one first', 409)
+        banner = dict(fields, id=secrets.token_hex(8), rev=1, created_at=bn._iso(now), created_by=user,
+                      updated_at=bn._iso(now), updated_by=user)
+        starts = _banner_starts()
+        if start:
+            starts[banner['id']] = start
+        try:
+            bn._save(banners + [banner])
+            _save_banner_starts({k: v for k, v in starts.items() if k in {b['id'] for b in banners} | {banner['id']}})
+        except Exception as e:
+            logging.error(f'[VLAB] notice not saved: {e}')
+            return _bad('The notice could not be saved', 500)
+    log_audit(user, 'settings.banner_created', f"Notice {banner['id']} created ({banner['severity']}, "
+              f"{_audience_of(banner)}{', from ' + start if start else ''}): {bn._preview(banner['text'])}", get_client_ip())
+    return jsonify({'banner': _notice(banner, starts, now)}), 201
+
+
+@bp.route('/api/vlab/admin/banners/<banner_id>', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def update_notice(banner_id):
+    from pegaprox.api import banners as bn
+    refusal = bn._refuse_confined()
+    if refusal:
+        return refusal
+    data, user, now = _body(), _user(), bn._now()
+    with bn._write_lock:
+        banners = bn.stored_banners()
+        if banners is None:
+            return _bad('The notices cannot be read right now', 503)
+        at = next((i for i, b in enumerate(banners) if b['id'] == banner_id), None)
+        if at is None:
+            return _bad('Notice not found', 404)
+        current = banners[at]
+        try:
+            fields, start, start_given = _notice_fields(data, current)
+        except bn._Refused as e:
+            return _bad(str(e), e.status)
+        starts = _banner_starts()
+        if not start_given:
+            start = starts.get(banner_id)
+            if start and fields['expires_at'] and bn.parse_expiry(start) >= bn.parse_expiry(fields['expires_at']):
+                return _bad('The notice must start before it ends')
+        changed = [k for k in bn.FIELDS if fields[k] != current[k]]
+        if start != starts.get(banner_id):
+            changed.append('starts_at')
+        if not changed:
+            return jsonify({'banner': _notice(current, starts, now), 'changed': []})
+        updated = dict(current, **fields, updated_at=bn._iso(now), updated_by=user)
+        if 'text' in changed:
+            updated['rev'] = current['rev'] + 1
+        banners[at] = updated
+        if start:
+            starts[banner_id] = start
+        else:
+            starts.pop(banner_id, None)
+        try:
+            bn._save(banners)
+            _save_banner_starts(starts)
+        except Exception as e:
+            logging.error(f'[VLAB] notice not saved: {e}')
+            return _bad('The notice could not be saved', 500)
+    log_audit(user, 'settings.banner_updated', f"Notice {banner_id} changed ({', '.join(changed)}): "
+              f"{bn._preview(updated['text'])}", get_client_ip())
+    return jsonify({'banner': _notice(updated, starts, now), 'changed': changed})
+
+
+@bp.route('/api/vlab/admin/banners/<banner_id>', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_notice(banner_id):
+    from pegaprox.api import banners as bn
+    refusal = bn._refuse_confined()
+    if refusal:
+        return refusal
+    with bn._write_lock:
+        banners = bn.stored_banners()
+        if banners is None:
+            return _bad('The notices cannot be read right now', 503)
+        gone = next((b for b in banners if b['id'] == banner_id), None)
+        if gone is None:
+            return _bad('Notice not found', 404)
+        starts = _banner_starts()
+        starts.pop(banner_id, None)
+        try:
+            bn._save([b for b in banners if b['id'] != banner_id])
+            _save_banner_starts(starts)
+        except Exception as e:
+            logging.error(f'[VLAB] notice not deleted: {e}')
+            return _bad('The notice could not be deleted', 500)
+    log_audit(_user(), 'settings.banner_deleted', f"Notice {banner_id} deleted: {bn._preview(gone['text'])}",
+              get_client_ip())
+    return jsonify({'success': True})
