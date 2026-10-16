@@ -47,6 +47,9 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   PUT    /api/vlab/admin/terminals/<terminal_id>      {name?, lab_id?, state?}                  vlab.pool.manage
   DELETE /api/vlab/admin/terminals/<terminal_id>      remove it                                 vlab.pool.manage
   POST   /api/vlab/terminals/register                 a client asks to be known {mac, name?} (waits for approval)  signed in
+  GET    /api/vlab/client/config                      what the Windows client should do (update, protocol)  signed in
+  GET    /api/vlab/admin/client                       the client settings                       admin.settings
+  PUT    /api/vlab/admin/client                       {latest_version?, min_version?, download_url?, protocol?}  admin.settings
   POST   /api/vlab/admin/terminals/<terminal_id>/key  a new kiosk key for it (shown once)       vlab.pool.manage
   GET    /api/vlab/kiosk                              the kiosk's room and session (header X-Terminal-Key)  terminal key
   POST   /api/vlab/kiosk/start                        a desktop of the session for the signed-in user (+ key)  vlab.desk
@@ -2729,6 +2732,77 @@ def kiosk_start():
         log_audit(username, 'vlab.kiosk.assign', f"{mine['vm_type']}/{mine['vmid']} '{mine['name']}' at terminal "
                   f"'{t['name'] or t['mac']}' (LAB {view['lab']['name']})", get_client_ip())
     return jsonify({'desktop': {'id': mine['id'], 'name': mine['name']}, **view})
+
+
+# --- MOAVI Desk Client (Windows) ---------------------------------------------------------
+# What the engine asks of its installed clients: the version to offer, the oldest one it still
+# takes, where to download it and the protocol to prefer. Kept in the server settings
+# (synced to HA peers with them).
+
+_CLIENT_DEFAULTS = {'latest_version': '', 'min_version': '', 'download_url': '', 'protocol': 'auto'}
+_CLIENT_KEY = 'vlab_client'
+_VERSION_RE = re.compile(r'^\d+(\.\d+){0,3}$')
+
+
+def _client_settings():
+    from pegaprox.api.helpers import load_server_settings
+    saved = (load_server_settings() or {}).get(_CLIENT_KEY) or {}
+    if isinstance(saved, str):
+        try:
+            saved = json.loads(saved)
+        except ValueError:
+            saved = {}
+    return {k: saved.get(k, v) for k, v in _CLIENT_DEFAULTS.items()}
+
+
+@bp.route('/api/vlab/client/config', methods=['GET'])
+@require_auth()
+def client_config():
+    """For a signed-in MOAVI Desk Client: the update it should offer or require, its protocol
+    and the remote-support page (the white label's, else the company's)."""
+    from pegaprox.api import frontend_branding as fb
+    c = _client_settings()
+    support = (fb.resolved(fb.DEFAULT_TENANT) or {}).get('supportUrl') or 'https://support.makussystems.co.kr/'
+    return jsonify({'product': 'MOAVI Desk', **c, 'support_url': support, 'api_version': VLAB_API_VERSION})
+
+
+@bp.route('/api/vlab/admin/client', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def client_settings_get():
+    return jsonify({'client': _client_settings()})
+
+
+@bp.route('/api/vlab/admin/client', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def client_settings_put():
+    from pegaprox.api.helpers import load_server_settings, save_server_settings
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return _bad('JSON body required')
+    unknown = sorted(set(data) - set(_CLIENT_DEFAULTS))
+    if unknown:
+        return _bad(f"unknown fields: {', '.join(unknown)}")
+    c = _client_settings()
+    for k in _CLIENT_DEFAULTS:
+        if k in data:
+            if not isinstance(data[k], str):
+                return _bad(f'{k} must be str')
+            c[k] = data[k].strip()
+    for k in ('latest_version', 'min_version'):
+        if c[k] and not _VERSION_RE.match(c[k]):
+            return _bad(f'{k} must look like 1.2.3')
+    if c['download_url'] and not re.match(r'^https?://', c['download_url']):
+        return _bad('download_url must start with http:// or https://')
+    if c['protocol'] not in ('auto', 'spice', 'vnc'):
+        return _bad('protocol must be auto, spice or vnc')
+    settings = load_server_settings() or {}
+    settings[_CLIENT_KEY] = c
+    if not save_server_settings(settings):
+        return _bad('Could not save the settings', 500)
+    log_audit(_user(), 'vlab.client.settings',
+              f"client: latest {c['latest_version'] or '-'}, min {c['min_version'] or '-'}, protocol {c['protocol']}",
+              get_client_ip())
+    return jsonify({'client': c})
 
 
 # --- directory (AD / LDAP) ---------------------------------------------------------

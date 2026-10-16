@@ -1471,3 +1471,30 @@ def test_kiosk_hands_out_a_desktop_of_the_session(connectable, api, monkeypatch)
     # the clean-up after the session frees it
     vlab_api.lab_tick(datetime(2026, 10, 12, 12, 5))
     assert vlab_api.store.get_desktop(got['id'])['assigned_user'] is None
+
+
+# --- MOAVI Desk Client ---------------------------------------------------------------------
+
+def test_client_config_defaults_and_admin_settings(env):
+    _, admin, alice, _, _ = env
+    r = alice.get('/api/vlab/client/config')
+    assert r.status_code == 200, r.get_json()
+    c = r.get_json()
+    assert c['product'] == 'MOAVI Desk' and c['protocol'] == 'auto' and c['min_version'] == ''
+    assert c['support_url'].startswith('https://')
+
+    assert alice.put('/api/vlab/admin/client', json={'protocol': 'vnc'}).status_code == 403
+    r = admin.put('/api/vlab/admin/client', json={'latest_version': '1.0.0', 'min_version': '0.9.0',
+                                                  'download_url': 'https://desk.example.com/MOAVI-Desk.msi', 'protocol': 'spice'})
+    assert r.status_code == 200, r.get_json()
+    c = alice.get('/api/vlab/client/config').get_json()
+    assert (c['latest_version'], c['min_version'], c['protocol']) == ('1.0.0', '0.9.0', 'spice')
+    assert admin.get('/api/vlab/admin/client').get_json()['client']['download_url'].endswith('.msi')
+
+
+def test_client_settings_input_is_checked(env):
+    _, admin, _, _, _ = env
+    for body in ({'latest_version': 'one'}, {'protocol': 'rdp'}, {'download_url': 'ftp://x'},
+                 {'what': 1}, {'min_version': 9}):
+        assert admin.put('/api/vlab/admin/client', json=body).status_code == 400, body
+

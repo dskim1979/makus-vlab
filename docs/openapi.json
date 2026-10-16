@@ -52095,6 +52095,111 @@
         ]
       }
     },
+    "/api/vlab/client/config": {
+      "get": {
+        "operationId": "vlab.client_config_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "For a signed-in MOAVI Desk Client: the update it should offer or require, its protocol and the remote-support page (the white label's, else the company's).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/vlab/admin/client": {
+      "get": {
+        "operationId": "vlab.client_settings_get_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      },
+      "put": {
+        "operationId": "vlab.client_settings_put_put",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
     "/api/vlab/admin/directory": {
       "get": {
         "operationId": "vlab.get_directory_get",
