@@ -50,6 +50,10 @@ def _loop():
                 policy_tick()
                 # and the LAB schedules: desktops ready before a session, put back after it
                 lab_tick()
+                # boards whose loan ended come off their desktop; licence servers every 5 minutes
+                from pegaprox.api.vlab_next import board_tick, license_tick
+                board_tick()
+                license_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         time.sleep(INTERVAL)

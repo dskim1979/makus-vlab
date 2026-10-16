@@ -379,7 +379,7 @@ def test_pool_policy_defaults_and_checks(connectable):
     url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
     r = admin.get(url).get_json()
     assert r['policy']['clipboard'] == 'both' and r['policy']['protocols'] == ['vnc', 'spice'] and r['reset_allowed'] is True
-    for bad in ({'clipboard': 'sideways'}, {'protocols': []}, {'protocols': ['rdp']}, {'idle_shutdown_min': -1},
+    for bad in ({'clipboard': 'sideways'}, {'protocols': []}, {'protocols': ['ftp']}, {'idle_shutdown_min': -1},
                 {'max_session_hours': 'x'}, {'allow_power': 'yes'}, {'colour': 'blue'}):
         assert admin.put(url, json=bad).status_code == 400, bad
     assert alice.put(url, json={'clipboard': 'off'}).status_code == 403

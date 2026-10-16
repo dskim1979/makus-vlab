@@ -14,7 +14,7 @@ takes effect:
   max_session_hours            background tick: a session open longer is closed
 """
 
-PROTOCOLS = ('vnc', 'spice')
+PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
 CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
 RESET_TYPES = ('reset', 'classroom')
 
@@ -60,7 +60,7 @@ def validate(data, pool_type):
     for k, v in data.items():
         if k == 'protocols':
             if not isinstance(v, list) or not v or any(p not in PROTOCOLS for p in v):
-                return None, 'protocols: a non-empty list of vnc, spice'
+                return None, 'protocols: a non-empty list of vnc, spice, rdp, guac'
             out[k] = [p for p in PROTOCOLS if p in v]
         elif k == 'clipboard':
             if v not in CLIPBOARD:

@@ -386,9 +386,11 @@ def connect_desktop(desktop_id):
     refused = standby_console_refusal()
     if refused:
         return refused
+    from pegaprox.api.vlab_next import shared_member
     username = _user()
     desk = store.get_desktop(desktop_id)
-    if not desk or desk['assigned_user'] != username or not _can_reach(desk['cluster_id']):
+    if (not desk or not _can_reach(desk['cluster_id'])
+            or (desk['assigned_user'] != username and not shared_member(desk, username))):
         return _bad('Desktop not found', 404)
     data = request.get_json(silent=True) or {}
     protocol = data.get('protocol') or 'vnc'
@@ -417,7 +419,12 @@ def connect_desktop(desktop_id):
         return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
     node, vmid, vm_type = vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type']
 
-    if protocol == 'spice':
+    if protocol in ('rdp', 'guac'):
+        from pegaprox.api.vlab_next import desktop_rdp_answer
+        answer, err = desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool)
+        if err:
+            return err
+    elif protocol == 'spice':
         if vm_type != 'qemu':
             return _bad('SPICE is only available for QEMU VMs')
         result = mgr.get_spice_ticket(node, vmid, vm_type)

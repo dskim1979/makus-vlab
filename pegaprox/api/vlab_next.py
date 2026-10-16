@@ -38,12 +38,27 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/buildfarm                       build farm pools: size, in use, load  vlab.pool.view
 
   GET/POST /api/vlab/admin/license-servers, PUT/DELETE .../<id>, POST .../<id>/check   licence servers  vlab.pool.view / vlab.accel.manage
+
+  GET/PUT /api/vlab/admin/pools/<id>/grants          who may claim / use a pool (user, department, group)  vlab.pool.view / manage
+  GET    /api/vlab/me/pools, POST .../<id>/claim, POST .../<id>/route   claim a desktop, route into a shared pool  vlab.desk
+  GET    /api/vlab/me/external/<id>/guac              browser RDP link (Guacamole) for an external desktop  vlab.desk
+  POST   /api/vlab/admin/golden-images/<id>/rollout   desktops of an older version replaced by the current one  vlab.pool.manage
+  GET/POST /api/vlab/me/build-jobs, POST .../<id>/cancel     the caller's build jobs                vlab.desk
+  GET/POST /api/vlab/admin/build-jobs, POST .../<id>/cancel  every build job                        vlab.pool.view / manage
+  GET    /api/vlab/admin/reports/cards                ?days=&format=csv card loans per card       vlab.report.view
 """
 
+import base64
+import hashlib
+import hmac
+import json as _json
+import logging
 import re
+import shlex
 import socket
 import time
 from datetime import datetime
+from urllib.parse import quote as _quote
 
 from flask import Blueprint, jsonify, request
 
@@ -413,8 +428,15 @@ def _gateway_body():
     kind = str(data.get('kind') or '')
     if kind not in catalog.GATEWAY_KINDS:
         raise ValueError('kind must be ' + ', '.join(catalog.GATEWAY_KINDS))
+    key = data.get('secret_key')
+    if key not in (None, ''):
+        key = str(key).strip().lower()
+        if kind != 'guacamole' or not re.match(r'^[0-9a-f]{32}$', key):
+            raise ValueError('secret_key: 32 hex digits (the 128-bit key of guacamole-auth-json), Guacamole only')
+    else:
+        key = None
     return (_text(data, 'name', 80, required=True), kind, _host(data, 'address'),
-            _int(data, 'port', 1, 65535, catalog.GATEWAY_KINDS[kind]), _text(data, 'notes', 300), data.get('enabled', True) is not False)
+            _int(data, 'port', 1, 65535, catalog.GATEWAY_KINDS[kind]), _text(data, 'notes', 300), data.get('enabled', True) is not False, key)
 
 
 @bp.route('/api/vlab/admin/gateways', methods=['GET'])
@@ -599,7 +621,16 @@ def list_golden():
         if not core._can_reach(img['cluster_id']):
             continue
         live = core._vm_states(img['cluster_id']).get(int(img['vmid'])) or {}
-        out.append(dict(img, versions=_versions(img), status=live.get('status') or 'unknown', pools=used.get(img['id'], [])))
+        have = catalog.desktop_versions(img['id'])
+        outdated = {}
+        for p in store.list_pools():
+            if (p.get('settings') or {}).get('golden_id') == img['id']:
+                outdated[p['id']] = {'pool': p['name'], 'total': 0, 'outdated': 0}
+                for d in store.list_desktops(p['id']):
+                    outdated[p['id']]['total'] += 1
+                    outdated[p['id']]['outdated'] += 1 if have.get(d['id']) != img['current_version'] else 0
+        out.append(dict(img, versions=_versions(img), status=live.get('status') or 'unknown', pools=used.get(img['id'], []),
+                        rollout=[dict(v, pool_id=k) for k, v in outdated.items()]))
     return jsonify({'images': out})
 
 
@@ -741,6 +772,7 @@ def deploy_golden(gid):
             failure = {'vmid': vmid, 'name': name, 'error': str((r or {}).get('error') if isinstance(r, dict) else r)[:300]}
             break
         desk = store.add_desktop(pool, node, vmid, name, 'qemu', state='provisioning')
+        catalog.set_desktop_version(desk['id'], gid, img['current_version'])
         created.append({'id': desk['id'], 'vmid': vmid, 'name': name, 'task': r.get('data')})
     if created and (pool.get('settings') or {}).get('golden_id') != gid:
         store.set_pool_settings(pool['id'], dict(pool.get('settings') or {}, golden_id=gid))
@@ -835,9 +867,19 @@ def attach_board(bid):
         return _bad('Board not found', 404)
     if b['attached_desktop']:
         return _bad('The board is attached already - detach it first', 409)
-    desk = store.get_desktop(str(_body().get('desktop_id') or ''))
+    data = _body()
+    desk = store.get_desktop(str(data.get('desktop_id') or ''))
     if not desk or desk['cluster_id'] != b['cluster_id']:
         return _bad('Desktop not found on the board\'s cluster', 404)
+    lease_user = str(data.get('lease_user') or '').strip() or (desk['assigned_user'] or '')
+    lease_until = str(data.get('lease_until') or '').strip() or None
+    if lease_until:
+        try:
+            if datetime.fromisoformat(lease_until[:16]) <= datetime.now():
+                return _bad('lease_until must be in the future')
+            lease_until = lease_until[:16]
+        except ValueError:
+            return _bad('lease_until must look like 2026-10-20T18:00')
     if desk['vm_type'] != 'qemu':
         return _bad('USB passthrough needs a virtual machine (QEMU)')
     live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
@@ -852,8 +894,9 @@ def attach_board(bid):
     r = mgr.update_vm_config(node, int(desk['vmid']), 'qemu', {BOARD_SLOT: f"host={b['usb']}"})
     if not isinstance(r, dict) or not r.get('success'):
         return _bad(f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
-    b = catalog.set_board_attachment(bid, desk['id'], desk['vmid'], _user())
-    log_audit(_user(), 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})", get_client_ip())
+    b = catalog.set_board_attachment(bid, desk['id'], desk['vmid'], _user(), lease_user, lease_until)
+    log_audit(_user(), 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
+              + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), get_client_ip())
     return jsonify({'board': b})
 
 
@@ -940,7 +983,8 @@ def _license_body():
     mac = str(data.get('fixed_mac') or '').strip().lower()
     if mac and not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
         raise ValueError('fixed_mac must look like 52:54:00:12:34:56')
-    return (_text(data, 'name', 80, required=True), _host(data, 'host'), ports, cluster_id, vmid, mac, _text(data, 'notes', 300))
+    return (_text(data, 'name', 80, required=True), _host(data, 'host'), ports, cluster_id, vmid, mac, _text(data, 'notes', 300),
+            data.get('watch', True) is not False)
 
 
 def _license_view(s):
@@ -1011,3 +1055,664 @@ def check_license_server(lid):
     ok = bool(detail) and all(d['ok'] for d in detail)
     s = catalog.mark_license_server(lid, ok, detail)
     return jsonify({'server': _license_view(s), 'ok': ok})
+
+
+# =========================================================================================
+# Access and automation (docs/vlab-design.md 6-3, 7-1, 7-3, 9, 10-2, 10-4, 12 step 4)
+#
+#   GET/PUT /api/vlab/admin/pools/<id>/grants          {grants:[{subject_type, subject_id, include_children}], max_sessions?}
+#   GET    /api/vlab/me/pools                           pools granted to the caller (claim / shared)    vlab.desk
+#   POST   /api/vlab/me/pools/<id>/claim                a free desktop of the pool, assigned to the caller
+#   POST   /api/vlab/me/pools/<id>/route                shared pool: the desktop to connect to now
+#   GET    /api/vlab/me/external/<id>/guac              browser RDP (Guacamole) link for an external desktop
+#   POST   /api/vlab/admin/golden-images/<id>/rollout   {pool_id, delete_old?} desktops of an older version -> current
+#   GET    /api/vlab/admin/build-jobs, POST .../<id>/cancel; GET/POST /api/vlab/me/build-jobs
+#   GET    /api/vlab/admin/reports/cards                ?days=30&format=csv card loans per card
+# The minute loop (pegaprox/vlab/loans.py) also runs board_tick (due board loans) and
+# license_tick (licence servers every 5 minutes, alerts on a change).
+# =========================================================================================
+
+MAX_SESSIONS_DEFAULT = 10
+
+
+# --- pool grants -------------------------------------------------------------------------
+
+def _user_groups(username):
+    from pegaprox.core.db import get_db
+    try:
+        return {str(g).lower() for g in (get_db().get_user_directory_groups(username) or [])}
+    except Exception:
+        return set()
+
+
+def granted(pool_id, username, grants=None, dep=None, groups=None):
+    """Does a pool grant reach the user: by name, by department (and its sub-departments), or by directory group?"""
+    grants = catalog.pool_grants(pool_id) if grants is None else grants
+    if not grants:
+        return False
+    dep = catalog.department_of(username) if dep is None else dep
+    for g in grants:
+        if g['subject_type'] == 'user' and g['subject_id'] == username:
+            return True
+        if g['subject_type'] == 'department' and dep:
+            if (dep == g['subject_id']) or (g['include_children'] and dep in catalog.descendants(g['subject_id'])):
+                return True
+        if g['subject_type'] == 'group':
+            groups = _user_groups(username) if groups is None else groups
+            if g['subject_id'].lower() in groups:
+                return True
+    return False
+
+
+def shared_member(desk, username):
+    """The core connect route asks this for a desktop not assigned to the caller: a shared pool's
+    desktop is open to everyone the pool is granted to."""
+    pool = store.get_pool(desk['pool_id']) or {}
+    return pool.get('type') == 'shared' and granted(pool['id'], username)
+
+
+def _max_sessions(pool):
+    try:
+        return max(1, min(500, int(((pool.get('settings') or {}).get('shared') or {}).get('max_sessions') or MAX_SESSIONS_DEFAULT)))
+    except (TypeError, ValueError):
+        return MAX_SESSIONS_DEFAULT
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/grants', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def get_pool_grants(pool_id):
+    pool, err = core._pool_or_error(pool_id)
+    if err:
+        return err
+    return jsonify({'grants': catalog.pool_grants(pool_id), 'max_sessions': _max_sessions(pool), 'types': list(catalog.GRANT_TYPES)})
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/grants', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def put_pool_grants(pool_id):
+    from pegaprox.utils.auth import load_users
+    pool, err = core._pool_or_error(pool_id)
+    if err:
+        return err
+    data = _body()
+    rows = data.get('grants')
+    if not isinstance(rows, list) or len(rows) > 500:
+        return _bad('grants: a list of at most 500')
+    users = load_users()
+    clean = []
+    for g in rows:
+        if not isinstance(g, dict):
+            return _bad('grants: objects with subject_type and subject_id')
+        t, sid = str(g.get('subject_type') or ''), str(g.get('subject_id') or '').strip()
+        if t not in catalog.GRANT_TYPES or not sid or len(sid) > 300:
+            return _bad('subject_type must be user, department or group, with a subject_id')
+        if t == 'user' and sid not in users:
+            return _bad(f'No such user: {sid}')
+        if t == 'department' and not catalog.get_department(sid):
+            return _bad(f'No such department: {sid}')
+        clean.append({'subject_type': t, 'subject_id': sid, 'include_children': g.get('include_children', True) is not False})
+    if 'max_sessions' in data:
+        try:
+            ms = int(data['max_sessions'])
+        except (TypeError, ValueError):
+            return _bad('max_sessions must be a number')
+        if not 1 <= ms <= 500:
+            return _bad('max_sessions must be 1 to 500')
+        settings = dict(pool.get('settings') or {})
+        settings['shared'] = dict(settings.get('shared') or {}, max_sessions=ms)
+        store.set_pool_settings(pool_id, settings)
+    out = catalog.set_pool_grants(pool_id, clean)
+    log_audit(_user(), 'vlab.pool.grants', f"pool '{pool['name']}': {len(out)} grants "
+              + ', '.join(f"{g['subject_type']}:{g['subject_id']}" for g in out[:10]), get_client_ip())
+    return jsonify({'grants': out, 'max_sessions': _max_sessions(store.get_pool(pool_id))})
+
+
+CLAIM_TYPES = ('dedicated', 'reset', 'buildfarm')
+
+
+@bp.route('/api/vlab/me/pools', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_pools():
+    """Pools granted to the caller: claim a desktop of a dedicated / reset / build farm pool, or
+    connect to a shared pool (the engine picks its least busy desktop)."""
+    username = _user()
+    dep, groups = catalog.department_of(username), _user_groups(username)
+    busy = store.open_session_desktops()
+    by_pool = {}
+    for g in catalog.pool_grants():
+        by_pool.setdefault(g['pool_id'], []).append(g)
+    out = []
+    for pool in store.list_pools():
+        if not pool.get('enabled', True) or not core._can_reach(pool['cluster_id']):
+            continue
+        if not granted(pool['id'], username, by_pool.get(pool['id'], []), dep, groups):
+            continue
+        desks = store.list_desktops(pool['id'])
+        mine = [d for d in desks if d['assigned_user'] == username]
+        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
+        kind = 'shared' if pool['type'] == 'shared' else ('claim' if pool['type'] in CLAIM_TYPES else 'other')
+        out.append({'id': pool['id'], 'name': pool['name'], 'type': pool['type'], 'description': pool.get('description', ''),
+                    'action': kind, 'desktops': len(desks), 'free': len(free), 'mine': [d['id'] for d in mine]})
+    return jsonify({'pools': out})
+
+
+@bp.route('/api/vlab/me/pools/<pool_id>/claim', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def claim_desktop(pool_id):
+    username = _user()
+    pool = store.get_pool(pool_id)
+    if not pool or not core._can_reach(pool['cluster_id']) or not granted(pool_id, username):
+        return _bad('Pool not found', 404)
+    if pool['type'] not in CLAIM_TYPES:
+        return _bad('Desktops of this pool are not handed out on request', 409)
+    desks = store.list_desktops(pool_id)
+    mine = next((d for d in desks if d['assigned_user'] == username), None)
+    if mine:
+        return jsonify({'desktop': {'id': mine['id'], 'name': mine['name']}, 'new': False})
+    busy = store.open_session_desktops()
+    free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
+    if not free:
+        return jsonify({'error': 'Every desktop of this pool is taken', 'code': 'FULL'}), 409
+    d = free[0]
+    if not core._acl_set(d['cluster_id'], d['vmid'], username, True):
+        return _bad('VM access list unavailable - try again', 503)
+    store.set_assignment(d['id'], username)
+    log_audit(username, 'vlab.desktop.claim', f"{d['vm_type']}/{d['vmid']} '{d['name']}' from pool '{pool['name']}'", get_client_ip())
+    return jsonify({'desktop': {'id': d['id'], 'name': d['name']}, 'new': True})
+
+
+@bp.route('/api/vlab/me/pools/<pool_id>/route', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def route_shared(pool_id):
+    """Shared pool: the running desktop with the fewest open sessions for its weight, under the
+    pool's limit per desktop. The caller then connects to it like to their own desktop."""
+    username = _user()
+    pool = store.get_pool(pool_id)
+    if not pool or not core._can_reach(pool['cluster_id']) or not granted(pool_id, username):
+        return _bad('Pool not found', 404)
+    if pool['type'] != 'shared':
+        return _bad('Only shared pools are routed', 409)
+    live = core._vm_states(pool['cluster_id'])
+    weights = ((pool.get('settings') or {}).get('shared') or {}).get('weights') or {}
+    counts = {}
+    for s in store.open_sessions():
+        counts[s['desktop_id']] = counts.get(s['desktop_id'], 0) + 1
+    limit = _max_sessions(pool)
+    best = None
+    for d in store.list_desktops(pool_id):
+        if (live.get(int(d['vmid'])) or {}).get('status') != 'running' or d.get('state') in ('provisioning', 'resetting', 'error'):
+            continue
+        n = counts.get(d['id'], 0)
+        if n >= limit:
+            continue
+        try:
+            w = max(1, int(weights.get(d['id'], 1)))
+        except (TypeError, ValueError):
+            w = 1
+        key = (n / w, n, d['name'])
+        if best is None or key < best[0]:
+            best = (key, d)
+    if not best:
+        return jsonify({'error': 'Every desktop of this pool is full or off', 'code': 'FULL'}), 409
+    d = best[1]
+    if not core._acl_set(d['cluster_id'], d['vmid'], username, True):
+        return _bad('VM access list unavailable - try again', 503)
+    return jsonify({'desktop': {'id': d['id'], 'name': d['name']}, 'sessions': counts.get(d['id'], 0), 'limit': limit})
+
+
+# --- RDP files and Guacamole -------------------------------------------------------------
+
+def _guest_ipv4(mgr, node, vmid):
+    try:
+        ips = mgr._fetch_qemu_ips(node, int(vmid)) or []
+    except Exception:
+        ips = []
+    for ip in ips:
+        ip = str(ip)
+        if re.match(r'^\d+\.\d+\.\d+\.\d+$', ip) and not ip.startswith(('127.', '169.254.')):
+            return ip
+    return None
+
+
+def _guac_gateway(pool=None):
+    gid = ((pool or {}).get('settings') or {}).get('guac_gateway_id')
+    for g in catalog.list_gateways(secret=True):
+        if g['kind'] == 'guacamole' and g['enabled'] and g['secret_key'] and (not gid or g['id'] == gid):
+            return g
+    return None
+
+
+def guac_link(gw, username, name, host, port, minutes=5):
+    """A guacamole-auth-json login link: the JSON (one RDP connection) signed with HMAC-SHA256 and
+    encrypted with AES-128-CBC (zero IV) under the gateway's 128-bit key, base64 in ?data=."""
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    key = bytes.fromhex(gw['secret_key'])
+    payload = _json.dumps({'username': username, 'expires': int((time.time() + minutes * 60) * 1000),
+                           'connections': {name: {'protocol': 'rdp', 'parameters': {
+                               'hostname': host, 'port': str(port), 'username': username,
+                               'ignore-cert': 'true', 'security': 'any', 'resize-method': 'display-update'}}}},
+                          separators=(',', ':')).encode()
+    signed = hmac.new(key, payload, hashlib.sha256).digest() + payload
+    padder = padding.PKCS7(128).padder()
+    enc = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).encryptor()
+    data = enc.update(padder.update(signed) + padder.finalize()) + enc.finalize()
+    scheme = 'http' if gw['port'] in (80, 8080) else 'https'
+    return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={_quote(base64.b64encode(data).decode())}"
+
+
+def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
+    """The connect route's answer for rdp (an .rdp file) and guac (a browser RDP link).
+    Returns (answer, None) or (None, error response)."""
+    if desk['vm_type'] != 'qemu':
+        return None, _bad('RDP needs a virtual machine (QEMU) with its guest agent')
+    ip = _guest_ipv4(mgr, node, vmid)
+    if not ip:
+        return None, (jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409)
+    port = 3389
+    if protocol == 'rdp':
+        ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
+        return {'type': 'rdp', 'rdp': rdp_file(ext, username), 'filename': f"{desk['name']}.rdp"}, None
+    gw = _guac_gateway(pool)
+    if not gw:
+        return None, (jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409)
+    return {'type': 'guac', 'url': guac_link(gw, username, desk['name'], ip, port)}, None
+
+
+@bp.route('/api/vlab/me/external/<eid>/guac', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_external_guac(eid):
+    ext = catalog.get_external(eid)
+    if not ext or ext['assigned_user'] != _user():
+        return _bad('External desktop not found', 404)
+    gw = None
+    if ext.get('gateway_id'):
+        g = catalog.get_gateway(ext['gateway_id'], secret=True)
+        if g and g['kind'] == 'guacamole' and g['enabled'] and g['secret_key']:
+            gw = g
+    gw = gw or _guac_gateway()
+    if not gw:
+        return jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409
+    log_audit(_user(), 'vlab.external.connect', f"browser RDP to '{ext['name']}'", get_client_ip())
+    return jsonify({'url': guac_link(gw, _user(), ext['name'], ext['address'], ext['port'])})
+
+
+# --- golden image rollout ----------------------------------------------------------------
+
+MAX_ROLLOUT = 20
+
+
+@bp.route('/api/vlab/admin/golden-images/<gid>/rollout', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def rollout_golden(gid):
+    """Bring a pool's desktops to the image's current version (design 6-3, method A): a new full
+    clone per desktop, the user moved over (VM access too), the old desktop out of the pool.
+    Desktops in a session now are left for the next run. With delete_old, a stopped old VM is deleted."""
+    img, err = _golden_or_error(gid)
+    if err:
+        return err
+    if not img['current_version']:
+        return _bad('Make a version of the image first', 409)
+    data = _body()
+    pool, err = core._pool_or_error(str(data.get('pool_id') or ''))
+    if err:
+        return err
+    if pool['cluster_id'] != img['cluster_id']:
+        return _bad('The pool is on another cluster than the image', 409)
+    delete_old = data.get('delete_old') is True
+    mgr = cluster_managers.get(pool['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return _bad('Cluster not connected', 503)
+    from pegaprox.api.helpers import acting_user
+    from pegaprox.utils.rbac import TenantRangeUnknown, tenant_vmid_range
+    versions = catalog.desktop_versions(gid)
+    busy = store.open_session_desktops()
+    todo, skipped = [], []
+    for d in store.list_desktops(pool['id']):
+        if versions.get(d['id']) == img['current_version']:
+            continue
+        if d['id'] in busy or d.get('state') in ('provisioning', 'resetting'):
+            skipped.append(d['name'])
+            continue
+        todo.append(d)
+    todo = todo[:MAX_ROLLOUT]
+    if not todo:
+        return jsonify({'replaced': [], 'skipped': skipped, 'failed': None})
+    live = core._vm_states(pool['cluster_id'])
+    node = (live.get(int(img['vmid'])) or {}).get('node') or img['node']
+    try:
+        tenant_range = tenant_vmid_range((acting_user() or {}).get('tenant_id') or 'default')
+    except TenantRangeUnknown:
+        return _bad('Tenant settings unavailable - nothing changed', 503)
+    start = 0
+    if not tenant_range[0]:
+        nxt = mgr.get_next_vmid()
+        if isinstance(nxt, dict) and nxt.get('success'):
+            start = int(nxt.get('vmid') or 0)
+    vmids = core._free_vmids(pool['cluster_id'], len(todo), start, tenant_range, live)
+    replaced, failure = [], None
+    for old, vmid in zip(todo, vmids):
+        r = mgr.clone_vm(node, int(img['vmid']), 'qemu', vmid, name=old['name'], full=True, snapname=img['current_version'],
+                         description=f"MOAVI Desk pool '{pool['name']}' from golden image '{img['name']}' {img['current_version']}")
+        if not isinstance(r, dict) or not r.get('success'):
+            failure = {'name': old['name'], 'error': str((r or {}).get('error') if isinstance(r, dict) else r)[:300]}
+            break
+        new = store.add_desktop(pool, node, vmid, old['name'], 'qemu', state='provisioning')
+        catalog.set_desktop_version(new['id'], gid, img['current_version'])
+        user = old['assigned_user']
+        if user:
+            core._acl_set(pool['cluster_id'], vmid, user, True)
+            store.set_assignment(new['id'], user)
+            core._acl_set(old['cluster_id'], old['vmid'], user, False)
+        store.remove_desktop(old['id'])
+        catalog.forget_desktop_version(old['id'])
+        deleted = False
+        if delete_old and (live.get(int(old['vmid'])) or {}).get('status') == 'stopped':
+            dr = mgr.delete_vm(live.get(int(old['vmid']), {}).get('node') or old['node'], int(old['vmid']), old['vm_type'], purge=True)
+            deleted = isinstance(dr, dict) and bool(dr.get('success'))
+        replaced.append({'name': old['name'], 'old_vmid': old['vmid'], 'new_vmid': vmid, 'user': user, 'old_deleted': deleted})
+    log_audit(_user(), 'vlab.golden.rollout', f"pool '{pool['name']}' -> {img['current_version']}: {len(replaced)} replaced, "
+              f"{len(skipped)} in use" + (f", stopped at {failure['name']}" if failure else ''), get_client_ip())
+    return jsonify({'replaced': replaced, 'skipped': skipped, 'failed': failure}), (200 if not failure else (207 if replaced else 502))
+
+
+# --- board loans -------------------------------------------------------------------------
+
+def _detach_board(b):
+    """Take the board off its desktop. Returns an error text or None."""
+    desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
+    if desk:
+        mgr = cluster_managers.get(desk['cluster_id'])
+        if not mgr or not getattr(mgr, 'is_connected', False):
+            return 'cluster not connected'
+        live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
+        r = mgr.update_vm_config(live.get('node') or desk['node'], int(desk['vmid']), 'qemu', {'delete': BOARD_SLOT})
+        if not isinstance(r, dict) or not r.get('success'):
+            return str((r or {}).get('error') if isinstance(r, dict) else r)[:200] or 'update failed'
+    catalog.set_board_attachment(b['id'], None, None, '')
+    return None
+
+
+def board_tick(now_iso=None):
+    """Detach the boards whose loan has ended (the minute loop). Returns (done, failed)."""
+    from pegaprox.core import ha
+    done = failed = 0
+    for b in catalog.due_boards(now_iso or store.now()):
+        if not ha.confirm_step(f"vLAB board loan end {b['id']}"):
+            break
+        err = _detach_board(b)
+        if err:
+            failed += 1
+            logging.warning(f"[VLAB] board {b['name']} not detached at loan end: {err}")
+        else:
+            done += 1
+            log_audit('system', 'vlab.board.return', f"board '{b['name']}': loan to {b['lease_user'] or '-'} ended", '')
+    return done, failed
+
+
+# --- licence server watch ----------------------------------------------------------------
+
+LICENSE_EVERY = 300
+_license_last = [0.0]
+
+
+def _alert(title, text, data):
+    """Licence alerts go to every webhook channel and the alert mail recipients."""
+    try:
+        from pegaprox.utils.webhooks import send_to_channels
+        send_to_channels(dict(data, title=title, message=text, source='moavi-desk', severity=data.get('severity', 'critical')))
+    except Exception as e:
+        logging.warning(f'[VLAB] licence alert webhooks: {e}')
+    try:
+        from pegaprox.api.helpers import load_server_settings
+        from pegaprox.utils.email import send_email
+        rcpt = (load_server_settings() or {}).get('alert_email_recipients') or []
+        if rcpt:
+            send_email(rcpt, f'[MOAVI Desk] {title}', text, None)
+    except Exception as e:
+        logging.warning(f'[VLAB] licence alert mail: {e}')
+
+
+def license_tick(force=False):
+    """Check every watched licence server's ports (every 5 minutes); alert when one stops
+    answering and again when it is back. Returns the number checked."""
+    if not force and time.time() - _license_last[0] < LICENSE_EVERY:
+        return 0
+    _license_last[0] = time.time()
+    n = 0
+    for s in catalog.list_license_servers():
+        if not s.get('watch', 1):
+            continue
+        detail = []
+        for port in s['ports']:
+            ok, ms, err = _tcp_probe(s['host'], port)
+            detail.append({'port': port, 'ok': ok, 'ms': ms, 'error': err})
+        ok = bool(detail) and all(d['ok'] for d in detail)
+        was = s.get('last_ok')
+        catalog.mark_license_server(s['id'], ok, detail)
+        n += 1
+        down = ', '.join(str(d['port']) for d in detail if not d['ok'])
+        if not ok and not s.get('alerted_at'):
+            _alert(f"라이선스 서버 응답 없음: {s['name']}", f"{s['name']} ({s['host']}) 포트 {down} 가 응답하지 않습니다.",
+                   {'kind': 'license_down', 'server': s['name'], 'host': s['host'], 'ports': down})
+            catalog.mark_license_alerted(s['id'], store.now())
+            log_audit('system', 'vlab.license.down', f"licence server '{s['name']}' ports {down} not answering", '')
+        elif ok and s.get('alerted_at'):
+            _alert(f"라이선스 서버 복구: {s['name']}", f"{s['name']} ({s['host']}) 의 모든 포트가 다시 응답합니다.",
+                   {'kind': 'license_up', 'server': s['name'], 'host': s['host'], 'severity': 'info'})
+            catalog.mark_license_alerted(s['id'], None)
+            log_audit('system', 'vlab.license.up', f"licence server '{s['name']}' answers again", '')
+        elif ok and was is None:
+            pass
+    return n
+
+
+# --- build job queue ---------------------------------------------------------------------
+
+MAX_OUTPUT = 20000
+
+
+def _agent(mgr, node, vmid, path):
+    return f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(vmid)}/agent/{path}"
+
+
+def _start_job(job, desk, mgr, node):
+    cmd = job['command'] if not job['workdir'] else f"cd {shlex.quote(job['workdir'])} && {job['command']}"
+    resp = mgr._api_post(_agent(mgr, node, desk['vmid'], 'exec'), data={'command': ['/bin/bash', '-lc', cmd]})
+    if getattr(resp, 'status_code', 0) != 200:
+        return None, (getattr(resp, 'text', '') or 'guest agent refused')[:300]
+    try:
+        pid = (resp.json().get('data') or {}).get('pid')
+    except Exception:
+        pid = None
+    return pid, (None if pid else 'guest agent returned no pid')
+
+
+def refresh_jobs(pool_id=None):
+    """Bring the queue up to date: read the running jobs' state from the guest agent, then start
+    queued jobs on free build VMs (running, unassigned, not in a session, no job). Runs when the
+    job lists are read and when a job is sent."""
+    for job in catalog.jobs_in('running', pool_id):
+        desk = store.get_desktop(job['desktop_id']) if job['desktop_id'] else None
+        mgr = cluster_managers.get(desk['cluster_id']) if desk else None
+        if not desk or not mgr or not getattr(mgr, 'is_connected', False):
+            continue
+        node = (core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}).get('node') or desk['node']
+        try:
+            resp = mgr._api_get(_agent(mgr, node, desk['vmid'], 'exec-status'), params={'pid': job['pid']})
+            st = (resp.json().get('data') or {}) if getattr(resp, 'status_code', 0) == 200 else {}
+        except Exception:
+            st = {}
+        if st.get('exited'):
+            code = st.get('exitcode')
+            out = (st.get('out-data') or '')[-MAX_OUTPUT:]
+            err = (st.get('err-data') or '')[-4000:]
+            catalog.update_build_job(job['id'], status='done' if code in (0, None) else 'failed', exit_code=code,
+                                     output=out, error=err, finished_at=store.now())
+    for job in catalog.jobs_in('queued', pool_id):
+        pool = store.get_pool(job['pool_id'])
+        if not pool:
+            catalog.update_build_job(job['id'], status='cancelled', error='pool removed', finished_at=store.now())
+            continue
+        mgr = cluster_managers.get(pool['cluster_id'])
+        if not mgr or not getattr(mgr, 'is_connected', False):
+            continue
+        live = core._vm_states(pool['cluster_id'])
+        busy = store.open_session_desktops() | {j['desktop_id'] for j in catalog.jobs_in('running', pool['id'])}
+        free = [d for d in store.list_desktops(pool['id'])
+                if not d['assigned_user'] and d['id'] not in busy and d['vm_type'] == 'qemu'
+                and (live.get(int(d['vmid'])) or {}).get('status') == 'running']
+        if not free:
+            continue
+        d = free[0]
+        node = (live.get(int(d['vmid'])) or {}).get('node') or d['node']
+        pid, err = _start_job(job, d, mgr, node)
+        if err:
+            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], error=err, finished_at=store.now())
+        else:
+            catalog.update_build_job(job['id'], status='running', desktop_id=d['id'], pid=pid, started_at=store.now())
+            log_audit(job['username'], 'vlab.build.start', f"build '{job['name']}' on {d['name']} (qemu/{d['vmid']})", '')
+
+
+def _job_view(j):
+    desk = store.get_desktop(j['desktop_id']) if j.get('desktop_id') else None
+    pool = store.get_pool(j['pool_id'])
+    return dict(j, desktop=desk['name'] if desk else None, pool=pool['name'] if pool else None)
+
+
+def _job_body():
+    data = _body()
+    pool = store.get_pool(str(data.get('pool_id') or ''))
+    if not pool or pool['type'] != 'buildfarm' or not core._can_reach(pool['cluster_id']):
+        raise LookupError('Build farm pool not found')
+    name = _text(data, 'name', 80, required=True)
+    command = _text(data, 'command', 2000, required=True)
+    workdir = _text(data, 'workdir', 300)
+    return pool, name, command, workdir
+
+
+@bp.route('/api/vlab/me/build-jobs', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_build_jobs():
+    refresh_jobs()
+    pools = [{'id': p['id'], 'name': p['name']} for p in store.list_pools()
+             if p['type'] == 'buildfarm' and core._can_reach(p['cluster_id']) and granted(p['id'], _user())]
+    return jsonify({'jobs': [_job_view(j) for j in catalog.list_build_jobs(username=_user(), limit=100)], 'pools': pools})
+
+
+@bp.route('/api/vlab/me/build-jobs', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def submit_build_job():
+    try:
+        pool, name, command, workdir = _job_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    if not granted(pool['id'], _user()):
+        return _bad('Build farm pool not found', 404)
+    if len(catalog.jobs_in('queued')) >= 500:
+        return _bad('The build queue is full', 429)
+    job = catalog.add_build_job(pool['id'], _user(), name, command, workdir)
+    log_audit(_user(), 'vlab.build.submit', f"build '{name}' to pool '{pool['name']}'", get_client_ip())
+    refresh_jobs(pool['id'])
+    return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
+
+
+def _cancel(job):
+    if job['status'] != 'queued':
+        return _bad('Only a queued job can be cancelled (a running build ends on its build VM)', 409)
+    return jsonify({'job': _job_view(catalog.update_build_job(job['id'], status='cancelled', finished_at=store.now()))})
+
+
+@bp.route('/api/vlab/me/build-jobs/<jid>/cancel', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def cancel_my_build_job(jid):
+    job = catalog.get_build_job(jid)
+    if not job or job['username'] != _user():
+        return _bad('Job not found', 404)
+    return _cancel(job)
+
+
+@bp.route('/api/vlab/admin/build-jobs', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_build_jobs():
+    pool_id = request.args.get('pool_id') or None
+    refresh_jobs(pool_id)
+    jobs = catalog.list_build_jobs(pool_id=pool_id, limit=300)
+    return jsonify({'jobs': [_job_view(j) for j in jobs],
+                    'counts': {s: sum(1 for j in jobs if j['status'] == s) for s in catalog.JOB_STATES}})
+
+
+@bp.route('/api/vlab/admin/build-jobs', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def admin_submit_build_job():
+    """Send a job on someone's behalf (or the admin's own)."""
+    from pegaprox.utils.auth import load_users
+    try:
+        pool, name, command, workdir = _job_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    owner = str(_body().get('username') or '').strip() or _user()
+    if owner not in load_users():
+        return _bad('No such user')
+    job = catalog.add_build_job(pool['id'], owner, name, command, workdir)
+    log_audit(_user(), 'vlab.build.submit', f"build '{name}' for {owner} to pool '{pool['name']}'", get_client_ip())
+    refresh_jobs(pool['id'])
+    return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
+
+
+@bp.route('/api/vlab/admin/build-jobs/<jid>/cancel', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def cancel_build_job(jid):
+    job = catalog.get_build_job(jid)
+    if not job:
+        return _bad('Job not found', 404)
+    return _cancel(job)
+
+
+# --- card usage report -------------------------------------------------------------------
+
+@bp.route('/api/vlab/admin/reports/cards', methods=['GET'])
+@require_auth(perms=['vlab.report.view'])
+def card_report():
+    """Loans per card over the last N days: how many, hours in the window, users, lent now."""
+    from datetime import timedelta
+    try:
+        days = max(1, min(366, int(request.args.get('days') or 30)))
+    except ValueError:
+        return _bad('days must be a number')
+    now = datetime.now()
+    since = now - timedelta(days=days)
+    parse = lambda s: datetime.fromisoformat(s[:19]) if s else None   # noqa: E731
+    cards = {}
+    for l in store.list_leases(active_only=False, limit=20000):
+        start = parse(l['starts_at'])
+        end = parse(l['returned_at']) or (now if l['state'] == 'active' else parse(l['ends_at']) or now)
+        if not start or end < since:
+            continue
+        hours = max(0.0, (min(end, now) - max(start, since)).total_seconds() / 3600)
+        key = l['resource_name'] or l['resource_id']
+        c = cards.setdefault(key, {'card': key, 'resource_id': l['resource_id'], 'loans': 0, 'hours': 0.0, 'users': set(), 'active': 0})
+        c['loans'] += 1
+        c['hours'] += hours
+        c['users'].add(l['username'])
+        c['active'] += 1 if l['state'] == 'active' else 0
+    rows = sorted(({**c, 'hours': round(c['hours'], 1), 'users': sorted(c['users']),
+                    'use_pct': round(100 * c['hours'] / (days * 24), 1)} for c in cards.values()),
+                  key=lambda r: -r['hours'])
+    if request.args.get('format') == 'csv':
+        from flask import Response
+        lines = ['card,loans,hours,use_pct,users,lent_now']
+        for r in rows:
+            lines.append(','.join([_csv(r['card']), str(r['loans']), str(r['hours']), str(r['use_pct']), _csv(' '.join(r['users'])), str(r['active'])]))
+        return Response('﻿' + '\n'.join(lines) + '\n', mimetype='text/csv; charset=utf-8',
+                        headers={'Content-Disposition': f'attachment; filename="card-usage-{days}d.csv"'})
+    return jsonify({'days': days, 'cards': rows, 'total_hours': round(sum(r['hours'] for r in rows), 1)})
+
+
+def _csv(v):
+    v = str(v)
+    return '"' + v.replace('"', '""') + '"' if any(ch in v for ch in ',"\n') else v

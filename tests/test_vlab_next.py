@@ -243,3 +243,239 @@ def test_license_server_ports_are_checked(env, monkeypatch):
     assert r['ok'] is False and [d['ok'] for d in r['server']['last_detail']] == [False, True]
     assert r['server']['vm_status'] == 'running'
     assert admin.get('/api/vlab/admin/license-servers').get_json()['servers'][0]['last_ok'] == 0
+
+
+# =========================================================================================
+# access and automation
+# =========================================================================================
+
+class _Resp:
+    def __init__(self, data, status=200):
+        self.status_code, self._data, self.text = status, data, ''
+
+    def json(self):
+        return {'data': self._data}
+
+
+def _granted_pool(admin, name, ptype, subjects):
+    pool = store.create_pool(name, ptype, CID)
+    r = admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': subjects})
+    assert r.status_code == 200, r.get_json()
+    return pool
+
+
+def test_pool_grants_reach_users_by_name_department_and_group(env, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, bob, _ = env
+    dep = admin.post('/api/vlab/admin/departments', json={'name': '공과대학'}).get_json()['department']
+    sub = admin.post('/api/vlab/admin/departments', json={'name': '전자공학과', 'parent_id': dep['id']}).get_json()['department']
+    admin.put('/api/vlab/admin/users/bob/department', json={'department_id': sub['id']})
+    assert admin.put('/api/vlab/admin/pools/nope/grants', json={'grants': []}).status_code == 404
+    pool = store.create_pool('연구원 전용', 'dedicated', CID)
+    assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': [{'subject_type': 'user', 'subject_id': 'ghost'}]}).status_code == 400
+    assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': [{'subject_type': 'team', 'subject_id': 'x'}]}).status_code == 400
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': [{'subject_type': 'department', 'subject_id': dep['id']}]})
+    assert [p['name'] for p in bob.get('/api/vlab/me/pools').get_json()['pools']] == ['연구원 전용']        # through the parent department
+    assert alice.get('/api/vlab/me/pools').get_json()['pools'] == []
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': [{'subject_type': 'department', 'subject_id': dep['id'], 'include_children': False}]})
+    assert bob.get('/api/vlab/me/pools').get_json()['pools'] == []
+    monkeypatch.setattr(nxt, '_user_groups', lambda u: {'cn=fpga,ou=groups'} if u == 'alice' else set())
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': [{'subject_type': 'group', 'subject_id': 'CN=FPGA,OU=Groups'}]})
+    assert [p['action'] for p in alice.get('/api/vlab/me/pools').get_json()['pools']] == ['claim']
+
+
+def test_claim_gives_a_free_desktop_once(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    _, _, admin, alice, bob, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    pool = _granted_pool(admin, '초기화 실습', 'reset', [{'subject_type': 'user', 'subject_id': 'alice'}, {'subject_type': 'user', 'subject_id': 'bob'}])
+    store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'lab-01')
+    r = alice.post(f"/api/vlab/me/pools/{pool['id']}/claim")
+    assert r.status_code == 200 and r.get_json()['new'] is True
+    assert alice.post(f"/api/vlab/me/pools/{pool['id']}/claim").get_json()['new'] is False
+    r = bob.post(f"/api/vlab/me/pools/{pool['id']}/claim")
+    assert r.status_code == 409 and r.get_json()['code'] == 'FULL'
+    shared = _granted_pool(admin, '공유', 'shared', [{'subject_type': 'user', 'subject_id': 'alice'}])
+    assert alice.post(f"/api/vlab/me/pools/{shared['id']}/claim").status_code == 409
+
+
+def test_shared_pool_routes_to_the_least_busy_desktop_and_connects(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    api, mgr, admin, alice, bob, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    pool = _granted_pool(admin, '빌드 서버', 'shared', [{'subject_type': 'user', 'subject_id': 'alice'}, {'subject_type': 'user', 'subject_id': 'bob'}])
+    p = store.get_pool(pool['id'])
+    d1 = store.add_desktop(p, 'pve1', 300, 'shared-01')
+    store.add_desktop(p, 'pve2', 301, 'shared-02')          # stopped: never picked
+    assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/grants", json={'grants': catalog.pool_grants(pool['id']), 'max_sessions': 1}).get_json()['max_sessions'] == 1
+    r = alice.post(f"/api/vlab/me/pools/{pool['id']}/route")
+    assert r.status_code == 200 and r.get_json()['desktop']['id'] == d1['id']
+    # a shared desktop is open to the pool's members in the core connect route
+    mgr.get_vnc_ticket.return_value = {'success': True, 'ticket': 't', 'port': '5900'}
+    import pegaprox.utils.rbac as rbac
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    r = alice.post(f"/api/vlab/desktops/{d1['id']}/connect", json={'protocol': 'vnc'})
+    assert r.status_code == 200, r.get_json()
+    r = bob.post(f"/api/vlab/me/pools/{pool['id']}/route")                # alice holds the only seat
+    assert r.status_code == 409 and r.get_json()['code'] == 'FULL'
+
+
+def _decrypt_guac(url, key_hex):
+    import base64, hashlib, hmac, json
+    from urllib.parse import unquote
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    key = bytes.fromhex(key_hex)
+    raw = base64.b64decode(unquote(url.split('?data=')[1]))
+    dec = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).decryptor()
+    unpad = padding.PKCS7(128).unpadder()
+    plain = unpad.update(dec.update(raw) + dec.finalize()) + unpad.finalize()
+    sig, payload = plain[:32], plain[32:]
+    assert hmac.compare_digest(sig, hmac.new(key, payload, hashlib.sha256).digest())
+    return json.loads(payload)
+
+
+def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    import pegaprox.utils.rbac as rbac
+    _, mgr, admin, alice, _, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    pool = store.create_pool('윈도우 실습', 'dedicated', CID)
+    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp', 'guac']})
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'win-01')
+    store.set_assignment(d['id'], 'alice')
+    mgr._fetch_qemu_ips.return_value = []
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'NO_IP'
+    mgr._fetch_qemu_ips.return_value = ['127.0.0.1', '10.0.0.9', 'fe80::1']
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert r.status_code == 200 and 'full address:s:10.0.0.9:3389' in r.get_json()['rdp']
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'NO_GATEWAY'
+    key = '00112233445566778899aabbccddeeff'
+    assert admin.post('/api/vlab/admin/gateways', json={'name': 'g', 'kind': 'rdpgw', 'address': 'x', 'secret_key': key}).status_code == 400
+    gw = admin.post('/api/vlab/admin/gateways', json={'name': '브라우저 RDP', 'kind': 'guacamole', 'address': 'guac.example.com',
+                                                       'secret_key': key}).get_json()['gateway']
+    assert gw['has_key'] is True and 'secret_key' not in gw
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    assert r.status_code == 200, r.get_json()
+    url = r.get_json()['url']
+    assert url.startswith('http://guac.example.com:8080/guacamole/?data=')
+    data = _decrypt_guac(url, key)
+    conn = data['connections']['win-01']
+    assert data['username'] == 'alice' and conn['protocol'] == 'rdp' and conn['parameters']['hostname'] == '10.0.0.9'
+
+    ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'alice'}).get_json()['desktop']
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/guac")
+    assert r.status_code == 200 and _decrypt_guac(r.get_json()['url'], key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
+
+
+def test_golden_rollout_moves_users_to_the_new_version(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    _, mgr, admin, _, _, _ = env
+    acl = []
+    monkeypatch.setattr(core, '_acl_set', lambda c, vmid, u, grant: acl.append((vmid, u, grant)) or True)
+    img = admin.post('/api/vlab/admin/golden-images', json={'cluster_id': CID, 'vmid': 500}).get_json()['image']
+    admin.put(f"/api/vlab/admin/golden-images/{img['id']}/current", json={'version': 'gold-20261001-090000'})
+    pool = admin.post('/api/vlab/admin/pools', json={'name': '실습 C', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    r = admin.post(f"/api/vlab/admin/golden-images/{img['id']}/deploy", json={'pool_id': pool['id'], 'count': 1, 'name_prefix': 'lab-c'})
+    assert r.status_code == 201, r.get_json()
+    made = r.get_json()['created']
+    old = made[0]
+    store.set_assignment(old['id'], 'alice')
+    listed = admin.get('/api/vlab/admin/golden-images').get_json()['images'][0]
+    assert listed['rollout'] and listed['rollout'][0]['outdated'] == 0, listed
+    v = admin.post(f"/api/vlab/admin/golden-images/{img['id']}/versions", json={}).get_json()['version']
+    assert admin.get('/api/vlab/admin/golden-images').get_json()['images'][0]['rollout'][0]['outdated'] == 1
+    mgr.get_next_vmid.return_value = {'success': True, 'vmid': 2000}
+    r = admin.post(f"/api/vlab/admin/golden-images/{img['id']}/rollout", json={'pool_id': pool['id']})
+    assert r.get_json()['skipped'] == ['lab-c-01'] and r.get_json()['replaced'] == []     # still being made
+    store.set_state(old['id'], 'ready')
+    r = admin.post(f"/api/vlab/admin/golden-images/{img['id']}/rollout", json={'pool_id': pool['id']})
+    assert r.status_code == 200, r.get_json()
+    rep = r.get_json()['replaced'][0]
+    assert rep['user'] == 'alice' and rep['old_vmid'] == old['vmid'] and rep['old_deleted'] is False
+    desks = store.list_desktops(pool['id'])
+    assert len(desks) == 1 and desks[0]['assigned_user'] == 'alice' and desks[0]['vmid'] == rep['new_vmid']
+    assert (rep['new_vmid'], 'alice', True) in acl and (old['vmid'], 'alice', False) in acl
+    assert mgr.clone_vm.call_args.kwargs['snapname'] == v
+    assert admin.post(f"/api/vlab/admin/golden-images/{img['id']}/rollout", json={'pool_id': pool['id']}).get_json()['replaced'] == []
+
+
+def test_board_loan_ends_on_time(env, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    from pegaprox.core import ha
+    _, mgr, admin, _, _, _ = env
+    pool = store.create_pool('보드 실습', 'dedicated', CID)
+    desk = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    b = admin.post('/api/vlab/admin/boards', json={'name': 'ZCU102 #1', 'cluster_id': CID, 'node': 'pve1', 'usb': '03fd:0008'}).get_json()['board']
+    assert admin.post(f"/api/vlab/admin/boards/{b['id']}/attach", json={'desktop_id': desk['id'], 'lease_until': '2020-01-01T00:00'}).status_code == 400
+    r = admin.post(f"/api/vlab/admin/boards/{b['id']}/attach", json={'desktop_id': desk['id'], 'lease_user': 'alice', 'lease_until': '2099-01-01T09:00'})
+    assert r.status_code == 200 and r.get_json()['board']['lease_until'] == '2099-01-01T09:00'
+    monkeypatch.setattr(ha, 'confirm_step', lambda *a, **k: True)
+    assert nxt.board_tick('2098-12-31T23:59:00') == (0, 0)
+    assert nxt.board_tick('2099-01-01T09:00:01') == (1, 0)
+    assert mgr.update_vm_config.call_args[0] == ('pve1', 300, 'qemu', {'delete': 'usb4'})
+    assert catalog.get_board(b['id'])['attached_desktop'] is None and catalog.get_board(b['id'])['lease_user'] == ''
+
+
+def test_license_watch_alerts_once_and_on_recovery(env, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, _, _, _ = env
+    s = admin.post('/api/vlab/admin/license-servers', json={'name': 'FlexLM', 'host': 'lic', 'ports': '27000'}).get_json()['server']
+    admin.post('/api/vlab/admin/license-servers', json={'name': '안 봄', 'host': 'lic2', 'ports': '2100', 'watch': False})
+    sent = []
+    monkeypatch.setattr(nxt, '_alert', lambda title, text, data: sent.append(data['kind']))
+    up = [False]
+    monkeypatch.setattr(nxt, '_tcp_probe', lambda h, p, timeout=2.0: (up[0], 1, '' if up[0] else 'refused'))
+    assert nxt.license_tick(force=True) == 1                 # the unwatched one is skipped
+    assert sent == ['license_down'] and catalog.get_license_server(s['id'])['alerted_at']
+    nxt.license_tick(force=True)
+    assert sent == ['license_down']                           # once, not every 5 minutes
+    up[0] = True
+    nxt.license_tick(force=True)
+    assert sent == ['license_down', 'license_up'] and catalog.get_license_server(s['id'])['alerted_at'] is None
+    assert nxt.license_tick() == 0                            # not before 5 minutes have passed
+
+
+def test_build_jobs_run_on_a_free_build_vm(env, monkeypatch):
+    _, mgr, admin, alice, bob, _ = env
+    farm = _granted_pool(admin, 'FPGA 빌드 팜', 'buildfarm', [{'subject_type': 'user', 'subject_id': 'alice'}])
+    store.add_desktop(store.get_pool(farm['id']), 'pve1', 300, 'build-01')
+    assert [p['name'] for p in alice.get('/api/vlab/me/build-jobs').get_json()['pools']] == ['FPGA 빌드 팜']
+    assert bob.post('/api/vlab/me/build-jobs', json={'pool_id': farm['id'], 'name': 'x', 'command': 'make'}).status_code == 404
+    assert alice.post('/api/vlab/me/build-jobs', json={'pool_id': farm['id'], 'name': 'x'}).status_code == 400
+    mgr._api_post.return_value = _Resp({'pid': 4242})
+    r = alice.post('/api/vlab/me/build-jobs', json={'pool_id': farm['id'], 'name': 'zcu102 비트스트림', 'command': 'make bit', 'workdir': '/proj/zcu102'})
+    assert r.status_code == 201, r.get_json()
+    job = r.get_json()['job']
+    assert job['status'] == 'running' and job['desktop'] == 'build-01' and job['pid'] == 4242
+    assert mgr._api_post.call_args.kwargs['data']['command'] == ['/bin/bash', '-lc', 'cd /proj/zcu102 && make bit']
+    second = alice.post('/api/vlab/me/build-jobs', json={'pool_id': farm['id'], 'name': '두 번째', 'command': 'make sim'}).get_json()['job']
+    assert second['status'] == 'queued'                       # the only build VM is busy
+    mgr._api_get.return_value = _Resp({'exited': 1, 'exitcode': 0, 'out-data': 'bitstream written'})
+    mgr._api_post.return_value = _Resp({'pid': 4243})
+    jobs = {j['id']: j for j in alice.get('/api/vlab/me/build-jobs').get_json()['jobs']}
+    assert jobs[job['id']]['status'] == 'done' and jobs[job['id']]['output'] == 'bitstream written'
+    assert jobs[second['id']]['status'] == 'running'          # the freed VM took the next one
+    mgr._api_get.return_value = _Resp({'exited': 0})           # the second build is still going
+    third = admin.post('/api/vlab/admin/build-jobs', json={'pool_id': farm['id'], 'name': '셋', 'command': 'make', 'username': 'alice'}).get_json()['job']
+    assert third['status'] == 'queued'
+    assert admin.post(f"/api/vlab/admin/build-jobs/{second['id']}/cancel").status_code == 409
+    assert alice.post(f"/api/vlab/me/build-jobs/{third['id']}/cancel").get_json()['job']['status'] == 'cancelled'
+    counts = admin.get('/api/vlab/admin/build-jobs').get_json()['counts']
+    assert counts['cancelled'] == 1 and counts['done'] == 1
+
+
+def test_card_usage_report(env):
+    _, _, admin, _, _, viewer = env
+    a = store.add_lease('card', 'alveo-u250', 'Alveo U250 #1', 'alice', CID, 300, '2099-01-01T00:00:00')
+    store.add_lease('card', 'alveo-u250', 'Alveo U250 #1', 'bob', CID, 301, '2099-01-01T00:00:00')
+    store.close_lease(a['id'])
+    assert viewer.get('/api/vlab/admin/reports/cards').status_code == 403
+    rep = admin.get('/api/vlab/admin/reports/cards?days=7').get_json()
+    row = rep['cards'][0]
+    assert rep['days'] == 7 and row['card'] == 'Alveo U250 #1' and row['loans'] == 2 and row['users'] == ['alice', 'bob'] and row['active'] == 1
+    csv = admin.get('/api/vlab/admin/reports/cards?days=7&format=csv')
+    assert csv.status_code == 200 and 'Alveo U250 #1' in csv.get_data(as_text=True)

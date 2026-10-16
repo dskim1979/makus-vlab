@@ -953,6 +953,8 @@ CONFIRM_SITES = [
     ('pegaprox/api/vlab.py', 'policy_tick', ['_after_session', 'vm_action']),
     # a LAB schedule's phases: desktops started before a session, reset or shut down after it
     ('pegaprox/api/vlab.py', '_lab_phase', ['vm_action', '_reset_one']),
+    # a board whose loan ended comes off its desktop
+    ('pegaprox/api/vlab_next.py', 'board_tick', ['_detach_board']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',

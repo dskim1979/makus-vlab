@@ -320,6 +320,7 @@ SYNC_TABLES = (
     'vlab_labs', 'vlab_terminals', 'vlab_lab_schedules',
     'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
     'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
+    'vlab_desktop_versions', 'vlab_build_jobs',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

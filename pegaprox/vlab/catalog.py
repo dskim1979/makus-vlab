@@ -104,6 +104,29 @@ _SCHEMA = (
         notes TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
     )''',
+    '''CREATE TABLE IF NOT EXISTS vlab_desktop_versions (
+        desktop_id TEXT PRIMARY KEY,
+        golden_id TEXT NOT NULL,
+        version TEXT NOT NULL,
+        at TEXT NOT NULL
+    )''',
+    '''CREATE TABLE IF NOT EXISTS vlab_build_jobs (
+        id TEXT PRIMARY KEY,
+        pool_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        name TEXT NOT NULL,
+        command TEXT NOT NULL,
+        workdir TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'queued',
+        desktop_id TEXT,
+        pid INTEGER,
+        exit_code INTEGER,
+        output TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    )''',
     '''CREATE TABLE IF NOT EXISTS vlab_license_servers (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -121,7 +144,17 @@ _SCHEMA = (
 )
 
 TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
-          'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers')
+          'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
+          'vlab_desktop_versions', 'vlab_build_jobs')
+
+# columns added after a table first shipped: (table, column, definition)
+_COLUMNS = (
+    ('vlab_gateways', 'secret_key', "TEXT NOT NULL DEFAULT ''"),          # Guacamole (guacamole-auth-json)
+    ('vlab_boards', 'lease_user', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'lease_until', 'TEXT'),
+    ('vlab_license_servers', 'watch', 'INTEGER NOT NULL DEFAULT 1'),
+    ('vlab_license_servers', 'alerted_at', 'TEXT'),
+)
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
 # (the vendor ids identify them); confirm the exact product ids on the real cables.
@@ -141,6 +174,10 @@ def db():
             if not getattr(d, '_vlab_catalog', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                for table, col, definition in _COLUMNS:
+                    have = {r['name'] for r in d.query(f'PRAGMA table_info({table})')}
+                    if col not in have:
+                        d.execute(f'ALTER TABLE {table} ADD COLUMN {col} {definition}')
                 d._vlab_catalog = True
     return d
 
@@ -315,15 +352,26 @@ def delete_usb_device(uid):
 GATEWAY_KINDS = {'guacamole': 8080, 'rdpgw': 443, 'msrdgw': 443}
 
 
-def list_gateways():
-    return _rows('SELECT * FROM vlab_gateways ORDER BY name')
+def _gateway_row(r, secret=False):
+    if not r:
+        return None
+    g = dict(r)
+    key = g.pop('secret_key', '')
+    g['has_key'] = bool(key)
+    if secret:
+        g['secret_key'] = key
+    return g
 
 
-def get_gateway(gid):
-    return _one('SELECT * FROM vlab_gateways WHERE id = ?', (gid,))
+def list_gateways(secret=False):
+    return [_gateway_row(r, secret) for r in db().query('SELECT * FROM vlab_gateways ORDER BY name')]
 
 
-def save_gateway(gid, name, kind, address, port, notes, enabled):
+def get_gateway(gid, secret=False):
+    return _gateway_row(db().query_one('SELECT * FROM vlab_gateways WHERE id = ?', (gid,)), secret)
+
+
+def save_gateway(gid, name, kind, address, port, notes, enabled, secret_key=None):
     if gid:
         db().execute('UPDATE vlab_gateways SET name = ?, kind = ?, address = ?, port = ?, notes = ?, enabled = ? WHERE id = ?',
                      (name, kind, address, port, notes, int(enabled), gid))
@@ -331,6 +379,8 @@ def save_gateway(gid, name, kind, address, port, notes, enabled):
         gid = new_id('gw')
         db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                      (gid, name, kind, address, port, notes, int(enabled), now()))
+    if secret_key is not None:
+        db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (secret_key, gid))
     return get_gateway(gid)
 
 
@@ -425,13 +475,18 @@ def save_board(bid, name, cluster_id, node, usb, kind, notes):
     return get_board(bid)
 
 
-def set_board_attachment(bid, desktop_id, vmid, by):
+def set_board_attachment(bid, desktop_id, vmid, by, lease_user='', lease_until=None):
     if desktop_id:
-        db().execute('UPDATE vlab_boards SET attached_desktop = ?, attached_vmid = ?, attached_by = ?, attached_at = ? WHERE id = ?',
-                     (desktop_id, int(vmid), by, now(), bid))
+        db().execute('UPDATE vlab_boards SET attached_desktop = ?, attached_vmid = ?, attached_by = ?, attached_at = ?, '
+                     'lease_user = ?, lease_until = ? WHERE id = ?', (desktop_id, int(vmid), by, now(), lease_user, lease_until, bid))
     else:
-        db().execute("UPDATE vlab_boards SET attached_desktop = NULL, attached_vmid = NULL, attached_by = '', attached_at = NULL WHERE id = ?", (bid,))
+        db().execute("UPDATE vlab_boards SET attached_desktop = NULL, attached_vmid = NULL, attached_by = '', attached_at = NULL, "
+                     "lease_user = '', lease_until = NULL WHERE id = ?", (bid,))
     return get_board(bid)
+
+
+def due_boards(at_iso):
+    return _rows('SELECT * FROM vlab_boards WHERE attached_desktop IS NOT NULL AND lease_until IS NOT NULL AND lease_until <= ?', (at_iso,))
 
 
 def delete_board(bid):
@@ -460,16 +515,20 @@ def get_license_server(lid):
     return _license_row(db().query_one('SELECT * FROM vlab_license_servers WHERE id = ?', (lid,)))
 
 
-def save_license_server(lid, name, host, ports, cluster_id, vmid, fixed_mac, notes):
-    args = (name, host, json.dumps(ports), cluster_id, vmid, fixed_mac, notes)
+def save_license_server(lid, name, host, ports, cluster_id, vmid, fixed_mac, notes, watch=True):
+    args = (name, host, json.dumps(ports), cluster_id, vmid, fixed_mac, notes, int(watch))
     if lid:
-        db().execute('UPDATE vlab_license_servers SET name = ?, host = ?, ports = ?, cluster_id = ?, vmid = ?, fixed_mac = ?, notes = ? WHERE id = ?',
-                     args + (lid,))
+        db().execute('UPDATE vlab_license_servers SET name = ?, host = ?, ports = ?, cluster_id = ?, vmid = ?, fixed_mac = ?, notes = ?, watch = ? '
+                     'WHERE id = ?', args + (lid,))
     else:
         lid = new_id('lic')
-        db().execute('INSERT INTO vlab_license_servers (id, name, host, ports, cluster_id, vmid, fixed_mac, notes, created_at) '
-                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (lid,) + args + (now(),))
+        db().execute('INSERT INTO vlab_license_servers (id, name, host, ports, cluster_id, vmid, fixed_mac, notes, watch, created_at) '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (lid,) + args + (now(),))
     return get_license_server(lid)
+
+
+def mark_license_alerted(lid, at):
+    db().execute('UPDATE vlab_license_servers SET alerted_at = ? WHERE id = ?', (at, lid))
 
 
 def mark_license_server(lid, ok, detail):
@@ -480,3 +539,84 @@ def mark_license_server(lid, ok, detail):
 
 def delete_license_server(lid):
     db().execute('DELETE FROM vlab_license_servers WHERE id = ?', (lid,))
+
+
+# --- pool grants (user / department / directory group): store.py's vlab_pool_grants -------
+
+GRANT_TYPES = ('user', 'department', 'group')
+
+
+def pool_grants(pool_id=None):
+    if pool_id:
+        return _rows('SELECT * FROM vlab_pool_grants WHERE pool_id = ? ORDER BY subject_type, subject_id', (pool_id,))
+    return _rows('SELECT * FROM vlab_pool_grants')
+
+
+def set_pool_grants(pool_id, grants):
+    db().execute('DELETE FROM vlab_pool_grants WHERE pool_id = ?', (pool_id,))
+    for g in grants:
+        db().execute('INSERT OR IGNORE INTO vlab_pool_grants (pool_id, subject_type, subject_id, include_children) '
+                     'VALUES (?, ?, ?, ?)', (pool_id, g['subject_type'], g['subject_id'], int(g.get('include_children', True))))
+    return pool_grants(pool_id)
+
+
+def delete_pool_grants(pool_id):
+    db().execute('DELETE FROM vlab_pool_grants WHERE pool_id = ?', (pool_id,))
+
+
+# --- which golden image version a desktop was made from ----------------------------------
+
+def set_desktop_version(desktop_id, golden_id, version):
+    db().execute('INSERT OR REPLACE INTO vlab_desktop_versions (desktop_id, golden_id, version, at) VALUES (?, ?, ?, ?)',
+                 (desktop_id, golden_id, version, now()))
+
+
+def desktop_versions(golden_id):
+    return {r['desktop_id']: r['version'] for r in _rows('SELECT * FROM vlab_desktop_versions WHERE golden_id = ?', (golden_id,))}
+
+
+def forget_desktop_version(desktop_id):
+    db().execute('DELETE FROM vlab_desktop_versions WHERE desktop_id = ?', (desktop_id,))
+
+
+# --- build jobs --------------------------------------------------------------------------
+
+JOB_STATES = ('queued', 'running', 'done', 'failed', 'cancelled')
+
+
+def add_build_job(pool_id, username, name, command, workdir):
+    jid = new_id('job')
+    db().execute('INSERT INTO vlab_build_jobs (id, pool_id, username, name, command, workdir, status, created_at) '
+                 "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)", (jid, pool_id, username, name, command, workdir, now()))
+    return get_build_job(jid)
+
+
+def get_build_job(jid):
+    return _one('SELECT * FROM vlab_build_jobs WHERE id = ?', (jid,))
+
+
+def list_build_jobs(username=None, pool_id=None, limit=200):
+    where, args = [], []
+    if username:
+        where.append('username = ?')
+        args.append(username)
+    if pool_id:
+        where.append('pool_id = ?')
+        args.append(pool_id)
+    sql = 'SELECT * FROM vlab_build_jobs' + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY created_at DESC LIMIT ?'
+    return _rows(sql, tuple(args) + (int(limit),))
+
+
+def jobs_in(status, pool_id=None):
+    if pool_id:
+        return _rows('SELECT * FROM vlab_build_jobs WHERE status = ? AND pool_id = ? ORDER BY created_at', (status, pool_id))
+    return _rows('SELECT * FROM vlab_build_jobs WHERE status = ? ORDER BY created_at', (status,))
+
+
+def update_build_job(jid, **fields):
+    keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at')]
+    if keys:
+        db().execute(f"UPDATE vlab_build_jobs SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
+                     tuple(fields[k] for k in keys) + (jid,))
+    return get_build_job(jid)
+
