@@ -1133,6 +1133,8 @@ def admin_approve(rid):
         return _bad('You cannot approve your own request', 403)
     ds_mod.approve(rid, _user(), hours, note.strip())
     log_audit(_user(), 'vlab.data.approve', f"request {rid} of {r['username']}: {r['path']} ({r['size']} bytes), link {hours} h", _ip())
+    from pegaprox.api.vlab_notices import export_answered
+    export_answered(r, True, note.strip(), hours)
     return jsonify({'request': _req_names([ds_mod.get_request(rid)])[0]})
 
 
@@ -1147,6 +1149,8 @@ def admin_reject(rid):
         return _bad('note: why (at most 500 characters)')
     ds_mod.reject(rid, _user(), note.strip())
     log_audit(_user(), 'vlab.data.reject', f"request {rid} of {r['username']}: {r['path']}: {note.strip()[:200]}", _ip())
+    from pegaprox.api.vlab_notices import export_answered
+    export_answered(r, False, note.strip())
     return jsonify({'request': _req_names([ds_mod.get_request(rid)])[0]})
 
 

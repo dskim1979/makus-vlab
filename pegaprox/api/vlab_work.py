@@ -67,14 +67,12 @@ def settings():
 # --- notices -----------------------------------------------------------------------------
 
 def _mail(username, title, text):
+    """To the user's own address, unless they turned work notices off (내 계정 > 알림)."""
     if not username:
         return
     try:
-        from pegaprox.utils.auth import load_users
-        from pegaprox.utils.email import send_email
-        email = ((load_users() or {}).get(username) or {}).get('email')
-        if email:
-            send_email([email], f'[MOAVI Desk] {title}', text, None)
+        from pegaprox.vlab import notices
+        notices.mail(username, 'work', title, text)
     except Exception as e:
         logging.warning(f'[VLAB] work notice mail: {e}')
 

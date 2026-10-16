@@ -1858,6 +1858,8 @@ def create_lease():
     except Exception as e:      # advice only: a loan never fails on it
         logging.debug(f'[VLAB] accel checks of qemu/{desk["vmid"]}: {e}')
         warnings = []
+    from pegaprox.api.vlab_notices import loan_granted
+    loan_granted(lease, needs_restart=vm.get('status') == 'running')
     return jsonify({'lease': lease, 'needs_restart': vm.get('status') == 'running', 'warnings': warnings}), 201
 
 
@@ -1879,6 +1881,8 @@ def return_lease_now(lease_id):
     e = return_lease(l, by=_user())
     if e:
         return _bad(e, 502)
+    from pegaprox.api.vlab_notices import loan_returned
+    loan_returned(l, by=_user())
     return jsonify({'success': True})
 
 
@@ -1893,6 +1897,8 @@ def extend_lease(lease_id):
         return _bad('ends_at: a later ISO date and time')
     store.extend_lease(l['id'], ends)
     log_audit(_user(), 'vlab.lease.extend', f"{l['resource_name']} on qemu/{l['vmid']} until {ends}", get_client_ip())
+    from pegaprox.api.vlab_notices import loan_extended
+    loan_extended(l, ends)
     return jsonify({'lease': store.get_lease(l['id'])})
 
 
@@ -2468,6 +2474,8 @@ def assign_desktop(desktop_id):
     store.set_assignment(desktop_id, username)
     log_audit(_user(), 'vlab.desktop.assign',
               f"{desk['vm_type']}/{desk['vmid']}: {previous or '-'} -> {username or '-'}", get_client_ip())
+    from pegaprox.api.vlab_notices import desktop_assigned
+    desktop_assigned(desk, previous, username)
     return jsonify({'desktop': store.get_desktop(desktop_id)})
 
 
@@ -2540,6 +2548,8 @@ def reset_desktop(desktop_id):
     if e:
         return _bad(e, 502)
     log_audit(_user(), 'vlab.desktop.reset', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}'", get_client_ip())
+    from pegaprox.api.vlab_notices import desktop_reset
+    desktop_reset(desk, _user())
     return jsonify({'success': True})
 
 
@@ -2565,6 +2575,8 @@ def reset_pool(pool_id):
                 failed.append({'id': d['id'], 'name': d['name'], 'error': e})
             else:
                 done.append({'id': d['id'], 'name': d['name']})
+                from pegaprox.api.vlab_notices import desktop_reset
+                desktop_reset(d, _user())
     log_audit(_user(), 'vlab.pool.reset',
               f"pool '{pool['name']}': {len(done)} reset, {len(skipped)} skipped, {len(failed)} failed", get_client_ip())
     return jsonify({'reset': done, 'skipped': skipped, 'failed': failed})

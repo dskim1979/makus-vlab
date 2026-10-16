@@ -19,9 +19,10 @@ INTERVAL = 60
 
 def return_due():
     """Return every loan that is due. Returns (returned, failed) counts."""
+    from pegaprox.api import vlab_notices
     from pegaprox.api.vlab import return_lease
     from pegaprox.core import ha
-    from pegaprox.vlab import store
+    from pegaprox.vlab import notices, store
     done = failed = 0
     for lease in store.due_leases(store.now()):
         # each return changes a VM: a leader that lost its lease starts no new one (HA 5.2)
@@ -34,8 +35,12 @@ def return_due():
         if err:
             failed += 1
             logging.warning(f"[VLAB] loan {lease['id']} ({lease['resource_id']} on qemu/{lease['vmid']}) not returned: {err}")
+            # tried again every minute: the administrators hear of it once
+            if notices.once(f"loan_fail:{lease['id']}:{lease['ends_at']}"):
+                vlab_notices.loan_return_failed(lease, err)
         else:
             done += 1
+            vlab_notices.loan_returned(lease)
     return done, failed
 
 
@@ -69,6 +74,10 @@ def _loop():
                 from pegaprox.api.vlab_research import gpu_tick
                 if features.enabled('gpuai'):
                     gpu_tick()
+                # per-user notices: loan reminders, GPU quota steps, idle IDEs, a GPU queue stuck
+                from pegaprox.api.vlab_notices import notice_tick
+                if features.enabled('gpuai') or features.enabled('fpga'):
+                    notice_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         try:

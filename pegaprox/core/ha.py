@@ -340,6 +340,8 @@ SYNC_TABLES = (
     'vlab_work_holds', 'vlab_deferrals', 'vlab_card_reclaims',
     # AI · GPU research: GPU quotas, the queue's settings and the web IDE sessions (pegaprox/vlab/research.py)
     'vlab_gpu_quotas', 'vlab_research_settings', 'vlab_ide_sessions',
+    # per-user notices: who takes which mail, and the ones sent once (pegaprox/vlab/notices.py)
+    'vlab_notice_prefs', 'vlab_notice_sent',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

@@ -14,8 +14,9 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   PUT    /api/vlab/admin/gpu-quotas                {subject_type: user|department|default, subject_id, max_gpus,
                                                     monthly_gpu_hours, hard?, note?}            vlab.pool.manage
   DELETE /api/vlab/admin/gpu-quotas                ?subject_type=&subject_id=                       vlab.pool.manage
-  GET/PUT /api/vlab/admin/gpu-settings             {mail, channels, starve_minutes, default_max_minutes, max_queued_per_user}
-                                                                                                    vlab.pool.view / manage
+  GET/PUT /api/vlab/admin/gpu-settings             {mail, channels, starve_minutes, default_max_minutes, max_queued_per_user,
+                                                    quota_notice, quota_warn_pct, loan_remind_hours, loan_notice,
+                                                    ide_notice, notice_webhook, queue_alert_hours}   vlab.pool.view / manage
   GET/PUT /api/vlab/admin/pools/<id>/gpu-jobs      {gpus_per_vm, kind, max_minutes, runtime}        vlab.pool.view / manage
   GET    /api/vlab/admin/reports/gpu-usage         ?days=|month=YYYY-MM &group=user|department &rollup=1 &format=csv
                                                    GPU-hours of jobs and card loans (GPU, NPU)       vlab.report.view
@@ -261,14 +262,9 @@ def notify_ended(job_ids):
             except Exception as e:
                 logging.warning(f'[VLAB] GPU job webhook: {e}')
         if want.get('mail') and g['mail']:
-            try:
-                from pegaprox.utils.auth import load_users
-                from pegaprox.utils.email import send_email
-                email = ((load_users() or {}).get(job['username']) or {}).get('email')
-                if email:
-                    send_email([email], title, text, None)
-            except Exception as e:
-                logging.warning(f'[VLAB] GPU job mail: {e}')
+            # the owner may have turned GPU job mails off in 내 계정 > 알림
+            from pegaprox.vlab import notices
+            notices.mail(job['username'], 'gpu_job', title, text)
 
 
 # --- my GPU view, stopping a job -------------------------------------------------------------
@@ -596,8 +592,13 @@ def _ide_refresh(row):
         code = st.get('exitcode')
         said = research.ide_error(code)
         if code in (0, None) or code < 0:
-            return research.update_ide(row['id'], state='stopped', stopped_at=store.now(),
-                                       error='' if code in (0, None) else 'ended')
+            idle = code in (0, None) and _ended_idle(row, desk)
+            out = research.update_ide(row['id'], state='stopped', stopped_at=store.now(),
+                                      error=idle or ('' if code in (0, None) else 'ended'))
+            if idle:
+                from pegaprox.api.vlab_notices import ide_closed
+                ide_closed(out, 'idle')
+            return out
         return research.update_ide(row['id'], state='failed', stopped_at=store.now(),
                                    error=(said[1] if said else f'the IDE ended with code {code}') + (f": {st.get('err-data', '')[-300:]}" if st.get('err-data') else ''))
     ok, _, _ = nxt._tcp_probe(row['host'], row['port'], timeout=1.5)
@@ -606,6 +607,17 @@ def _ide_refresh(row):
     if not ok and row['state'] == 'running' and not known:
         return research.update_ide(row['id'], state='stopped', stopped_at=store.now(), error='the desktop restarted')
     return row
+
+
+def _ended_idle(row, desk):
+    """An IDE that ended by itself (exit 0) after no use for its pool's idle minutes: the text
+    kept as its error ('' when it was closed from inside, before that)."""
+    pool = store.get_pool(desk['pool_id']) if desk else None
+    idle_min = pool_policy.effective((pool or {}).get('settings'))['web_ide_idle_min']
+    seen = research.parse(row.get('last_seen') or row.get('started_at') or row.get('created_at'))
+    if not idle_min or not seen or (research.utcnow() - seen).total_seconds() < (idle_min - 2) * 60:
+        return ''
+    return f'closed after {idle_min} idle minutes'
 
 
 def _my_ide(sid):
@@ -754,8 +766,12 @@ def _ide_stop(row, by):
         except Exception as e:
             logging.warning(f"[VLAB] IDE {row['id']} stop: {e}")
     research.forget_cookies(row['id'])
+    live = row['state'] in ('starting', 'running')
     row = research.update_ide(row['id'], state='stopped', stopped_at=store.now(), error=f'stopped by {by}' if by != row['username'] else '')
     log_audit(by, 'vlab.ide.stop', f"{row['kind']} of {row['username']} on {desk['name'] if desk else row['desktop_id']}", get_client_ip())
+    if live and by != row['username']:
+        from pegaprox.api.vlab_notices import ide_closed
+        ide_closed(row, 'admin', by)
     return row
 
 

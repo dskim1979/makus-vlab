@@ -207,17 +207,23 @@ def _department_body(dep_id=None):
             raise ValueError('parent_id: no such department')
         if dep_id and parent in catalog.descendants(dep_id):
             raise ValueError('A department cannot move under itself')
-    return name, parent, _int(data, 'sort', 0, 10000, 0)
+    manager = None
+    if 'manager' in data:
+        from pegaprox.utils.auth import load_users
+        manager = str(data.get('manager') or '').strip().lower()
+        if manager and manager not in (load_users() or {}):
+            raise ValueError('manager: no such user')
+    return name, parent, _int(data, 'sort', 0, 10000, 0), manager
 
 
 @bp.route('/api/vlab/admin/departments', methods=['POST'])
 @require_auth(perms=['admin.users'])
 def create_department():
     try:
-        name, parent, sort = _department_body()
+        name, parent, sort, manager = _department_body()
     except ValueError as e:
         return _bad(str(e))
-    dep = catalog.save_department(None, name, parent, sort)
+    dep = catalog.save_department(None, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.create', f"department '{name}'", get_client_ip())
     return jsonify({'department': dep}), 201
 
@@ -228,10 +234,10 @@ def update_department(dep_id):
     if not catalog.get_department(dep_id):
         return _bad('Department not found', 404)
     try:
-        name, parent, sort = _department_body(dep_id)
+        name, parent, sort, manager = _department_body(dep_id)
     except ValueError as e:
         return _bad(str(e))
-    dep = catalog.save_department(dep_id, name, parent, sort)
+    dep = catalog.save_department(dep_id, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.update', f"department '{name}'", get_client_ip())
     return jsonify({'department': dep})
 
@@ -378,9 +384,14 @@ def update_account(username):
         if data['expires_at'] and role == 'admin':
             return _bad('expires_at: an administrator account does not expire')
     if any(k in data for k in _USER_UPDATE_KEYS if k not in _OURS):
+        from pegaprox.utils.auth import load_users
+        was = ((load_users() or {}).get(username) or {}).get('enabled', True) is not False
         resp = core_users.update_user(username)
         if not _core_ok(resp)[0]:
             return resp
+        if isinstance(data.get('enabled'), bool) and data['enabled'] != was:
+            from pegaprox.api.vlab_notices import account_security
+            account_security(username, 'enabled' if data['enabled'] else 'disabled', _user())
     if 'department_id' in data:
         catalog.set_department(username, data['department_id'] or None)
         log_audit(_user(), 'vlab.department.member', f"{username} -> {data['department_id'] or '(none)'}", get_client_ip())
@@ -402,6 +413,8 @@ def delete_account(username):
         from pegaprox.vlab import accounts
         catalog.set_department(username, None)
         accounts.forget(username)
+        from pegaprox.vlab import notices
+        notices.forget_user(username)
     return resp
 
 
@@ -419,6 +432,9 @@ def reset_account_password(username):
     resp = core_users.admin_change_password(username)
     if _core_ok(resp)[0]:
         _force_password_change(username, bool(data.get('must_change_password')))
+        if username != _user():
+            from pegaprox.api.vlab_notices import account_security
+            account_security(username, 'password', _user())
     return resp
 
 
@@ -426,7 +442,11 @@ def reset_account_password(username):
 @require_auth(perms=['admin.users'])
 def reset_account_2fa(username):
     from pegaprox.api import users as core_users
-    return core_users.admin_disable_2fa(username)
+    resp = core_users.admin_disable_2fa(username)
+    if _core_ok(resp)[0] and username.lower() != _user():
+        from pegaprox.api.vlab_notices import account_security
+        account_security(username.lower(), '2fa', _user())
+    return resp
 
 
 @bp.route('/api/vlab/admin/locked-users', methods=['GET'])
@@ -589,6 +609,10 @@ def signup():
     if terms['enabled']:
         accounts.add_consent(username, terms['version'], 'signup', ip)
     verify = acct.after_signup(req)
+    if verify != 'sent':
+        # with a mail code to enter first, the administrators hear of it once it is checked
+        from pegaprox.api.vlab_notices import signup_waiting
+        signup_waiting(req)
     return jsonify({'request': {'id': req['id'], 'status': req['status'], 'verify': verify,
                                 'auto': verify != 'none' and accounts.domain_matches(email, settings['auto_domains'])}}), 201
 
@@ -624,6 +648,8 @@ def approve_signup(sid):
     log_audit(_user(), 'user.created', f"Approved sign-up of {req['username']} (role: user, portal only)"
               + (f', until {day.isoformat()}' if day else '') + ('' if out['email_verified'] else ', mail not verified'),
               get_client_ip())
+    from pegaprox.api.vlab_notices import signup_answered
+    signup_answered(req, True)
     return jsonify({'signup': out})
 
 
@@ -641,6 +667,8 @@ def reject_signup(sid):
         return _bad(str(e))
     out = catalog.review_signup(sid, 'rejected', _user(), reason)
     log_audit(_user(), 'vlab.signup.reject', f"sign-up of {req['username']} rejected" + (f': {reason}' if reason else ''), get_client_ip())
+    from pegaprox.api.vlab_notices import signup_answered
+    signup_answered(req, False, reason)
     return jsonify({'signup': out})
 
 
@@ -1229,6 +1257,8 @@ def attach_board(bid):
     b = catalog.set_board_attachment(bid, desk['id'], desk['vmid'], _user(), lease_user, lease_until)
     log_audit(_user(), 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
               + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), get_client_ip())
+    from pegaprox.api.vlab_notices import board_lent
+    board_lent(b, desk['name'], lease_user, lease_until)
     return jsonify({'board': b})
 
 
@@ -1249,8 +1279,12 @@ def detach_board(bid):
         r = mgr.update_vm_config(live.get('node') or desk['node'], int(desk['vmid']), 'qemu', {'delete': BOARD_SLOT})
         if not isinstance(r, dict) or not r.get('success'):
             return _bad(f"Could not detach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    lent_to = b.get('lease_user') or ''
     b = catalog.set_board_attachment(bid, None, None, '')
     log_audit(_user(), 'vlab.board.detach', f"board '{b['name']}' from {desk['name'] if desk else 'a removed desktop'}", get_client_ip())
+    if lent_to and lent_to != _user():
+        from pegaprox.api.vlab_notices import board_returned
+        board_returned(b, lent_to, by=_user())
     return jsonify({'board': b})
 
 
@@ -1802,12 +1836,17 @@ def board_tick(now_iso=None):
         if not ha.confirm_step(f"vLAB board loan end {b['id']}"):
             break
         err = _detach_board(b)
+        from pegaprox.api import vlab_notices
+        from pegaprox.vlab import notices
         if err:
             failed += 1
             logging.warning(f"[VLAB] board {b['name']} not detached at loan end: {err}")
+            if notices.once(f"board_fail:{b['id']}:{b['lease_until']}"):
+                vlab_notices.board_return_failed(b, err)
         else:
             done += 1
             log_audit('system', 'vlab.board.return', f"board '{b['name']}': loan to {b['lease_user'] or '-'} ended", '')
+            vlab_notices.board_returned(b, b['lease_user'])
     return done, failed
 
 
@@ -1988,6 +2027,21 @@ def _run_queue():
     queued = catalog.jobs_in('queued')
     if not queued:
         return
+    failed = []
+    try:
+        _place_jobs(queued, failed)
+    finally:
+        if failed and ha.is_active():
+            # a job that could not start is told like one that ended (notify_ended)
+            rsch.notify_ended(failed)
+
+
+def _place_jobs(queued, failed):
+    """_run_queue's work: plan, then start each placed job (each start confirms the lease)."""
+    from pegaprox.core import ha
+    from pegaprox.vlab import research
+    from pegaprox.api import vlab_research as rsch
+    from pegaprox.api import vlab_notices
     ctx = rsch.queue_context(queued)
     placed, why, _ = research.plan(ctx['jobs'], ctx['vms'], ctx['usage'], ctx['quotas_of'],
                                    ctx['settings']['starve_minutes'])
@@ -2015,6 +2069,7 @@ def _run_queue():
             # the job would start in a folder that is not there; say why instead
             catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], pool_id=pool['id'], finished_at=store.now(),
                                      error=f"shared storage not ready on {d['name']}: {st['code']} {st['detail']}"[:300])
+            failed.append(job['id'])
             continue
         mine = bool(on_nas and scratch and workdir.startswith(scratch + '/'))
         as_user = nas.guest_name(job['username']) if mine else None
@@ -2026,12 +2081,15 @@ def _run_queue():
         if err:
             catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], pool_id=pool['id'], error=err,
                                      finished_at=store.now())
+            failed.append(job['id'])
         else:
             catalog.update_build_job(job['id'], status='running', desktop_id=d['id'], pool_id=pool['id'], pid=pid,
                                      started_at=store.now(), workdir=workdir, gpu_index=','.join(str(i) for i in idx),
                                      wait_reason='')
             gpus = f" GPU {','.join(str(i) for i in idx)}" if idx else ''
             log_audit(job['username'], 'vlab.build.start', f"build '{job['name']}' on {d['name']} (qemu/{d['vmid']}){gpus}", '')
+            if ha.is_active():
+                vlab_notices.job_started(dict(job, workdir=workdir), d['name'], idx)
 
 
 def _job_view(j):

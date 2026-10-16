@@ -421,6 +421,9 @@ def signup_verify():
     approved = _auto_approve(req) if out == 'ok' else catalog.get_signup(sid)['status'] == 'approved'
     if out == 'ok':
         log_audit(req['username'], 'vlab.signup.verified', f"mail {req['email']} verified", ip)
+        if not approved:
+            from pegaprox.api.vlab_notices import signup_waiting
+            signup_waiting(req)
     return jsonify({'verified': True, 'approved': bool(approved)})
 
 
@@ -712,6 +715,8 @@ def _expire(username, u, settings):
     revoke_user_api_tokens(username)
     accounts.mark_expiry(username, expired_at=store.now())
     log_audit('system', 'vlab.account.expired', f"{username}: past its last day - signed out and disabled", '')
+    from pegaprox.api.vlab_notices import account_security
+    account_security(username, 'expired', 'system')
     if settings['reclaim']:
         return _reclaim(username)
     return True
@@ -726,6 +731,8 @@ def _delete(username):
     invalidate_all_user_sessions(username)
     catalog.set_department(username, None)
     accounts.forget(username)
+    from pegaprox.vlab import notices
+    notices.forget_user(username)
     log_audit('system', 'user.deleted', f"Deleted user: {username} (expired account, kept the set days)", '')
 
 

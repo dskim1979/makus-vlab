@@ -63773,6 +63773,82 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/vlab/me/notices": {
+      "get": {
+        "operationId": "vlab_notices.my_notices_get",
+        "tags": [
+          "vlab_notices"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_notices.put_my_notices_put",
+        "tags": [
+          "vlab_notices"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
     "/api/vlab/features": {
       "get": {
         "operationId": "vlab_features.get_features_get",

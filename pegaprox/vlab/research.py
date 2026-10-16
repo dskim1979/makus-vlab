@@ -9,7 +9,8 @@ Tables (core DB, made on first use like store.py's; all HA-synced):
   vlab_gpu_quotas        per user, per department, and the default for everyone else:
                          GPUs at once, GPU-hours a month, whether the month is a hard stop
   vlab_research_settings '_global': who hears of a finished job, the wait after which the
-                         oldest job holds its GPUs, the default time limit
+                         oldest job holds its GPUs, the default time limit, and the per-user
+                         notices (quota steps, loan reminders, IDE ends - pegaprox/api/vlab_notices.py)
   vlab_ide_sessions      one JupyterLab / VS Code server per user, desktop and kind: where it
                          listens, its token (sealed), the one-time link and the browser cookies
 
@@ -38,8 +39,18 @@ GLOBAL_DEFAULTS = {
     'starve_minutes': 60,         # a GPU job waiting this long keeps the GPUs it needs free
     'default_max_minutes': 1440,  # a GPU job's time limit when it names none (0 = none)
     'max_queued_per_user': 50,
+    # per-user notices (pegaprox/api/vlab_notices.py); each user turns kinds off in 내 계정 > 알림
+    'quota_notice': True,         # mail at quota_warn_pct and 100% of a monthly GPU-hours quota
+    'quota_warn_pct': 80,         # 0 = only at 100%
+    'loan_remind_hours': 24,      # a card / board loan's reminder this long before its end (0 = none)
+    'loan_notice': True,          # a mail when a loan ended and the card / board went back by itself
+    'ide_notice': True,           # a mail when a web IDE closed for being idle or by an administrator
+    'notice_webhook': False,      # the notices above as webhook events on `channels` too
+    'queue_alert_hours': 6,       # the administrators hear of a GPU job waiting this long (0 = never)
 }
-_GLOBAL_LIMITS = {'starve_minutes': (0, 10080), 'default_max_minutes': (0, 43200), 'max_queued_per_user': (1, 500)}
+_GLOBAL_LIMITS = {'starve_minutes': (0, 10080), 'default_max_minutes': (0, 43200), 'max_queued_per_user': (1, 500),
+                  'quota_warn_pct': (0, 99), 'loan_remind_hours': (0, 168), 'queue_alert_hours': (0, 168)}
+_GLOBAL_BOOLS = ('mail', 'quota_notice', 'loan_notice', 'ide_notice', 'notice_webhook')
 
 ENV_KINDS = ('conda', 'container')
 RUNTIMES = ('docker', 'podman', 'apptainer')
@@ -188,9 +199,9 @@ def validate_settings(data):
         raise ValueError(f"unknown fields: {', '.join(unknown)}")
     out = get_settings()
     for k, v in data.items():
-        if k == 'mail':
+        if k in _GLOBAL_BOOLS:
             if not isinstance(v, bool):
-                raise ValueError('mail must be true or false')
+                raise ValueError(f'{k} must be true or false')
             out[k] = v
         elif k == 'channels':
             if not isinstance(v, list) or len(v) > 20 or any(not isinstance(c, str) or not 0 < len(c) <= 80 for c in v):
@@ -281,6 +292,7 @@ def quotas_for(username, dep_chain, quotas=None):
 
 def job_extra(data, pool_cap=0, default_minutes=0):
     """The GPU job fields of a submit body: {gpus, gpu_kind, memory_gb, max_minutes, env, notify}.
+    notify: {mail, webhook} - how the owner hears of the end, and of the start too with start.
     A job with no GPUs and none of these is a plain build job ({} back)."""
     keys = ('gpus', 'gpu_kind', 'memory_gb', 'max_minutes', 'env', 'notify')
     if not any(k in data for k in keys):
@@ -309,8 +321,8 @@ def job_extra(data, pool_cap=0, default_minutes=0):
                 raise ValueError('env.image: a container image such as nvcr.io/nvidia/pytorch:24.08-py3')
             env = {'kind': 'container', 'image': image}
     notify = data.get('notify') or {}
-    if not isinstance(notify, dict) or set(notify) - {'mail', 'webhook'} or any(not isinstance(v, bool) for v in notify.values()):
-        raise ValueError('notify: {mail: true|false, webhook: true|false}')
+    if not isinstance(notify, dict) or set(notify) - {'mail', 'webhook', 'start'} or any(not isinstance(v, bool) for v in notify.values()):
+        raise ValueError('notify: {mail: true|false, webhook: true|false, start: true|false}')
     return {'gpus': gpus, 'gpu_kind': kind.strip(), 'memory_gb': mem, 'max_minutes': minutes,
             'env': json.dumps(env) if env else '', 'notify': json.dumps({k: v for k, v in notify.items() if v}) if notify else ''}
 

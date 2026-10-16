@@ -152,6 +152,8 @@ TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb
 _COLUMNS = (
     ('vlab_gateways', 'secret_key', "TEXT NOT NULL DEFAULT ''"),          # Guacamole (guacamole-auth-json)
     ('vlab_boards', 'lease_user', "TEXT NOT NULL DEFAULT ''"),
+    # who hears of the department's GPU quota steps (pegaprox/api/vlab_notices.py)
+    ('vlab_departments', 'manager', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_boards', 'lease_until', 'TEXT'),
     ('vlab_license_servers', 'watch', 'INTEGER NOT NULL DEFAULT 1'),
     ('vlab_license_servers', 'alerted_at', 'TEXT'),
@@ -231,13 +233,16 @@ def get_department(dep_id):
     return _one('SELECT * FROM vlab_departments WHERE id = ?', (dep_id,))
 
 
-def save_department(dep_id, name, parent_id=None, sort=0):
+def save_department(dep_id, name, parent_id=None, sort=0, manager=None):
+    """manager: the user who hears of the department's GPU quota (None keeps it, '' clears it)."""
     if dep_id:
         db().execute('UPDATE vlab_departments SET name = ?, parent_id = ?, sort = ? WHERE id = ?', (name, parent_id, sort, dep_id))
     else:
         dep_id = new_id('dep')
         db().execute('INSERT INTO vlab_departments (id, name, parent_id, sort, created_at) VALUES (?, ?, ?, ?, ?)',
                      (dep_id, name, parent_id, sort, now()))
+    if manager is not None:
+        db().execute('UPDATE vlab_departments SET manager = ? WHERE id = ?', (manager, dep_id))
     return get_department(dep_id)
 
 
