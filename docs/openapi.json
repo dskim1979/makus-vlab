@@ -58544,6 +58544,280 @@
         ]
       }
     },
+    "/api/vlab/terminals/enroll": {
+      "post": {
+        "operationId": "vlab_enroll.enroll_terminal_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "A MOAVI Desk Client's first start with the code its installer was given: {mac, name?, code}. A new PC becomes a terminal (pending, or approved in the code's LAB when the code says so); a known one waits for an admin again if it held a key, unless the code approves at once. Answers {token, state, lab, poll_seconds}; the token is for /enroll/status only.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/terminals/enroll/status": {
+      "post": {
+        "operationId": "vlab_enroll.enroll_status_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The enrolled PC asks again: {token}. While it waits -> {state: pending}. Once approved -> {state: approved, key}: the key is made now and handed out this once; the token stops.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/admin/enroll-codes": {
+      "get": {
+        "operationId": "vlab_enroll.list_enroll_codes_get",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      },
+      "post": {
+        "operationId": "vlab_enroll.create_enroll_code_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A new code. max_uses 0 = any number of PCs, days 0 = no end. The code is in the answer this once; afterwards only its last four characters are shown.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/enroll-codes/{code_id}": {
+      "put": {
+        "operationId": "vlab_enroll.update_enroll_code_put",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "code_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      },
+      "delete": {
+        "operationId": "vlab_enroll.delete_enroll_code_delete",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "code_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/terminals/approve": {
+      "post": {
+        "operationId": "vlab_enroll.approve_terminals_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{ids: [...], lab_id?}: approve these terminals (and put them in the LAB, when one is given). An enrolled client picks its key up on its next poll.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/shellws": {
       "get": {
         "operationId": "__flask_sock.node_shell_websocket_proxy_get",

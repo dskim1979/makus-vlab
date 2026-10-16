@@ -49,6 +49,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   PUT    /api/vlab/admin/terminals/<terminal_id>      {name?, lab_id?, state?}                  vlab.pool.manage
   DELETE /api/vlab/admin/terminals/<terminal_id>      remove it                                 vlab.pool.manage
   POST   /api/vlab/terminals/register                 a client asks to be known {mac, name?} (waits for approval)  signed in
+           (enrolment codes, a PC's first start without signing in, approving many: api/vlab_enroll.py)
   GET    /api/vlab/client/config                      what the Windows client should do (update, protocol)  signed in
   GET    /api/vlab/admin/client                       the client settings                       admin.settings
   PUT    /api/vlab/admin/client                       {latest_version?, min_version?, download_url?, protocol?}  admin.settings
@@ -2604,6 +2605,8 @@ def delete_lab(lab_id):
     if not lab:
         return _bad('LAB not found', 404)
     store.delete_lab(lab_id)
+    from pegaprox.vlab import enroll
+    enroll.forget_lab(lab_id)
     log_audit(_user(), 'vlab.lab.delete', f"LAB '{lab['name']}' (its schedules too; terminals kept unassigned)", get_client_ip())
     return jsonify({'success': True})
 
@@ -2611,7 +2614,8 @@ def delete_lab(lab_id):
 @bp.route('/api/vlab/admin/terminals', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
 def list_terminals():
-    return jsonify({'terminals': store.list_terminals(request.args.get('lab_id') or None)})
+    from pegaprox.vlab import enroll
+    return jsonify({'terminals': enroll.annotate(store.list_terminals(request.args.get('lab_id') or None))})
 
 
 @bp.route('/api/vlab/admin/terminals', methods=['POST'])
@@ -2660,6 +2664,8 @@ def delete_terminal(terminal_id):
     if not t:
         return _bad('Terminal not found', 404)
     store.delete_terminal(terminal_id)
+    from pegaprox.vlab import enroll
+    enroll.forget(terminal_id)
     log_audit(_user(), 'vlab.terminal.delete', f"terminal {t['mac']} '{t['name']}'", get_client_ip())
     return jsonify({'success': True})
 
@@ -2861,6 +2867,8 @@ def make_terminal_key(terminal_id):
         return _bad('Terminal not found', 404)
     key = 'mdt_' + secrets.token_urlsafe(24)
     store.set_terminal_key(terminal_id, _key_hash(key))
+    from pegaprox.vlab import enroll
+    enroll.close(terminal_id, 'manual')   # typed in by hand: an enrolled client stops waiting for one
     log_audit(_user(), 'vlab.terminal.key', f"terminal {t['mac']} '{t['name']}': new kiosk key", get_client_ip())
     return jsonify({'key': key, 'terminal': store.get_terminal(terminal_id)})
 

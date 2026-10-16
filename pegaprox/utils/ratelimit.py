@@ -74,6 +74,13 @@ class SlidingWindow:
                 self._sweep(now)
             return True
 
+    def full(self, key):
+        """True when `key` has used its budget, without counting this as an event.
+        For limits that count failures only: ask first, count the failure after."""
+        cutoff = time.time() - self.window
+        with self._lock:
+            return sum(1 for t in self._hits.get(key, ()) if t > cutoff) >= self.limit
+
     def reset(self, key=None):
         """Forget one key, or all of them. Used by the unlock endpoints and by tests."""
         with self._lock:

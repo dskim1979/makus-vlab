@@ -58,6 +58,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab import bp as vlab_bp  # MOAVI Desk: 데스크톱·자원 할당 (vLAB 콘솔용)
     from pegaprox.api.vlab_support import bp as vlab_support_bp  # MOAVI Desk: 서포트 번들 (기간 지정)
     from pegaprox.api.vlab_accel import bp as vlab_accel_bp  # MOAVI Desk: 가속 카드 · 패스스루 점검
+    from pegaprox.api.vlab_enroll import bp as vlab_enroll_bp  # MOAVI Desk: LAB 단말 대량 등록 (등록 코드)
     from pegaprox.api.vlab_next import bp as vlab_next_bp  # MOAVI Desk: 부서·가입 심사·USB·게이트웨이·골든 이미지·보드 LAB·빌드 팜·라이선스 서버
 
     app.register_blueprint(auth_bp)
@@ -112,6 +113,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_next_bp)
     app.register_blueprint(vlab_support_bp)
     app.register_blueprint(vlab_accel_bp)
+    app.register_blueprint(vlab_enroll_bp)
 
     # Initialize WebSocket support for realtime blueprint
     from pegaprox.api.realtime import sock
