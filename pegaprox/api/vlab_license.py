@@ -138,6 +138,9 @@ def collect(s, now=None):
         new = lu.record_denials(s['id'], lu.parse_denials(log)) if log else 0
         catalog.mark_license_usage(s['id'], True, err if err.startswith('debug log') else '')
         _alerts(s, parsed['features'], new)
+        if new:
+            from pegaprox.api.vlab_ops_notices import license_denied
+            license_denied(s, new)
         return dict(parsed, at=at, denied_new=new), ''
     err = err or (parsed or {}).get('error') or 'lmstat returned no counted features'
     catalog.mark_license_usage(s['id'], False, err)

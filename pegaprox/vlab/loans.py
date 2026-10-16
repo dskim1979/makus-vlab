@@ -71,6 +71,13 @@ def _loop():
                     gpu_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
+        try:
+            # the administrators' notices: lab PCs waiting, the server pair, failed long tasks
+            if ha.is_active():
+                from pegaprox.api.vlab_ops_notices import ops_tick
+                ops_tick()
+        except Exception as e:
+            logging.error(f'[VLAB] operations notices: {e}')
         time.sleep(INTERVAL)
 
 
