@@ -25,6 +25,18 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/clusters/<cluster_id>/accelerators  GPUs and FPGA cards per node, PCI mappings, who uses them  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/nodes/<node>/pci/<pciid>/profiles  vGPU (mdev) profiles of a card  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/infra   health, nodes, 5-min history, sessions, storage, alerts (?range=24h|7d|30d)  vlab.pool.view
+  GET    /api/vlab/admin/clusters/<cluster_id>/alerts  alert rules, firing alerts and mutes (the core reads)  vlab.pool.view
+  POST   /api/vlab/admin/clusters/<cluster_id>/alerts/rules            a rule (the core route)  vlab.pool.manage
+  PUT    /api/vlab/admin/clusters/<cluster_id>/alerts/rules/<rule_id>  change it (the core route)  vlab.pool.manage
+  DELETE /api/vlab/admin/clusters/<cluster_id>/alerts/rules/<rule_id>  remove it (the core route)  vlab.pool.manage
+  POST   /api/vlab/admin/clusters/<cluster_id>/alerts/active/<fired_id>/ack  acknowledge a firing alert  vlab.pool.manage
+  POST   /api/vlab/admin/clusters/<cluster_id>/alerts/mutes            {minutes, rule_id|object_key|active_alert_id}  vlab.pool.manage
+  DELETE /api/vlab/admin/clusters/<cluster_id>/alerts/mutes/<mute_id>  lift a mute  vlab.pool.manage
+  GET    /api/vlab/admin/alert-channels               notification channels, secrets masked (the core route)  admin.settings
+  POST   /api/vlab/admin/alert-channels               {name, type, url, token?, topic?, enabled?}  admin.settings
+  PUT    /api/vlab/admin/alert-channels/<cid>         change one (a masked url/token is kept)  admin.settings
+  DELETE /api/vlab/admin/alert-channels/<cid>         remove one  admin.settings
+  POST   /api/vlab/admin/alert-channels/<cid>/test    send a test alert  admin.settings
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -1083,6 +1095,114 @@ def cluster_infra(cluster_id):
         'alerts': [{k: a.get(k) for k in ('id', 'severity', 'message', 'target_type', 'target_name',
                                            'metric', 'triggered_at', 'acked_at')} for a in alerts[:20]],
     })
+
+# --- alerts (운영 > 경보) -------------------------------------------------------------
+# The core already watches the clusters: alert rules, the incidents they raise (with
+# acknowledgement and escalation), mutes, and the notification channels (Slack, Discord,
+# Teams, ntfy, a generic webhook; e-mail through the SMTP settings). These routes hand
+# the request to those core routes as it is - their own checks (cluster.config,
+# alert.manage, admin.settings, tenant scope) run as they always do.
+
+def _alert_cluster(cluster_id):
+    if cluster_id not in cluster_managers or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    return None
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def cluster_alerts(cluster_id):
+    """Rules, firing incidents and mutes of the cluster in one read (the three core reads)."""
+    from pegaprox.api import alerts as core_alerts
+    err = _alert_cluster(cluster_id)
+    if err:
+        return err
+    rules = (_core_body(core_alerts.get_cluster_alerts(cluster_id)) or {}).get('alerts') or []
+    active = (_core_body(core_alerts.get_active_alerts(cluster_id)) or {}).get('active_alerts') or []
+    mutes = (_core_body(core_alerts.list_alert_mutes(cluster_id)) or {}).get('mutes') or []
+    return jsonify({'rules': rules, 'active': active, 'mutes': mutes})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/rules', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def create_alert_rule(cluster_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.create_cluster_alert(cluster_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/rules/<rule_id>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def update_alert_rule(cluster_id, rule_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.update_cluster_alert(cluster_id, rule_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/rules/<rule_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_alert_rule(cluster_id, rule_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.delete_cluster_alert(cluster_id, rule_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/active/<fired_id>/ack', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def ack_alert(cluster_id, fired_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.ack_active_alert(cluster_id, fired_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/mutes', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def create_alert_mute(cluster_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.create_alert_mute(cluster_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/alerts/mutes/<mute_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_alert_mute(cluster_id, mute_id):
+    from pegaprox.api import alerts as core_alerts
+    return _alert_cluster(cluster_id) or core_alerts.delete_alert_mute(cluster_id, mute_id)
+
+
+@bp.route('/api/vlab/admin/alert-channels', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def alert_channels():
+    """The notification channels, secrets masked (the core read without ?full)."""
+    from pegaprox.api import alerts as core_alerts
+    resp = core_alerts.list_alert_channels()
+    body = _core_body(resp)
+    if body is None:
+        return resp
+    return jsonify({'channels': body if isinstance(body, list) else []})
+
+
+@bp.route('/api/vlab/admin/alert-channels', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def create_alert_channel():
+    from pegaprox.api import alerts as core_alerts
+    return core_alerts.create_alert_channel()
+
+
+@bp.route('/api/vlab/admin/alert-channels/<cid>', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def update_alert_channel(cid):
+    from pegaprox.api import alerts as core_alerts
+    return core_alerts.update_alert_channel(cid)
+
+
+@bp.route('/api/vlab/admin/alert-channels/<cid>', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_alert_channel(cid):
+    from pegaprox.api import alerts as core_alerts
+    return core_alerts.delete_alert_channel(cid)
+
+
+@bp.route('/api/vlab/admin/alert-channels/<cid>/test', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def test_alert_channel(cid):
+    from pegaprox.api import alerts as core_alerts
+    return core_alerts.test_alert_channel(cid)
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/storages', methods=['GET'])

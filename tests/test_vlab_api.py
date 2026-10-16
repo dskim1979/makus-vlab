@@ -1253,3 +1253,74 @@ def test_infra_brings_the_core_figures_together(env, monkeypatch):
     assert admin.get(f'/api/vlab/admin/clusters/{CID}/infra?range=7d').get_json()['step'] == 3600
     assert admin.get(f'/api/vlab/admin/clusters/{CID}/infra?range=1y').status_code == 400
     assert admin.get('/api/vlab/admin/clusters/nope/infra').status_code == 404
+
+
+# --- alerts (the core's rules, incidents, mutes and notification channels) ---------------
+
+@pytest.fixture
+def alerting(env, monkeypatch):
+    import pegaprox.api.alerts as core_alerts
+    from flask import jsonify, request
+    calls = []
+
+    def fake(name, answer=None):
+        def f(*args):
+            calls.append((name, args, request.get_json(silent=True)))
+            return jsonify(answer if answer is not None else {'success': True})
+        return f
+    monkeypatch.setattr(core_alerts, 'get_cluster_alerts', fake('rules', {'alerts': [{'id': 'r1', 'metric': 'cpu'}]}))
+    monkeypatch.setattr(core_alerts, 'get_active_alerts', fake('active', {'active_alerts': [{'id': 7, 'severity': 'critical'}]}))
+    monkeypatch.setattr(core_alerts, 'list_alert_mutes', fake('mutes', {'mutes': [{'id': 'm1', 'rule_id': 'r1'}]}))
+    for name in ('create_cluster_alert', 'update_cluster_alert', 'delete_cluster_alert', 'ack_active_alert',
+                 'create_alert_mute', 'delete_alert_mute', 'create_alert_channel', 'update_alert_channel',
+                 'delete_alert_channel', 'test_alert_channel'):
+        monkeypatch.setattr(core_alerts, name, fake(name))
+    monkeypatch.setattr(core_alerts, 'list_alert_channels', fake('channels', [{'id': 'c1', 'type': 'slack', 'url': '********'}]))
+    return env, calls
+
+
+def test_alerts_read_the_core_rules_incidents_and_mutes(alerting):
+    (_, admin, alice, _, viewer), calls = alerting
+    d = admin.get(f'/api/vlab/admin/clusters/{CID}/alerts').get_json()
+    assert d == {'rules': [{'id': 'r1', 'metric': 'cpu'}], 'active': [{'id': 7, 'severity': 'critical'}],
+                 'mutes': [{'id': 'm1', 'rule_id': 'r1'}]}
+    assert [c[0] for c in calls] == ['rules', 'active', 'mutes']
+    assert admin.get('/api/vlab/admin/clusters/nope/alerts').status_code == 404
+    assert alice.get(f'/api/vlab/admin/clusters/{CID}/alerts').status_code == 403
+
+
+def test_alert_writes_go_to_the_core_routes(alerting):
+    (_, admin, alice, _, viewer), calls = alerting
+    base = f'/api/vlab/admin/clusters/{CID}/alerts'
+    rule = {'name': 'CPU', 'metric': 'cpu', 'operator': '>', 'threshold': 90, 'severity': 'warning'}
+    assert admin.post(f'{base}/rules', json=rule).status_code == 200
+    assert admin.put(f'{base}/rules/r1', json={'enabled': False}).status_code == 200
+    assert admin.delete(f'{base}/rules/r1').status_code == 200
+    assert admin.post(f'{base}/active/7/ack').status_code == 200
+    assert admin.post(f'{base}/mutes', json={'minutes': 60, 'rule_id': 'r1'}).status_code == 200
+    assert admin.delete(f'{base}/mutes/m1').status_code == 200
+    assert [(c[0], c[1]) for c in calls] == [
+        ('create_cluster_alert', (CID,)), ('update_cluster_alert', (CID, 'r1')), ('delete_cluster_alert', (CID, 'r1')),
+        ('ack_active_alert', (CID, '7')), ('create_alert_mute', (CID,)), ('delete_alert_mute', (CID, 'm1'))]
+    assert calls[0][2] == rule
+    assert admin.post('/api/vlab/admin/clusters/nope/alerts/rules', json=rule).status_code == 404
+    for client in (alice, viewer):
+        assert client.post(f'{base}/rules', json=rule).status_code == 403
+        assert client.post(f'{base}/active/7/ack').status_code == 403
+    assert len(calls) == 6
+
+
+def test_notification_channels_go_to_the_core_routes(alerting):
+    (_, admin, alice, _, _), calls = alerting
+    assert admin.get('/api/vlab/admin/alert-channels').get_json() == {
+        'channels': [{'id': 'c1', 'type': 'slack', 'url': '********'}]}
+    ch = {'name': 'ops', 'type': 'slack', 'url': 'https://hooks.slack.com/services/x'}
+    assert admin.post('/api/vlab/admin/alert-channels', json=ch).status_code == 200
+    assert admin.put('/api/vlab/admin/alert-channels/c1', json={'enabled': False}).status_code == 200
+    assert admin.post('/api/vlab/admin/alert-channels/c1/test').status_code == 200
+    assert admin.delete('/api/vlab/admin/alert-channels/c1').status_code == 200
+    assert [(c[0], c[1]) for c in calls] == [('channels', ()), ('create_alert_channel', ()),
+                                             ('update_alert_channel', ('c1',)), ('test_alert_channel', ('c1',)),
+                                             ('delete_alert_channel', ('c1',))]
+    assert alice.get('/api/vlab/admin/alert-channels').status_code == 403
+    assert alice.post('/api/vlab/admin/alert-channels/c1/test').status_code == 403
