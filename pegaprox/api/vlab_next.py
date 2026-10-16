@@ -129,7 +129,7 @@ from pegaprox.api import vlab as core
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import catalog, nas, store
+from pegaprox.vlab import catalog, envcat, nas, store
 
 bp = Blueprint('vlab_next', __name__)
 
@@ -961,6 +961,7 @@ def delete_golden(gid):
     if err:
         return err
     catalog.delete_golden(gid)
+    envcat.delete(gid)
     log_audit(_user(), 'vlab.golden.delete', f"golden image '{img['name']}' (the VM and its snapshots are kept)", get_client_ip())
     return jsonify({'success': True})
 
@@ -1482,6 +1483,7 @@ def my_pools():
     username = _user()
     dep, groups = catalog.department_of(username), _user_groups(username)
     busy = store.open_session_desktops()
+    envs, golden = envcat.all_envs(), {g['id']: g for g in catalog.list_golden()}
     by_pool = {}
     for g in catalog.pool_grants():
         by_pool.setdefault(g['pool_id'], []).append(g)
@@ -1496,7 +1498,8 @@ def my_pools():
         free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
         kind = 'shared' if pool['type'] == 'shared' else ('claim' if pool['type'] in CLAIM_TYPES else 'other')
         out.append({'id': pool['id'], 'name': pool['name'], 'type': pool['type'], 'description': pool.get('description', ''),
-                    'action': kind, 'desktops': len(desks), 'free': len(free), 'mine': [d['id'] for d in mine]})
+                    'action': kind, 'desktops': len(desks), 'free': len(free), 'mine': [d['id'] for d in mine],
+                    'environment': envcat.portal_view(pool, envs, golden)})
     return jsonify({'pools': out})
 
 

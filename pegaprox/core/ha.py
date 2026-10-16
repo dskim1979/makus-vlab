@@ -326,6 +326,8 @@ SYNC_TABLES = (
     'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
     'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
     'vlab_desktop_versions', 'vlab_build_jobs',
+    # the environment of each golden image: components, cards, history (pegaprox/vlab/envcat.py)
+    'vlab_golden_env',
     # MOAVI Desk shared storage (pegaprox/vlab/nas.py): the pool's NAS and the last mount per desktop and user
     'vlab_pool_storage', 'vlab_storage_mounts', 'vlab_storage_ids',
     # LAB terminal enrolment: codes and the agents of the PCs (pegaprox/vlab/enroll.py)

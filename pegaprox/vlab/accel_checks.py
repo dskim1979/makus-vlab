@@ -22,12 +22,23 @@ turned into things the engine can see in a VM's config and in the vLAB catalog:
   LICENSE_MAC      a licence server VM without a fixed MAC: a clone or restore changes the
                    MAC the licence (FlexLM host id) is bound to
 
+NVIDIA MIG, from the node's nvidia-smi (pegaprox/vlab/mig.py; only when the node could be read):
+
+  MIG_WHOLE_PASSTHROUGH  a whole card in MIG mode passed through: the guest sees MIG mode on and,
+                   until it makes GPU instances itself, CUDA finds no device
+  MIG_NO_INSTANCES a vGPU on a card in MIG mode without GPU instances: MIG-backed profiles have
+                   nothing to sit on and the VM does not start
+  MIG_MODE_OFF     the pool asks for a MIG-backed vGPU profile, the card's MIG mode is off
+  MIG_TIMESLICED   a vGPU that is not marked MIG-backed on a card in MIG mode: time-sliced
+                   profiles are not offered on a MIG card
+  MIG_PENDING      a MIG mode change waits for a GPU reset or a node reboot
+
 Each finding: {code, severity: error|warn|info, cluster_id, vmid, desktop_id, name, ko, en}.
 Advice only: nothing here changes a VM.
 """
 import re
 
-from pegaprox.vlab import accel, catalog, store
+from pegaprox.vlab import accel, catalog, mig, store
 
 _SLOT = re.compile(r'^hostpci\d+$')
 _FN = re.compile(r'\.[0-7]$')
@@ -52,8 +63,45 @@ def _devices(raw, mappings):
     return out
 
 
-def for_vm(mgr, cluster_id, node, vmid, desk=None, raw=None, mappings=None, ha_sids=None, watched_licence=None):
-    """Findings for one VM (qemu). Reads what it is not given."""
+def _mig_findings(devs, node, state, policy, ctx):
+    """The MIG findings of one VM's slots against its node's nvidia-smi state."""
+    out = []
+    if not state or not state.get('gpus'):
+        return out
+    pool_mig = bool((policy or {}).get('mig'))
+    for slot, value, m, vendors, mdev in devs:
+        paths = list(accel.parse_hostpci(value)['addresses'])
+        paths += [d['path'] for d in (m or {}).get('devices') or [] if d.get('node') == node]
+        cards = {g['index']: g for g in (mig.card_state(state, p) for p in paths) if g and g.get('mig_capable')}
+        for g in cards.values():
+            on = g.get('mig_current') == 'enabled'
+            label = f"{g['name']} (GPU {g['index']})"
+            if not mdev and on:
+                out.append(_f('MIG_WHOLE_PASSTHROUGH', 'warn',
+                              f'MIG 모드인 {label}를 통째로 넘겼습니다. VM 안에서는 MIG 모드가 켜진 채로 보여, VM 안에서 GPU 인스턴스를 만들기 전까지 CUDA가 장치를 찾지 못합니다. 카드를 나눠 주려면 MIG-backed vGPU 프로필을 쓰고, 통째로 줄 거면 노드에서 MIG 모드를 끄세요.',
+                              f'{label} is in MIG mode and passed through whole. The guest sees MIG mode on, and CUDA finds no device until the guest makes GPU instances itself. To share the card use a MIG-backed vGPU profile; to give it whole, turn MIG mode off on the node.',
+                              slot=slot, **ctx))
+            if mdev and on and not g.get('gpu_instances'):
+                out.append(_f('MIG_NO_INSTANCES', 'warn',
+                              f'{label}가 MIG 모드인데 GPU 인스턴스가 없습니다. MIG-backed vGPU가 올라갈 자리가 없어 VM이 켜지지 않습니다. 가속 자원 > GPU · 가속 카드 재고에서 분할을 만드세요.',
+                              f'{label} is in MIG mode without GPU instances: a MIG-backed vGPU has nothing to sit on and the VM does not start. Make a layout under Accelerators > GPU and card inventory.',
+                              slot=slot, **ctx))
+            if mdev and slot == accel.GPU_SLOT and pool_mig and not on:
+                out.append(_f('MIG_MODE_OFF', 'error',
+                              f'풀이 MIG-backed vGPU 프로필을 쓰는데 {label}의 MIG 모드가 꺼져 있습니다. 노드에서 MIG 모드를 켜고 GPU 인스턴스를 만드세요.',
+                              f'The pool uses a MIG-backed vGPU profile, but MIG mode is off on {label}. Turn MIG mode on and make GPU instances on the node.',
+                              slot=slot, **ctx))
+            if mdev and on and not (slot == accel.GPU_SLOT and pool_mig):
+                out.append(_f('MIG_TIMESLICED', 'warn',
+                              f'{label}가 MIG 모드입니다. MIG 카드에는 시분할 vGPU 프로필(A100-4C 같은)이 나오지 않으니, 이 vGPU가 MIG-backed 프로필(A100-3-20C 같은)이 아니면 VM이 켜지지 않습니다. 풀 GPU 정책에서 MIG-backed 프로필을 고르세요.',
+                              f'{label} is in MIG mode. Time-sliced vGPU profiles (like A100-4C) are not offered on a MIG card, so unless this vGPU is a MIG-backed profile (like A100-3-20C) the VM does not start. Pick a MIG-backed profile in the pool GPU policy.',
+                              slot=slot, **ctx))
+    return out
+
+
+def for_vm(mgr, cluster_id, node, vmid, desk=None, raw=None, mappings=None, ha_sids=None, watched_licence=None,
+           mig_state=None, gpu_policy=None):
+    """Findings for one VM (qemu). Reads what it is not given (not the node's MIG state)."""
     raw = raw if raw is not None else accel.vm_raw(mgr, node, vmid)
     if not raw:
         return []
@@ -116,6 +164,7 @@ def for_vm(mgr, cluster_id, node, vmid, desk=None, raw=None, mappings=None, ha_s
             out.append(_f('VGPU_LICENSE', 'warn',
                           'vGPU를 쓰는데 자동 감시하는 라이선스 서버가 없습니다. 라이선스를 못 받은 vGPU는 20분 뒤 15fps로 제한되고 CUDA가 느려지며, 24시간 뒤에는 3fps · CUDA 중지가 됩니다. 가속 자원 > 라이선스 서버에 vGPU 라이선스 서버(DLS)를 등록하고 자동 감시를 켜세요.',
                           'vGPU without a watched licence server. An unlicensed vGPU is cut to 15 fps with slower CUDA after 20 minutes, and to 3 fps with CUDA off after 24 hours. Register the vGPU licence server (DLS) under Accelerators > Licence servers and watch it.', slot=slot, **ctx))
+    out += _mig_findings(devs, node, mig_state, gpu_policy, ctx)
     if fpga:
         out.append(_f('XILINX_RESET', 'info',
                       'FPGA 카드: VM을 끄거나 다시 시작하면 카드가 리셋되어 올려 둔 xclbin · 비트스트림이 지워집니다. 시작한 뒤 다시 프로그램하세요(xbutil program). 카드 플래시(shell) 갱신은 노드를 완전히 껐다 켜야 반영됩니다.',
@@ -130,9 +179,10 @@ def _watched_licence():
         return None
 
 
-def scan(cluster_managers, reachable):
+def scan(cluster_managers, reachable, mig_states=None):
     """Every finding over the desktops that carry a card (a pool GPU or a loan), the boards
-    and the licence servers. `reachable(cluster_id)` filters by the caller's access."""
+    and the licence servers. `reachable(cluster_id)` filters by the caller's access;
+    `mig_states(mgr, cluster_id)` -> {node: mig.read_node state} adds the MIG findings."""
     findings, read = [], 0
     watched = _watched_licence()
     loans = {(l['cluster_id'], int(l['vmid'])) for l in store.list_leases(active_only=True) if l.get('vmid') is not None}
@@ -155,11 +205,26 @@ def scan(cluster_managers, reachable):
             ha_sids = {r.get('sid') for r in mgr.get_proxmox_ha_resources() or []}
         except Exception:
             ha_sids = set()
+        states = {}
+        if mig_states:
+            try:
+                states = mig_states(mgr, cid) or {}
+            except Exception:
+                states = {}
+        for node, st in sorted(states.items()):
+            for g in st.get('gpus') or []:
+                if g.get('mig_pending') and g.get('mig_current') and g['mig_pending'] != g['mig_current']:
+                    findings.append(_f('MIG_PENDING', 'warn',
+                                       f"{node}의 {g['name']}(GPU {g['index']}) MIG 모드 변경({g['mig_current']} → {g['mig_pending']})이 GPU 리셋이나 노드 재부팅을 기다립니다. 그 전까지는 이전 모드로 동작합니다.",
+                                       f"The MIG mode change of {g['name']} (GPU {g['index']}) on {node} ({g['mig_current']} -> {g['mig_pending']}) waits for a GPU reset or a node reboot; until then the old mode holds.",
+                                       cluster_id=cid, name=f"{node} GPU {g['index']}"))
         for d in desks:
             if read >= MAX_VMS:
                 break
             read += 1
-            findings += for_vm(mgr, cid, d['node'], d['vmid'], desk=d, mappings=mappings, ha_sids=ha_sids, watched_licence=watched)
+            gpu = ((pools.get(d['pool_id']) or {}).get('settings') or {}).get('gpu') or {}
+            findings += for_vm(mgr, cid, d['node'], d['vmid'], desk=d, mappings=mappings, ha_sids=ha_sids, watched_licence=watched,
+                               mig_state=states.get(d['node']), gpu_policy=gpu)
     for b in catalog.list_boards():
         if not reachable(b.get('cluster_id') or ''):
             continue

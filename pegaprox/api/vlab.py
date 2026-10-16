@@ -1014,6 +1014,8 @@ def set_pool_gpu(pool_id):
             if not isinstance(mdev, str) or not accel.MDEV_TYPE.match(mdev):
                 return _bad('mdev_type: a vGPU profile type such as nvidia-746')
             policy['mdev_type'] = mdev
+            if data.get('mig'):     # a MIG-backed profile (A100-3-20C): the card's MIG mode has to be on
+                policy['mig'] = True
         else:
             policy['x_vga'] = bool(data.get('x_vga', False))
         label = data.get('label')
@@ -1023,7 +1025,8 @@ def set_pool_gpu(pool_id):
             policy['label'] = label.strip()
     store.set_pool_settings(pool['id'], dict(pool.get('settings') or {}, gpu=policy))
     log_audit(_user(), 'vlab.pool.gpu', f"pool '{pool['name']}': {mode}"
-              + (f" {policy['mapping']}" if mode != 'none' else '') + (f" {policy.get('mdev_type')}" if mode == 'vgpu' else ''),
+              + (f" {policy['mapping']}" if mode != 'none' else '') + (f" {policy.get('mdev_type')}" if mode == 'vgpu' else '')
+              + (' (MIG)' if policy.get('mig') else ''),
               get_client_ip())
     return jsonify({'gpu': policy})
 

@@ -135,10 +135,12 @@ def parse_profile(t):
             return int(kv[k])
         except (KeyError, ValueError):
             return None
-    return {'type': t.get('type') or '', 'name': t.get('name') or t.get('type') or '', 'description': desc,
+    name = t.get('name') or t.get('type') or ''
+    mig = re.search(r'-(\d)-(\d+)C(ME)?$', name.strip(), re.I)   # MIG-backed vGPU: A100-3-20C, H100-1-10C
+    return {'type': t.get('type') or '', 'name': name, 'description': desc,
             'available': int(t.get('available') or 0), 'framebuffer_mb': fb_mb,
             'max_instance': _int('max_instance'), 'heads': _int('num_heads'),
-            'max_resolution': kv.get('max_resolution') or ''}
+            'max_resolution': kv.get('max_resolution') or '', 'mig_slices': int(mig.group(1)) if mig else None}
 
 
 # --- PVE reads --------------------------------------------------------------------
