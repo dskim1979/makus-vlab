@@ -91,9 +91,9 @@ echo "Container $CTID ($HOSTNAME) created and started."
 echo "Installing PegaProx in container $CTID ($HOSTNAME)."
 pct exec $CTID -- bash -c "apt-get update && apt-get -y upgrade && apt-get -y install sudo curl git"
 if [[ "$RELEASE" == "SNAPSHOT" ]]; then
-  pct exec $CTID -- bash -c "cd /opt/ && git clone https://github.com/dskim1979/makus-virt.git && cd makus-virt && bash deploy.sh --port=5000"
+  pct exec $CTID -- bash -c "cd /opt/ && git clone https://github.com/dskim1979/makus-vlab.git && cd makus-vlab && bash deploy.sh --port=5000"
 else
-  pct exec $CTID -- bash -c "cd /opt/ && git clone https://github.com/dskim1979/makus-virt.git && cd makus-virt && git checkout $RELEASE && bash deploy.sh --port=5000"
+  pct exec $CTID -- bash -c "cd /opt/ && git clone https://github.com/dskim1979/makus-vlab.git && cd makus-vlab && git checkout $RELEASE && bash deploy.sh --port=5000"
 fi
 echo "PegaProx installation in container $CTID ($HOSTNAME) completed."
 

@@ -294,7 +294,7 @@
                                         <label className="block text-xs text-gray-400 mb-1">{t('topic') || 'Topic'}</label>
                                         <input type="text" value={editing.topic || ''}
                                             onChange={e => setEditing({...editing, topic: e.target.value})}
-                                            placeholder="makus-virt-alerts"
+                                            placeholder="moavi-desk-alerts"
                                             className="w-full px-3 py-1.5 bg-proxmox-secondary border border-proxmox-border rounded text-white text-sm font-mono" />
                                     </div>
                                     <div>
@@ -9656,7 +9656,7 @@
                                     {/* GitHub Link */}
                                     <div className="text-center text-sm text-gray-500">
                                         <a 
-                                            href="https://github.com/dskim1979/makus-virt" 
+                                            href="https://github.com/dskim1979/makus-vlab" 
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             className="hover:text-proxmox-orange transition-colors inline-flex items-center gap-1"
@@ -9751,7 +9751,7 @@
                                         </h3>
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                             <a 
-                                                href="https://github.com/dskim1979/makus-virt/issues" 
+                                                href="https://github.com/dskim1979/makus-vlab/issues" 
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="flex items-center gap-3 p-4 bg-proxmox-darker rounded-lg hover:bg-proxmox-border/50 transition-colors"
@@ -9771,7 +9771,7 @@
                                                 an Issue" already covers the Q&A use case and Nico answers there.
                                                 If we ever turn Discussions on, restore from git history. */}
                                             <a
-                                                href="https://github.com/dskim1979/makus-virt/wiki"
+                                                href="https://github.com/dskim1979/makus-vlab/wiki"
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="flex items-center gap-3 p-4 bg-proxmox-darker rounded-lg hover:bg-proxmox-border/50 transition-colors"
@@ -9786,7 +9786,7 @@
                                                 <Icons.ExternalLink className="w-4 h-4 text-gray-500 ml-auto" />
                                             </a>
                                             <a 
-                                                href="https://github.com/dskim1979/makus-virt/releases" 
+                                                href="https://github.com/dskim1979/makus-vlab/releases" 
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="flex items-center gap-3 p-4 bg-proxmox-darker rounded-lg hover:bg-proxmox-border/50 transition-colors"
@@ -9858,12 +9858,12 @@
                                             {t('links') || 'Links'}
                                         </h3>
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                            <a href="https://github.com/dskim1979/makus-virt" target="_blank" rel="noopener noreferrer"
+                                            <a href="https://github.com/dskim1979/makus-vlab" target="_blank" rel="noopener noreferrer"
                                                 className="flex items-center gap-2 p-3 bg-proxmox-darker rounded-lg hover:bg-proxmox-hover transition-colors">
                                                 <Icons.Github className="text-gray-400" />
                                                 <span className="text-sm text-gray-300">GitHub</span>
                                             </a>
-                                            <a href="https://github.com/dskim1979/makus-virt#readme" target="_blank" rel="noopener noreferrer"
+                                            <a href="https://github.com/dskim1979/makus-vlab#readme" target="_blank" rel="noopener noreferrer"
                                                 className="flex items-center gap-2 p-3 bg-proxmox-darker rounded-lg hover:bg-proxmox-hover transition-colors">
                                                 <Icons.Book className="text-blue-400" />
                                                 <span className="text-sm text-gray-300">Documentation</span>
@@ -9911,7 +9911,7 @@
                                             the modified source sit below the upstream notice, which stays unchanged above. */}
                                         <p className="text-center text-gray-500 border-t border-proxmox-border pt-3">
                                             MOAVI Desk — a modified version of PegaProx · Portions © 2026 Makus Systems ·{' '}
-                                            <a href="https://github.com/dskim1979/makus-virt"
+                                            <a href="https://github.com/dskim1979/makus-vlab"
                                                 target="_blank" rel="noopener noreferrer"
                                                 className="text-proxmox-orange hover:underline">MOAVI Desk source code</a>
                                         </p>

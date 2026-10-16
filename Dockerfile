@@ -64,7 +64,7 @@ ENV PEGAPROX_BRANCH=${PEGAPROX_BRANCH}
 ARG WEB_UI=1
 RUN if [ "$WEB_UI" = "0" ]; then \
         rm -rf /app/web && mkdir -p /app/web \
-        && echo '<!doctype html><meta charset="utf-8"><title>makus-virt API</title><p>This server is API-only. It is managed from the MOAVI Desk console.</p>' > /app/web/index.html \
+        && echo '<!doctype html><meta charset="utf-8"><title>makus-vlab API</title><p>This server is API-only. It is managed from the MOAVI Desk console.</p>' > /app/web/index.html \
         && chown -R pegaprox:pegaprox /app/web; \
     fi
 

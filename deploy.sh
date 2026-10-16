@@ -25,7 +25,7 @@ NC='\033[0m'
 INSTALL_DIR="/opt/PegaProx"
 SERVICE_USER="pegaprox"
 SERVICE_GROUP="pegaprox"
-GITHUB_REPO="https://github.com/dskim1979/makus-virt.git"  # MOAVI Desk (원본: PegaProx/project-pegaprox)
+GITHUB_REPO="https://github.com/dskim1979/makus-vlab.git"  # MOAVI Desk (원본: PegaProx/project-pegaprox)
 # MK May 2026 (#417 follow-up, elektronen): allow installing from a specific
 # branch via `PEGAPROX_BRANCH=Testing curl ... | sudo bash`. Default still main
 # so existing curl-pipe invocations don't change behaviour.

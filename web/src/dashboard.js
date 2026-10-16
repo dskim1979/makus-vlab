@@ -26978,7 +26978,7 @@
                         <div className="max-w-[800px] mx-auto px-6 py-4">
                             <div className="text-center text-xs text-gray-600">
                                 <p>{branding.appName} {PEGAPROX_VERSION}{branding.appTagline ? ` · ${branding.appTagline}` : ''}</p>
-                                <p className="mt-1">Based on open-source software, licensed under AGPL-3.0 — <a href="https://github.com/dskim1979/makus-virt" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-400">source code</a></p>
+                                <p className="mt-1">Based on open-source software, licensed under AGPL-3.0 — <a href="https://github.com/dskim1979/makus-vlab" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-400">source code</a></p>
                             </div>
                             <LegalNotice className="mt-2" />
                         </div>

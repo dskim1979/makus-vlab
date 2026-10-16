@@ -16,9 +16,9 @@
     "PegaProx 1.0 — out of Beta. Everything from the 0.9.x line, hardened and rounded out. SECURITY: a full post-release penetration test closed a BMC-credential exfiltration on the test-BMC endpoint, an ESXi/XCP password ever appearing on a process argv (now fed over stdin/SSHPASS), a BMC/Redfish SSRF oracle, and an SSH-amplification path in the Ceph mirror views; the TLS bootstrap now FAILS CLOSED — if TLS is the intended posture and a usable certificate cannot be loaded or generated, PegaProx refuses to start with an actionable error instead of silently serving plaintext on the TLS port (#633, thanks @SpyrosPsarras). FEATURES: cross-cluster EVPN vNets spanning multiple clusters in the same AS — create / edit / membership / drift-detection + optional reconcile and drift→alert fan-out (#612 cybrwerk); V2P/ESXi migrations gain an opt-in 'wait for confirmation before cutover' gate (#562 ajoergensen); the Top Resources table is now sortable by any column (#621 ccesario); scheduled rolling updates carry a per-schedule reboot/online timeout instead of a fixed 10 minutes (#630). FIXES: nested / hierarchical resource pools now show their members and VM counts (#634 prasannak81); ESXi→PVE migrations of multi-disk VMs to classic LVM no longer abort when a target volume already exists (#636 shepart); XCP-ng→PVE transfers resume by HTTP range instead of failing on a broken pipe (#546). QUALITY: the SSL-bootstrap, authorization and integration test suites continue to run on every PR. Thank you to everyone who filed, fixed and sponsored along the way. 💚"
   ],
   "min_python": "3.10",
-  "download_url": "https://github.com/dskim1979/makus-virt/releases/latest",
-  "update_archive": "https://github.com/dskim1979/makus-virt/archive/refs/heads/main.tar.gz",
-  "update_mirror": "https://github.com/dskim1979/makus-virt",
+  "download_url": "https://github.com/dskim1979/makus-vlab/releases/latest",
+  "update_archive": "https://github.com/dskim1979/makus-vlab/archive/refs/heads/main.tar.gz",
+  "update_mirror": "https://github.com/dskim1979/makus-vlab",
   "update_files": [
     "Dockerfile",
     "LICENSE",

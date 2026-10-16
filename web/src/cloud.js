@@ -2040,7 +2040,7 @@
             return (
                 <footer className="cloud-sponsors" style={{ marginTop: 28, paddingTop: 18, borderTop: '1px solid rgba(127,127,127,0.18)', textAlign: 'center' }}>
                     <div style={{ fontSize: 11, opacity: 0.5 }}>
-                        MOAVI Desk &mdash; <a href="https://github.com/dskim1979/makus-virt" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{label}</a>
+                        MOAVI Desk &mdash; <a href="https://github.com/dskim1979/makus-vlab" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>{label}</a>
                     </div>
                     <LegalNotice style={{marginTop: 12}} />
                 </footer>
