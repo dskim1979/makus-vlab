@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-vLAB accelerators (MAKUS): GPUs, vGPU profiles and FPGA cards on the cluster's nodes.
+vLAB accelerators (MAKUS): GPUs, vGPU profiles, FPGA cards and NPUs on the cluster's nodes.
 
 The PVE reads are small wrappers (node_pci, pci_mappings, mdev_types) so the routes and
 the tests can stand them in; everything else here is plain parsing. docs/vlab-design.md 10-0.
@@ -20,6 +20,11 @@ _GPU_CLASSES = ('0300', '0302', '0380')        # VGA, 3D controller, other displ
 _ACCEL_CLASS = '1200'                          # processing accelerator
 _GPU_VENDORS = {'10de': 'NVIDIA', '1002': 'AMD', '8086': 'Intel'}
 _FPGA_VENDORS = {'10ee': 'AMD Xilinx', '1172': 'Intel (Altera)'}
+# Korean NPUs, by PCI vendor (pci.ids): any device of these vendors is an NPU card. A Rebellions
+# card can split itself into SR-IOV virtual functions ("(VF)" in the device name), one per desktop.
+_NPU_VENDORS = {'1ed2': 'FuriosaAI', '1eff': 'Rebellions', '1f56': 'SAPEON', '1ff4': 'DEEPX', '209f': 'Mobilint'}
+NPU_VENDOR_IDS = tuple(_NPU_VENDORS)
+FPGA_VENDOR_IDS = tuple(_FPGA_VENDORS)
 # the display chips of server boards (remote console) report class 0300 too
 _BMC_VENDORS = ('1a03', '102b', '19a2', '19e5')   # ASPEED, Matrox, Emulex/ServerEngines, Huawei
 
@@ -36,10 +41,12 @@ def _hex(v, width):
 
 
 def classify(dev):
-    """'gpu', 'fpga' or None for one /nodes/<n>/hardware/pci entry."""
+    """'gpu', 'fpga', 'npu' or None for one /nodes/<n>/hardware/pci entry."""
     vendor, cls = _hex(dev.get('vendor'), 4), _hex(dev.get('class'), 6)[:4]
     if vendor in _FPGA_VENDORS:
         return 'fpga'
+    if vendor in _NPU_VENDORS:
+        return 'npu'
     if vendor in _BMC_VENDORS:
         return None
     if cls in _GPU_CLASSES or (cls == _ACCEL_CLASS and vendor in _GPU_VENDORS):
@@ -53,13 +60,16 @@ def device_view(node, dev):
         'node': node,
         'pciid': dev.get('id') or '',
         'kind': classify(dev),
-        'vendor': dev.get('vendor_name') or _GPU_VENDORS.get(vendor) or _FPGA_VENDORS.get(vendor) or vendor or '?',
+        'vendor': dev.get('vendor_name') or _GPU_VENDORS.get(vendor) or _FPGA_VENDORS.get(vendor)
+                  or _NPU_VENDORS.get(vendor) or vendor or '?',
         'vendor_id': vendor,
         'device_id': _hex(dev.get('device'), 4),
         'model': dev.get('device_name') or _hex(dev.get('device'), 4) or 'Unknown',
         'subsystem': dev.get('subsystem_device_name') or '',
         'iommu_group': dev.get('iommugroup'),
         'vgpu_capable': bool(dev.get('mdev')),
+        # an SR-IOV virtual function (Rebellions RBLN-* (VF)): a share of one card, given like a whole one
+        'virtual_function': '(vf)' in str(dev.get('device_name') or '').lower(),
     }
 
 

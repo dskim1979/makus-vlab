@@ -24,6 +24,7 @@ PCI = {
     ],
     'pve2': [
         {'id': '0000:c1:00.0', 'class': '0x120000', 'vendor': '0x10ee', 'device': '0x5048', 'device_name': 'Alveo U250'},
+        {'id': '0000:c2:00.1', 'class': '0x120000', 'vendor': '0x1eff', 'device': '0x1221', 'device_name': 'RBLN-CA22 (VF)'},
     ],
 }
 MAPPINGS = [
@@ -45,6 +46,12 @@ MAPPINGS = [
     ({'class': '0x120000', 'vendor': '0x10ee'}, 'fpga'),
     ({'class': '0x058000', 'vendor': '0x10ee'}, 'fpga'),       # the card's management function
     ({'class': '0x020000', 'vendor': '0x8086'}, None),         # a NIC
+    # Korean NPUs (pci.ids): FuriosaAI, Rebellions (its SR-IOV VF too), SAPEON, DEEPX, Mobilint
+    ({'class': '0x120000', 'vendor': '0x1ed2', 'device': '0x0001'}, 'npu'),   # RNGD
+    ({'class': '0x120000', 'vendor': '0x1eff', 'device': '0x1221'}, 'npu'),   # RBLN-CA22 (VF)
+    ({'class': '0x120000', 'vendor': '0x1f56'}, 'npu'),
+    ({'class': '0x120000', 'vendor': '0x1ff4', 'device': '0x0101'}, 'npu'),   # DX-H1
+    ({'class': '0x120000', 'vendor': '0x209f'}, 'npu'),
 ])
 def test_devices_are_classified(dev, kind):
     assert accel.classify(dev) == kind
@@ -104,16 +111,18 @@ def test_accelerators_list_gpus_and_fpgas_and_who_uses_them(gpu):
     _pool(admin, vmids=(300,))
     r = admin.get(f'/api/vlab/admin/clusters/{CID}/accelerators').get_json()
     devs = {(d['node'], d['pciid']): d for d in r['devices']}
-    assert set(devs) == {('pve1', '0000:41:00.0'), ('pve1', '0000:81:00.0'), ('pve2', '0000:c1:00.0')}
+    assert set(devs) == {('pve1', '0000:41:00.0'), ('pve1', '0000:81:00.0'), ('pve2', '0000:c1:00.0'), ('pve2', '0000:c2:00.1')}
     a16 = devs[('pve1', '0000:41:00.0')]
     assert (a16['kind'], a16['vgpu_capable'], a16['iommu_group'], a16['mappings'], a16['used_by']) == (
         'gpu', True, 40, ['gpu-a16'], [])
     (w7900_user,) = devs[('pve1', '0000:81:00.0')]['used_by']
     assert (w7900_user['vmid'], w7900_user['slot'], w7900_user['pool']) == (300, 'hostpci0', 'AI 랩')
     assert devs[('pve2', '0000:c1:00.0')]['kind'] == 'fpga'
+    npu = devs[('pve2', '0000:c2:00.1')]
+    assert (npu['kind'], npu['vendor'], npu['virtual_function']) == ('npu', 'Rebellions', True)
     (m,) = r['mappings']
     assert [(u['vmid'], u['mdev']) for u in m['used_by']] == [(302, 'nvidia-746')]
-    assert r['summary'] == {'gpus': 2, 'fpgas': 1, 'vgpu_capable': 1, 'in_use': 2}
+    assert r['summary'] == {'gpus': 2, 'fpgas': 1, 'npus': 1, 'vgpu_capable': 1, 'in_use': 2}
     assert alice.get(f'/api/vlab/admin/clusters/{CID}/accelerators').status_code == 403
     assert admin.get('/api/vlab/admin/clusters/nowhere/accelerators').status_code == 404
 

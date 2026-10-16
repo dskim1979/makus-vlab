@@ -857,10 +857,11 @@ def cluster_accelerators(cluster_id):
         m['pools'] = sorted(p['name'] for p in store.list_pools()
                             if p['cluster_id'] == cluster_id and ((p.get('settings') or {}).get('gpu') or {}).get('mapping') == m['id'])
     gpus = [d for d in devices if d['kind'] == 'gpu']
+    npus = [d for d in devices if d['kind'] == 'npu']
     return jsonify({
         'devices': devices, 'mappings': mappings if mappings is not None else [],
         'mappings_readable': mappings is not None, 'unreadable_nodes': unreadable,
-        'summary': {'gpus': len(gpus), 'fpgas': len(devices) - len(gpus),
+        'summary': {'gpus': len(gpus), 'fpgas': sum(1 for d in devices if d['kind'] == 'fpga'), 'npus': len(npus),
                     'vgpu_capable': sum(1 for d in gpus if d['vgpu_capable']),
                     'in_use': sum(1 for d in devices if d['used_by']) + sum(1 for m in mappings or [] if m['used_by'])},
     })
@@ -1710,7 +1711,9 @@ def create_lease():
     e = _set_slot(desk['cluster_id'], vm.get('node') or desk['node'], desk['vmid'], accel.LEASE_SLOT, f'mapping={mapping},pcie=1')
     if e:
         return _bad(e, 502)
-    kind = 'fpga' if m and any(x['id'].lower().startswith(('10ee:', '1172:')) for x in m['devices']) else 'gpu'
+    ids = [x['id'].lower() for x in (m or {}).get('devices') or []]
+    kind = ('fpga' if any(i.startswith(tuple(f'{v}:' for v in accel.FPGA_VENDOR_IDS)) for i in ids)
+            else 'npu' if any(i.startswith(tuple(f'{v}:' for v in accel.NPU_VENDOR_IDS)) for i in ids) else 'gpu')
     lease = store.add_lease(kind, mapping, name or (m['description'] if m else '') or mapping, desk['assigned_user'],
                             desk['cluster_id'], desk['vmid'], ends)
     log_audit(_user(), 'vlab.lease.create', f"{lease['resource_name']} ({mapping}) to qemu/{desk['vmid']} "

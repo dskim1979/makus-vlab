@@ -444,7 +444,6 @@ EXITS = {
     ('pegaprox/api/settings.py', 'check_pegaprox_update', 'http-direct'): (1, 'external'),
     ('pegaprox/api/settings.py', 'perform_pegaprox_update', 'http-direct'): (5, 'external'),
     ('pegaprox/api/settings.py', 'get_pegaprox_changelog', 'http-direct'): (1, 'external'),
-    ('pegaprox/api/settings.py', '_get_healed_sponsor', 'http-direct'): (1, 'external'),
     ('pegaprox/background/alerts.py', 'check_update_available_alert', 'http-direct'): (1, 'external'),
     ('pegaprox/background/site_recovery.py', '_fire_webhook', 'http-direct'): (1, 'external'),
     ('pegaprox/utils/webhooks.py', '_post_ntfy', 'http-direct'): (1, 'external'),
