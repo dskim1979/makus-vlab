@@ -318,6 +318,8 @@ SYNC_TABLES = (
     'vlab_pools', 'vlab_desktops', 'vlab_pool_grants', 'vlab_leases', 'vlab_sessions',
     # MOAVI Desk LABs: rooms, their terminals and weekly schedules (pegaprox/vlab/labs.py)
     'vlab_labs', 'vlab_terminals', 'vlab_lab_schedules',
+    'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
+    'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

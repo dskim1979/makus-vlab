@@ -335,6 +335,8 @@ EXITS = {
     ('pegaprox/core/xhm.py', '_run_xcpng_to_pve', 'http-direct'): (1, 'read'),
     # PBS: the probes of a route that adds one
     ('pegaprox/api/pbs.py', 'probe_pbs_fingerprint', 'socket'): (1, 'read'),
+    # MOAVI Desk: the gateway and licence-server port checks (an admin's request, no cluster)
+    ('pegaprox/api/vlab_next.py', '_tcp_probe', 'socket'): (1, 'read'),
     ('pegaprox/api/pbs.py', 'auto_attach_pbs_to_clusters', 'socket'): (1, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'socket'): (2, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'http-session'): (1, 'login'),
@@ -506,11 +508,11 @@ def test_the_inventory_counts_what_the_report_says():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
-    # 258 calls out of this process, 153 (function, kind) pairs in 139 functions; 46 of
+    # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 46 of
     # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 258 and len(EXITS) == 153
-    assert len({(f, q) for f, q, _k in EXITS}) == 139
+    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
+    assert len({(f, q) for f, q, _k in EXITS}) == 140
     assert by['guard'] == 46 and by['client'] == 85
 
 
