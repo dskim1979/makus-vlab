@@ -47,23 +47,28 @@ def _loop():
                 return_due()
                 # the pool policies' idle shutdown and session limit ride the same minute
                 from pegaprox.api.vlab import lab_tick, policy_tick
+                from pegaprox.vlab import features
                 policy_tick()
                 # and the LAB schedules: desktops ready before a session, put back after it
-                lab_tick()
+                if features.enabled('lab'):
+                    lab_tick()
                 # the clean-ups put off while a desktop was working; GPU / NPU use every few minutes
                 from pegaprox.api.vlab_work import accel_tick, deferral_tick
                 deferral_tick()
-                accel_tick()
+                if features.enabled('gpuai') or features.enabled('fpga'):
+                    accel_tick()
                 # boards whose loan ended come off their desktop; licence servers every 5 minutes
                 from pegaprox.api.vlab_next import board_tick, license_tick
                 board_tick()
-                license_tick()
+                if features.enabled('fpga'):
+                    license_tick()
                 # accounts: the notice before the last day, expiry, deletion N days later
                 from pegaprox.api.vlab_accounts import accounts_tick
                 accounts_tick()
                 # GPU jobs: ended ones read and told, past their time limit stopped, the queue run
                 from pegaprox.api.vlab_research import gpu_tick
-                gpu_tick()
+                if features.enabled('gpuai'):
+                    gpu_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         time.sleep(INTERVAL)
