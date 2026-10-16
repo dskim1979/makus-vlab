@@ -49644,6 +49644,50 @@
         ]
       }
     },
+    "/api/vlab/admin/clusters/{cluster_id}/rightsizing": {
+      "get": {
+        "operationId": "vlab.cluster_rightsizing_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
     "/api/vlab/admin/clusters/{cluster_id}/backup/storages": {
       "get": {
         "operationId": "vlab.backup_storages_get",

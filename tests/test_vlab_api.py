@@ -1324,3 +1324,26 @@ def test_notification_channels_go_to_the_core_routes(alerting):
                                              ('delete_alert_channel', ('c1',))]
     assert alice.get('/api/vlab/admin/alert-channels').status_code == 403
     assert alice.post('/api/vlab/admin/alert-channels/c1/test').status_code == 403
+
+
+def test_rightsizing_names_the_desktop_behind_each_vm(connectable, monkeypatch):
+    admin, _alice, _, _, desk, _ = connectable
+    from flask import jsonify, request
+    import pegaprox.api.insights as core_insights
+    seen = {}
+
+    def fake(cid):
+        seen['days'] = request.args.get('days')
+        return jsonify({'snapshots_in_window': 300, 'min_samples_required': 24, 'total_vms': 3,
+                        'summary': {'undersized_cpu': 1, 'oversized_mem': 1, 'idle': 0, 'ok': 1, 'no_data': 0},
+                        'recommendations': [
+                            {'vmid': str(desk['vmid']), 'name': 'x', 'flags': [{'kind': 'undersized_cpu'}, {'kind': 'oversized_mem'}]},
+                            {'vmid': '999', 'name': 'other', 'flags': [{'kind': 'idle'}]}]})
+    monkeypatch.setattr(core_insights, 'right_sizing', fake)
+    d = admin.get(f'/api/vlab/admin/clusters/{CID}/rightsizing?days=30').get_json()
+    assert seen['days'] == '30' and d['counts'] == {'grow': 1, 'reclaim': 1, 'idle': 0, 'ok': 1, 'no_data': 0}
+    first, second = d['recommendations']
+    assert first['desktop_id'] == desk['id'] and first['pool'] and first['actions'] == ['grow', 'reclaim']
+    assert second['desktop'] is None and second['actions'] == ['idle']
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/rightsizing?days=3').status_code == 400
+    assert admin.get('/api/vlab/admin/clusters/nope/rightsizing').status_code == 404

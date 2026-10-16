@@ -37,6 +37,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   PUT    /api/vlab/admin/alert-channels/<cid>         change one (a masked url/token is kept)  admin.settings
   DELETE /api/vlab/admin/alert-channels/<cid>         remove one  admin.settings
   POST   /api/vlab/admin/alert-channels/<cid>/test    send a test alert  admin.settings
+  GET    /api/vlab/admin/clusters/<cluster_id>/rightsizing  which VMs need more / can give back (core insights, ?days=7|30)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -1203,6 +1204,56 @@ def delete_alert_channel(cid):
 def test_alert_channel(cid):
     from pegaprox.api import alerts as core_alerts
     return core_alerts.test_alert_channel(cid)
+
+
+# --- right-sizing (the core's insights) ----------------------------------------------
+# The core's per-VM analysis of the metrics history (insights.right_sizing: mean / p95 CPU,
+# mean / max memory over the window) with each VM's desktop, pool and user beside it, so
+# the dashboard can say which desktop needs more and which can give some back.
+
+RIGHTSIZE_ACTION = {'undersized_cpu': 'grow', 'undersized_mem': 'grow',
+                    'oversized_cpu': 'reclaim', 'oversized_mem': 'reclaim', 'idle': 'idle'}
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/rightsizing', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def cluster_rightsizing(cluster_id):
+    from pegaprox.api import insights as core_insights
+    if cluster_id not in cluster_managers or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    try:
+        days = int(request.args.get('days', 7))
+    except (TypeError, ValueError):
+        return _bad('days must be a number')
+    if days not in (7, 30):
+        return _bad('days must be 7 or 30')
+    resp = core_insights.right_sizing(cluster_id)     # reads ?days= from this request
+    body = _core_body(resp)
+    if body is None:
+        return resp
+    pools = {p['id']: p for p in store.list_pools()}
+    out = []
+    for r in body.get('recommendations') or []:
+        try:
+            desk = store.desktop_for_vm(cluster_id, int(r.get('vmid')))
+        except (TypeError, ValueError):
+            desk = None
+        pool = pools.get(desk['pool_id']) if desk else None
+        actions = sorted({RIGHTSIZE_ACTION.get(f.get('kind'), 'other') for f in r.get('flags') or []})
+        out.append({**r, 'actions': actions,
+                    'desktop_id': desk['id'] if desk else None, 'desktop': desk['name'] if desk else None,
+                    'pool_id': pool['id'] if pool else None, 'pool': pool['name'] if pool else None,
+                    'assigned_to': (desk or {}).get('assigned_user') or None})
+    summary = body.get('summary') or {}
+    return jsonify({
+        'cluster_id': cluster_id, 'days': days,
+        'snapshots': body.get('snapshots_in_window', 0), 'min_samples': body.get('min_samples_required', 0),
+        'total_vms': body.get('total_vms', 0),
+        'counts': {'grow': summary.get('undersized_cpu', 0) + summary.get('undersized_mem', 0),
+                   'reclaim': summary.get('oversized_cpu', 0) + summary.get('oversized_mem', 0),
+                   'idle': summary.get('idle', 0), 'ok': summary.get('ok', 0), 'no_data': summary.get('no_data', 0)},
+        'recommendations': out,
+    })
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/storages', methods=['GET'])
