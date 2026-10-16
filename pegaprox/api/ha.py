@@ -1689,7 +1689,8 @@ def create_witness_code():
 WITNESS_HOST = '<witness-host>'
 INSTALLER_REL = 'packaging/witness/install.sh'
 # updates.pegaprox.com mirrors the repository, the raw files at their repo path
-INSTALLER_SOURCES = (f'{GITHUB_RAW_URL}/{INSTALLER_REL}', f'{MIRROR_RAW_URL}/{INSTALLER_REL}')
+# MOAVI Desk: the mirror is GitHub itself (pegaprox/constants.py), so it is tried once, not twice
+INSTALLER_SOURCES = tuple(dict.fromkeys((f'{GITHUB_RAW_URL}/{INSTALLER_REL}', f'{MIRROR_RAW_URL}/{INSTALLER_REL}')))
 WITNESS_IMAGE = 'ghcr.io/pegaprox/pegaprox'
 # what .github/workflows/docker-testing.yml publishes from every push to Testing
 WITNESS_TESTING_IMAGE = 'ghcr.io/pegaprox/pegaprox-testing:latest'

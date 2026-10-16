@@ -490,7 +490,7 @@ def _ko_only():
 _VLAB_KO_ONLY = _ko_only()
 _LANG_FAILURE = _re.compile(
     r"language block|in every language|per language|LANGS\b|_lang_blocks|"
-    r"\['ko'\] == \['de'|KeyError: '(?:de|en|zh|pl|fr|es|pt|it)'|\b1 == 9\b|\(1 == 9\)")
+    r"\['ko'\] == \['de'|KeyError: '(?:de|en|zh|pl|fr|es|pt|it)'|\b1 == 9\b|\(1 == 9\)|\b1 >= 9\b")
 # or the test itself is about the other languages (the German block, "in every language", ...)
 _LANG_TEST = _re.compile(r'language|german|_lang')
 

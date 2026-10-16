@@ -127,10 +127,11 @@ def test_nothing_else_restarts_the_unit():
             path = os.path.join(base, name)
             with open(path, encoding='utf-8') as fh:
                 for lineno, line in enumerate(fh, 1):
-                    if "'restart', 'pegaprox'" in line:
+                    # MOAVI Desk names the unit in settings._SERVICE_NAME
+                    if "'restart', 'pegaprox'" in line or "'restart', _SERVICE_NAME" in line:
                         hits.append((os.path.relpath(path, ROOT), lineno))
     assert len(hits) == 2 and {h[0] for h in hits} == {'pegaprox/api/settings.py'}, hits
     src = open(os.path.join(ROOT, 'pegaprox', 'api', 'settings.py'), encoding='utf-8').read()
     helper = src[src.index('def _restart_through_systemd'):]
     helper = helper[:helper.index('\n\n\n')]
-    assert helper.count("'restart', 'pegaprox'") == 2
+    assert helper.count("'restart', 'pegaprox'") + helper.count("'restart', _SERVICE_NAME") == 2

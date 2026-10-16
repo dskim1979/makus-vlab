@@ -313,6 +313,9 @@ SYNC_TABLES = (
     'suspended_ha_rules',
     # node recoveries an automatic leader left half done (5.6); made on its first write
     'ha_recovery_journal',
+    # MOAVI Desk (pegaprox/vlab/store.py): pools, desktops, grants and card loans are configuration;
+    # sessions too, so the usage reports and session time limits carry over a failover
+    'vlab_pools', 'vlab_desktops', 'vlab_pool_grants', 'vlab_leases', 'vlab_sessions',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -326,6 +329,8 @@ LOCAL_TABLES = (
     'ha_change_journal', 'ha_cv_dirty',
     # MOAVI Desk: hardware (BMC) health history this instance's metrics collector recorded
     'hw_state', 'hw_events',
+    # sFlow traffic this instance's collector rolled up per hour (background/sflow_collector.py)
+    'flows_hourly',
 )
 
 # server_settings keys that describe this host, not the deployment

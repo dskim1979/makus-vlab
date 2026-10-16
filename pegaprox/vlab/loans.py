@@ -20,9 +20,13 @@ INTERVAL = 60
 def return_due():
     """Return every loan that is due. Returns (returned, failed) counts."""
     from pegaprox.api.vlab import return_lease
+    from pegaprox.core import ha
     from pegaprox.vlab import store
     done = failed = 0
     for lease in store.due_leases(store.now()):
+        # each return changes a VM: a leader that lost its lease starts no new one (HA 5.2)
+        if not ha.confirm_step(f"vLAB loan return {lease['id']}"):
+            break
         try:
             err = return_lease(lease)
         except Exception as e:

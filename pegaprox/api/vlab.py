@@ -24,6 +24,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   GET    /api/vlab/admin/clusters/<cluster_id>/storage storage (shared ones once, with their nodes)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/accelerators  GPUs and FPGA cards per node, PCI mappings, who uses them  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/nodes/<node>/pci/<pciid>/profiles  vGPU (mdev) profiles of a card  vlab.pool.view
+  GET    /api/vlab/admin/clusters/<cluster_id>/infra   health, nodes, 5-min history, sessions, storage, alerts (?range=24h|7d|30d)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -79,6 +80,7 @@ import logging
 from flask import Blueprint, jsonify, request
 
 from pegaprox.api.helpers import acting_user, check_cluster_access
+from pegaprox.core import ha
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
@@ -955,6 +957,134 @@ def _vmid_of_volid(volid):
     return int(m.group(1)) if m else None
 
 
+# --- infrastructure dashboard -------------------------------------------------------
+# The core's own figures in one read for the dashboard: the health score, live node
+# status, the 5-minute metrics snapshots (background/metrics.py, metrics_history), the
+# storages, the firing alerts - plus the desktop sessions over the same window.
+
+INFRA_RANGES = {'24h': (1, 300), '7d': (7, 3600), '30d': (30, 4 * 3600)}
+
+
+def _core_body(resp):
+    r = resp[0] if isinstance(resp, tuple) else resp
+    if getattr(r, 'status_code', 200) != 200:
+        return None
+    try:
+        return r.get_json()
+    except Exception:
+        return None
+
+
+def _bucket(points, step, keys):
+    """Average `keys` of [{ts, ...}] inside step-second windows."""
+    out, cur, start = [], [], None
+    for pt in points:
+        b = pt['ts'] - pt['ts'] % step
+        if start is not None and b != start and cur:
+            out.append({'ts': start, **{k: round(sum(c[k] for c in cur) / len(cur), 2) for k in keys}})
+            cur = []
+        start = b
+        cur.append(pt)
+    if cur:
+        out.append({'ts': start, **{k: round(sum(c[k] for c in cur) / len(cur), 2) for k in keys}})
+    return out
+
+
+def _session_series(cluster_id, since, until, step):
+    """Open desktop sessions of this cluster's pools in each step window."""
+    pools = {p['id'] for p in store.list_pools() if p.get('cluster_id') == cluster_id}
+    rows = [r for r in store.sessions_overlapping(since.isoformat(timespec='seconds'),
+                                                  until.isoformat(timespec='seconds'))
+            if r.get('pool_id') in pools]
+    spans = [(_ts_utc(r['started_at']).timestamp(),
+              _ts_utc(r['ended_at']).timestamp() if r.get('ended_at') else until.timestamp()) for r in rows]
+    t0 = int(since.timestamp()) - int(since.timestamp()) % step
+    return [{'ts': t, 'sessions': sum(1 for a, b in spans if a < t + step and b >= t)}
+            for t in range(t0, int(until.timestamp()) + 1, step)]
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/infra', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def cluster_infra(cluster_id):
+    from datetime import datetime, timedelta, timezone
+    from pegaprox.api import alerts as core_alerts
+    from pegaprox.api import clusters as core_clusters
+    from pegaprox.api.helpers import load_metrics_window
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    rng = request.args.get('range', '24h')
+    if rng not in INFRA_RANGES:
+        return _bad('range must be one of ' + ', '.join(INFRA_RANGES))
+    days, step = INFRA_RANGES[rng]
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(days=days)
+
+    # live nodes (the core's status read; its cache when the cluster is unreachable)
+    try:
+        status = mgr.get_node_status() if mgr.is_connected else {}
+    except Exception as e:
+        logging.debug(f'[VLAB] infra node status {cluster_id}: {e}')
+        status = {}
+    status = status or getattr(mgr, '_cached_metrics', None) or {}
+    nodes = [{'name': name, 'status': n.get('status', 'unknown'),
+              'cpu_pct': n.get('cpu_percent', 0), 'mem_pct': n.get('mem_percent', 0),
+              'mem_used': n.get('mem_used', 0), 'mem_total': n.get('mem_total', 0),
+              'disk_pct': n.get('disk_percent', 0), 'uptime': n.get('uptime', 0),
+              'netin': n.get('netin', 0), 'netout': n.get('netout', 0)}
+             for name, n in sorted(status.items()) if isinstance(n, dict)]
+
+    # history from the snapshots
+    cluster_pts, node_pts = [], {}
+    try:
+        window = load_metrics_window(days) or []
+    except Exception as e:
+        logging.debug(f'[VLAB] infra history {cluster_id}: {e}')
+        window = []
+    cutoff = since.timestamp()
+    for ts, clusters in window:
+        cd = (clusters or {}).get(cluster_id)
+        if not cd or ts < cutoff:
+            continue
+        t = cd.get('totals') or {}
+        cluster_pts.append({'ts': ts,
+                            'cpu_pct': (t.get('cpu_used', 0) / t['cpu_total'] * 100) if t.get('cpu_total') else 0,
+                            'mem_pct': (t.get('mem_used', 0) / t['mem_total'] * 100) if t.get('mem_total') else 0,
+                            'vms_running': t.get('vms_running', 0) + t.get('cts_running', 0)})
+        for nn, nd in (cd.get('nodes') or {}).items():
+            node_pts.setdefault(nn, []).append({'ts': ts, 'cpu': nd.get('cpu', 0), 'mem': nd.get('mem_percent', 0)})
+
+    # storages: a shared one once, a local one per node
+    storages, seen = [], set()
+    for r in core_clusters.cluster_storage_resources(cluster_id, mgr) or []:
+        if r.get('status') != 'available' or not r.get('maxdisk'):
+            continue
+        key = r.get('storage') if r.get('shared') else f"{r.get('node')}/{r.get('storage')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        storages.append({'storage': r.get('storage'), 'node': None if r.get('shared') else r.get('node'),
+                         'type': r.get('plugintype') or '', 'used': r.get('disk') or 0, 'total': r.get('maxdisk') or 0})
+    storages.sort(key=lambda x: -(x['used'] / x['total'] if x['total'] else 0))
+
+    health = _core_body(core_clusters.get_cluster_health(cluster_id)) or {}
+    alerts = (_core_body(core_alerts.get_active_alerts(cluster_id)) or {}).get('active_alerts') or []
+
+    return jsonify({
+        'cluster_id': cluster_id, 'range': rng, 'step': step,
+        'connected': bool(mgr.is_connected),
+        'health': {'score': health.get('score'), 'band': health.get('band'),
+                   'issues': (health.get('issues') or [])[:6]},
+        'nodes': nodes,
+        'history': _bucket(cluster_pts, step, ('cpu_pct', 'mem_pct', 'vms_running')),
+        'node_history': {nn: _bucket(pts, step, ('cpu', 'mem')) for nn, pts in sorted(node_pts.items())},
+        'sessions': _session_series(cluster_id, since, until, step),
+        'storages': storages[:12],
+        'alerts': [{k: a.get(k) for k in ('id', 'severity', 'message', 'target_type', 'target_name',
+                                           'metric', 'triggered_at', 'acked_at')} for a in alerts[:20]],
+    })
+
+
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/backup/storages', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
 def backup_storages(cluster_id):
@@ -1262,6 +1392,9 @@ def policy_tick(now=None):
         if not pol or not pol['max_session_hours']:
             continue
         if now - _ts_utc(s['started_at']) >= timedelta(hours=pol['max_session_hours']):
+            # a reset-on-logout pool changes the VM: confirm the lease first (HA 5.2)
+            if not ha.confirm_step(f"vLAB session limit {s['id']}"):
+                break
             store.close_session(s['id'], 'expired', at=now.isoformat(timespec='seconds'))
             done['expired'] += 1
             log_audit('system', 'vlab.session.expired', f"session {s['id']} of {s['username']} after "
@@ -1288,6 +1421,8 @@ def policy_tick(now=None):
             if last_end.get(d['id']) and now - _ts_utc(last_end[d['id']]) < limit:
                 continue
             mgr = cluster_managers.get(d['cluster_id'])
+            if not ha.confirm_step(f"vLAB idle shutdown {d['id']}"):
+                break
             r = mgr.vm_action(vm.get('node') or d['node'], int(d['vmid']), d['vm_type'], 'shutdown') if mgr else None
             if isinstance(r, dict) and r.get('success'):
                 done['shutdown'] += 1

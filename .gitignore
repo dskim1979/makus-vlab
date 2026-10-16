@@ -45,3 +45,4 @@ images/login_bg.png
 
 # MOAVI Desk - the design document stays outside the repository (internal)
 docs/vlab-design.md
+.pytest_cache/

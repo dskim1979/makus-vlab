@@ -1210,3 +1210,46 @@ def test_backup_storages_put_pbs_first(env, monkeypatch):
         {'storage': 'pbs-lab', 'node': 'pve2', 'plugintype': 'pbs', 'shared': 1, 'content': 'backup', 'status': 'available'}])
     s = admin.get(f'/api/vlab/admin/clusters/{CID}/backup/storages').get_json()['storages']
     assert [(x['storage'], x['pbs']) for x in s] == [('pbs-lab', True), ('local', False)]
+
+
+# --- infrastructure dashboard (the core's metrics, health, storage and alerts) ------------
+
+def test_infra_brings_the_core_figures_together(env, monkeypatch):
+    _, admin, _, _, _ = env
+    import time
+    from flask import jsonify
+    import pegaprox.api.alerts as core_alerts
+    import pegaprox.api.clusters as core_clusters
+    import pegaprox.api.helpers as helpers
+    from pegaprox.globals import cluster_managers
+    mgr = cluster_managers[CID]
+    monkeypatch.setattr(type(mgr), 'is_connected', property(lambda self: True), raising=False)
+    monkeypatch.setattr(mgr, 'get_node_status', lambda: {
+        'pve1': {'status': 'online', 'cpu_percent': 41.5, 'mem_percent': 62.0, 'mem_used': 62, 'mem_total': 100,
+                 'disk_percent': 10, 'uptime': 3600, 'netin': 1, 'netout': 2}}, raising=False)
+    now = int(time.time()) - 600
+    snap = lambda cpu: {CID: {'totals': {'cpu_used': cpu, 'cpu_total': 10, 'mem_used': 5, 'mem_total': 10,
+                                         'vms_running': 3, 'cts_running': 1},
+                              'nodes': {'pve1': {'cpu': cpu * 10, 'mem_percent': 50}}}}
+    monkeypatch.setattr(helpers, 'load_metrics_window', lambda days: [(now - 300, snap(2)), (now, snap(4))])
+    monkeypatch.setattr(core_clusters, 'cluster_storage_resources', lambda cid, m: [
+        {'storage': 'ceph', 'node': 'pve1', 'shared': 1, 'plugintype': 'rbd', 'status': 'available', 'disk': 8, 'maxdisk': 10},
+        {'storage': 'ceph', 'node': 'pve2', 'shared': 1, 'plugintype': 'rbd', 'status': 'available', 'disk': 8, 'maxdisk': 10},
+        {'storage': 'local', 'node': 'pve1', 'plugintype': 'dir', 'status': 'available', 'disk': 1, 'maxdisk': 10}])
+    monkeypatch.setattr(core_clusters, 'get_cluster_health', lambda cid: jsonify({'score': 88, 'band': 'good', 'issues': ['x']}))
+    monkeypatch.setattr(core_alerts, 'get_active_alerts', lambda cid: jsonify({'active_alerts': [
+        {'id': 1, 'severity': 'warning', 'message': 'CPU high', 'target_type': 'node', 'target_name': 'pve1'}]}))
+
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/infra')
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d['range'] == '24h' and d['step'] == 300 and d['health']['score'] == 88
+    assert d['nodes'][0]['name'] == 'pve1' and d['nodes'][0]['cpu_pct'] == 41.5
+    assert [round(h['cpu_pct']) for h in d['history']] == [20, 40] and d['history'][0]['vms_running'] == 4
+    assert [p['cpu'] for p in d['node_history']['pve1']] == [20, 40]
+    assert [(s['storage'], s['node']) for s in d['storages']] == [('ceph', None), ('local', 'pve1')]
+    assert d['alerts'][0]['message'] == 'CPU high'
+    assert d['sessions'] and all(s['sessions'] == 0 for s in d['sessions'])
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/infra?range=7d').get_json()['step'] == 3600
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/infra?range=1y').status_code == 400
+    assert admin.get('/api/vlab/admin/clusters/nope/infra').status_code == 404

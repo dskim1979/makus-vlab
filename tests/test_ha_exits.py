@@ -299,6 +299,8 @@ EXITS = {
     # known good), and `sudo -n true` on a client from the guarded _ssh_connect
     ('pegaprox/core/conncheck.py', 'probe_host', 'http-session'): (1, 'read'),
     ('pegaprox/core/conncheck.py', 'probe_ssh', 'ssh-exec'): (1, 'client'),
+    # the GPU inventory's live use: `nvidia-smi` (read only) on a client from the guarded _ssh_connect
+    ('pegaprox/api/gpu.py', '_get_node_gpu_utilization', 'ssh-exec'): (1, 'client'),
     # PBS
     ('pegaprox/core/pbs.py', 'PBSManager.__init__', 'http-session'): (1, 'guard'),
     ('pegaprox/core/pbs.py', 'PBSManager._ssh_connect', 'ssh-paramiko'): (1, 'guard'),
@@ -505,12 +507,12 @@ def test_the_inventory_counts_what_the_report_says():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
-    # 257 calls out of this process, 152 (function, kind) pairs in 138 functions; 46 of
-    # them guarded at the exit and 84 execs on a client from a guarded factory. No route
+    # 258 calls out of this process, 153 (function, kind) pairs in 139 functions; 46 of
+    # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 257 and len(EXITS) == 152
-    assert len({(f, q) for f, q, _k in EXITS}) == 138
-    assert by['guard'] == 46 and by['client'] == 84
+    assert sum(n for n, _v in EXITS.values()) == 258 and len(EXITS) == 153
+    assert len({(f, q) for f, q, _k in EXITS}) == 139
+    assert by['guard'] == 46 and by['client'] == 85
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
@@ -699,6 +701,8 @@ def _starts():
 #   local    this host only (a restart of the service, syslog, the ACME loop)
 AUTOMATIONS = {
     ('pegaprox/api/clusters.py', 'update_ha_config'): (2, 'job'),
+    # MOAVI Desk: loan returns and the pool policies' idle shutdown / session limit, once a minute
+    ('pegaprox/vlab/loans.py', 'start_loan_thread'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),
@@ -943,6 +947,9 @@ CONFIRM = {'confirm_step', 'confirm_lease'}
 
 # (file, function, the calls that are steps)
 CONFIRM_SITES = [
+    # MOAVI Desk: a due loan's card comes off the VM; a session past its limit (reset pools) and an idle desktop's shutdown
+    ('pegaprox/vlab/loans.py', 'return_due', ['return_lease']),
+    ('pegaprox/api/vlab.py', 'policy_tick', ['_after_session', 'vm_action']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',
