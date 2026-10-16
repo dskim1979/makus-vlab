@@ -2328,6 +2328,10 @@ def build_make_template(cluster_id, vmid):
     vm, err = _build_vm(cluster_id, vmid)
     if err:
         return err
+    from pegaprox.api.vms import _require_vm_access
+    denied = _require_vm_access(cluster_id, vmid, 'vm.template', 'qemu')   # per-VM ACLs, as the core routes
+    if denied:
+        return denied
     if vm.get('status') != 'stopped':
         return _bad('Shut the VM down first', 409)
     if store.desktop_for_vm(cluster_id, vmid):
