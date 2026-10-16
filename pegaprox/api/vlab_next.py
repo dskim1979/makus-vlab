@@ -129,7 +129,7 @@ from pegaprox.api import vlab as core
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import catalog, envcat, nas, store
+from pegaprox.vlab import catalog, datasets, envcat, nas, store
 
 bp = Blueprint('vlab_next', __name__)
 
@@ -3808,6 +3808,17 @@ def _desk_users(cfg, pool, desk, username):
     return out
 
 
+def _desk_datasets(pool, usernames):
+    """The research datasets a desktop of the pool mounts read-only: those of the pool one of
+    its users may use (usernames None: all of the pool's, for the template). Never raises."""
+    try:
+        from pegaprox.api.vlab_data import datasets_for
+        return datasets_for(pool['id'], usernames)
+    except Exception as e:
+        logging.warning(f"[VLAB] datasets for pool {pool.get('name')}: {e}")
+        return []
+
+
 def _engine_folders(cfg, folders, keys, uid, gid):
     """create_by engine: make the missing folders on the engine host. Error text or None."""
     for key in keys:
@@ -3852,8 +3863,9 @@ def ensure_storage(desk, pool, username, mgr=None, node=None, force=False, wait=
                                'the QEMU guest agent does not answer (qemu-guest-agent installed, agent: 1 on the VM?)', '', False, '')
     first = next((folders[k] for k in ('home', 'scratch', 'project') if k in folders), '')
     users = _desk_users(cfg, pool, desk, username)
+    sets = _desk_datasets(pool, set(nas.users_on(desk['id']) + ([username] if username else [])))
     if os_kind == 'windows':
-        script = nas.windows_script(cfg, users)
+        script = nas.windows_script(cfg, users, extra=datasets.windows_links(sets) if sets else ())
         command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]
         path = (nas.paths(cfg, folders)[next(iter(folders))]['windows'] or '') if folders else ''
         secret, measure, clean = '', False, 0
@@ -3861,7 +3873,8 @@ def ensure_storage(desk, pool, username, mgr=None, node=None, force=False, wait=
         measure = bool(username) and (force or _age((prev or {}).get('usage_at')) > USAGE_EVERY)
         days = cfg['folders']['scratch'].get('retention_days') or 0
         clean = days if username and 'scratch' in folders and _age((prev or {}).get('cleaned_at')) > CLEAN_EVERY else 0
-        script = nas.linux_script(cfg, name, folders, users=users, measure=measure, cleanup_days=clean)
+        script = nas.linux_script(cfg, name, folders, users=users, measure=measure, cleanup_days=clean,
+                                  datasets_line=datasets.autofs_entry(sets))
         command = ['/bin/sh', '-c', script]
         path = f"{cfg['linux_path']}/{first}" if first else cfg['linux_path']
         secret = nas.password(pool['id']) if cfg['kind'] == 'smb' and cfg['smb_auth'] == 'service' else ''
@@ -3947,7 +3960,7 @@ def _pool_storage_out(pool_id):
     pool = store.get_pool(pool_id)
     files = None
     if storage_config(pool_id) and not (cfg['kind'] == 'smb' and cfg['smb_auth'] == 'service'):
-        master, amap = nas.autofs_files(cfg)
+        master, amap = nas.autofs_files(cfg, datasets.autofs_entry(_desk_datasets(pool or {'id': pool_id}, None)))
         files = {nas.AUTOFS_MASTER: master, nas.AUTOFS_MAP: amap}
     return {'storage': cfg, 'status': status, 'results': rows[:50], 'autofs': files,
             'data_on_nas_only': bool(pool and pool.get('type') in DATA_ON_NAS_ONLY)}

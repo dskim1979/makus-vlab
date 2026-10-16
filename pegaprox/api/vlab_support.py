@@ -7,7 +7,8 @@
 the period is at most MAX_DAYS long and defaults to the last 24 hours. Options (0/1):
   logs=1        engine and per-cluster log lines in the period
   audit=1       the audit log in the period
-  sessions=1    vLAB sessions, card loans, build jobs, alerts in the period, shared storage checks (last per desktop and user)
+  sessions=1    vLAB sessions, card loans, build jobs, alerts in the period, shared storage checks (last per desktop and user),
+                research data transfers that failed in the period
   tasks=1       Proxmox tasks that started in the period
   config=1      pools, desktops, gateways, licence servers ... as they are now
   mask_ips=1    192.168.10.21 -> 192.x.x.x everywhere in the bundle
@@ -144,6 +145,7 @@ def _activity(start, end):
         'build_jobs.json': [dict(j, output=(j.get('output') or '')[-4000:]) for j in
                             _rows('SELECT * FROM vlab_build_jobs WHERE created_at <= ? AND (finished_at IS NULL OR finished_at >= ?) ORDER BY created_at', (b, a))],
         'storage_mounts.json': _storage_rows(),
+        'data_transfer_failures.json': _data_failures(a, b),
         'alerts.json': _rows('SELECT * FROM active_alerts WHERE triggered_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?) ORDER BY triggered_at', (_local(end), _local(start))),
     }
 
@@ -158,6 +160,16 @@ def _storage_rows():
     return sorted(rows, key=lambda r: (r['ok'] is True and not r['warnings'], r['at']))
 
 
+def _data_failures(a, b):
+    """연구 데이터: uploads and downloads that failed in the period (path, size, why)."""
+    try:
+        from pegaprox.vlab import datasets
+        datasets.db()
+    except Exception as e:
+        return [{'error': str(e)}]
+    return _rows('SELECT * FROM vlab_data_transfers WHERE ok = 0 AND at >= ? AND at <= ? ORDER BY at DESC', (a, b))
+
+
 def _audit(start, end):
     # the core audit log keeps naive local ISO text
     return _rows('SELECT timestamp, user, action, details, ip_address, cluster, severity FROM audit_log '
@@ -167,6 +179,14 @@ def _audit(start, end):
 def _pool_storage():
     from pegaprox.vlab import nas
     return {p['id']: nas.get(p['id']) for p in store.list_pools()}
+
+
+def _datasets_config():
+    try:
+        from pegaprox.vlab import datasets
+        return {'datasets': datasets.list_datasets(), 'policies': {p['id']: datasets.get_policy(p['id']) for p in store.list_pools()}}
+    except Exception as e:
+        return {'error': str(e)}
 
 
 def _config():
@@ -185,6 +205,8 @@ def _config():
         'departments.json': catalog.list_departments(),
         # 공유 저장소 per pool: has_password only, never the password
         'pool_storage.json': _pool_storage(),
+        # 연구 데이터: the dataset catalog and the export rules per pool
+        'datasets.json': _datasets_config(),
     }
     try:
         from pegaprox.api.helpers import load_server_settings

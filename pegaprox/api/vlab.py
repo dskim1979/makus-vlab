@@ -62,6 +62,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   DELETE /api/vlab/admin/lab-schedules/<id>           remove it                                 vlab.pool.manage
   POST   /api/vlab/admin/lab-schedules/<id>/run       {phase: prepare|finish} now               vlab.pool.manage
   (LAB bookings - portal 예약, LAB > 예약 - are in pegaprox/api/vlab_reserve.py; lab_tick runs them too)
+  (research data - datasets, file transfer, export control - is in pegaprox/api/vlab_data.py)
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -2244,8 +2245,9 @@ def delete_pool(pool_id):
     if store.list_desktops(pool_id):
         return _bad('The pool still has desktops - take them out first', 409)
     store.delete_pool(pool_id)
-    from pegaprox.vlab import nas
+    from pegaprox.vlab import datasets, nas
     nas.forget_pool(pool_id)
+    datasets.forget_pool(pool_id)
     log_audit(_user(), 'vlab.pool.delete', f"pool '{pool['name']}'", get_client_ip())
     return jsonify({'success': True})
 

@@ -332,6 +332,8 @@ SYNC_TABLES = (
     'vlab_pool_storage', 'vlab_storage_mounts', 'vlab_storage_ids',
     # LAB terminal enrolment: codes and the agents of the PCs (pegaprox/vlab/enroll.py)
     'vlab_enroll_codes', 'vlab_terminal_enrollments',
+    # research data (pegaprox/vlab/datasets.py): the catalog, export rules and requests, the transfer log
+    'vlab_datasets', 'vlab_data_policies', 'vlab_data_requests', 'vlab_data_transfers',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -349,6 +351,8 @@ LOCAL_TABLES = (
     'flows_hourly',
     # MOAVI Desk licence seats: what this instance's license_tick read (pegaprox/vlab/license_usage.py)
     'vlab_license_samples', 'vlab_license_checkouts', 'vlab_license_denials',
+    # research data uploads in progress (their part files are on this host or its mount) and file hashes
+    'vlab_data_uploads', 'vlab_data_hashes',
 )
 
 # server_settings keys that describe this host, not the deployment

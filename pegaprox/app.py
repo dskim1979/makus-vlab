@@ -164,7 +164,9 @@ def create_app():
 
         if request.method in ['POST', 'PUT', 'PATCH'] and request.content_length:
             content_type = request.content_type or ''
-            allowed_types = ['application/json', 'multipart/form-data', 'application/x-www-form-urlencoded']
+            # application/offset+octet-stream: a part of a resumable upload (MOAVI Desk 연구 데이터, api/vlab_data.py)
+            allowed_types = ['application/json', 'multipart/form-data', 'application/x-www-form-urlencoded',
+                             'application/offset+octet-stream']
             if not any(t in content_type for t in allowed_types):
                 if request.content_length > 0:
                     return jsonify({'error': 'Invalid Content-Type'}), 415

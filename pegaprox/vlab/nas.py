@@ -392,8 +392,10 @@ AUTOFS_MAP = '/etc/auto.moavi'
 PROFILE_SCRIPT = '/etc/profile.d/moavi-nas.sh'
 
 
-def autofs_files(cfg):
-    """(auto.master.d line, map) for Linux - the same files belong in the template image."""
+def autofs_files(cfg, datasets_line=None):
+    """(auto.master.d line, map) for Linux - the same files belong in the template image.
+    datasets_line: the read-only `datasets` multi-mount of the research datasets
+    (pegaprox/vlab/datasets.py autofs_entry); a key of its own wins over the wildcard."""
     opts = cfg['options']
     if cfg['kind'] == 'nfs':
         ver = {'3': 'vers=3', '4.1': 'vers=4.1', 'krb5': 'vers=4.1,sec=krb5p'}[cfg['nfs_version']]
@@ -404,7 +406,7 @@ def autofs_files(cfg):
         line = f"* {o} ://{cfg['server']}/{cfg['share']}/&"
     master = f"{cfg['linux_path']} {AUTOFS_MAP} --timeout=600\n"
     head = '# MOAVI Desk shared storage - written by the engine; put the same in the template image\n'
-    return head + master, head + line + '\n'
+    return head + master, head + (datasets_line + '\n' if datasets_line else '') + line + '\n'
 
 
 def profile_script(cfg, users):
@@ -426,7 +428,7 @@ def _write_if_changed(path, text, mode='644'):
             f'printf "%s\\n" "$W" > {_q(path)}; chmod {mode} {_q(path)}; changed=1; fi')
 
 
-def linux_script(cfg, user, folders, users=None, measure=False, cleanup_days=0):
+def linux_script(cfg, user, folders, users=None, measure=False, cleanup_days=0, datasets_line=None):
     """sh for the guest agent (as root). user None: the share alone. Prints key=value lines
     (changed, uid, gid, local, missing, usage) and exits with CODES. Never makes a user's
     folder as root: create_by user goes through runuser, create_by engine reports `missing`."""
@@ -448,7 +450,7 @@ def linux_script(cfg, user, folders, users=None, measure=False, cleanup_days=0):
                       'umount "$R"', 'echo changed=$changed']
             return '\n'.join(lines) + '\n'
     else:
-        master, amap = autofs_files(cfg)
+        master, amap = autofs_files(cfg, datasets_line)
         lines += [
             'if command -v automount >/dev/null 2>&1; then',
             '  ' + _write_if_changed(AUTOFS_MASTER, master.rstrip('\n')),
@@ -563,9 +565,10 @@ def windows_logon_script(cfg, users):
     return '\r\n'.join(out) + '\r\n'
 
 
-def windows_script(cfg, users):
+def windows_script(cfg, users, extra=()):
     """PowerShell for the guest agent (as SYSTEM): writes the sign-in script when it changed.
-    The drives themselves are mapped in the user's session, never here."""
+    The drives themselves are mapped in the user's session, never here. extra: more lines
+    run as SYSTEM before the answer (the dataset links, datasets.windows_links)."""
     if cfg['kind'] != 'smb':
         return 'Write-Error "NFS is not set up on Windows desktops - use SMB"; exit 15'
     body = base64.b64encode(windows_logon_script(cfg, users).encode('utf-8')).decode('ascii')
@@ -575,7 +578,7 @@ def windows_script(cfg, users):
         "$path = '" + LOGON_SCRIPT.replace("'", "''") + "'",
         '$have = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { $null }',
         'if ($have -ne $want) { [IO.File]::WriteAllText($path, $want, (New-Object Text.UTF8Encoding $false)); $changed = 1 }',
-        '"changed=$changed"', 'exit 0']) + '\n'
+        *extra, '"changed=$changed"', 'exit 0']) + '\n'
 
 
 # --- create_by engine: folders made on the engine host -------------------------------------

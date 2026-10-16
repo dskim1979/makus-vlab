@@ -192,6 +192,7 @@ PERMISSIONS = {
     'vlab.lab.manage': 'Manage vLAB labs, terminals and class schedules',
     'vlab.accel.manage': 'Manage vLAB accelerator cards, boards and loans',
     'vlab.report.view': 'View vLAB session logs and usage reports',
+    'vlab.data.manage': 'Manage research datasets, transfer and export rules, and approve data exports',
 }
 
 # MK Sep 2026 (#818) - permissions whose scope is wider than their name suggests.
