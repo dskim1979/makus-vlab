@@ -88,6 +88,19 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/desktops/<id>/task              ?upid= how its task is going         vlab.pool.view
   POST   /api/vlab/admin/desktops/<id>/template          shut down VM -> template, out of the pool  vlab.pool.manage
   POST   /api/vlab/admin/desktops/<id>/console           noVNC for support, audited           vlab.pool.manage
+
+  운영 기본 (작업 진행 · 노드 유지보수 · Proxmox HA, the block at the end):
+  GET    /api/vlab/tasks                                 ?cluster=&limit= running and recent Proxmox tasks: all of them
+                                                         with vlab.pool.view, else the caller's own   signed in
+  GET    /api/vlab/tasks/log                             ?cluster=&upid= its state and log, same scope  signed in
+  GET    /api/vlab/admin/clusters/<id>/nodes/<node>/maintenance          its maintenance  vlab.pool.view + node.view
+  GET    .../nodes/<node>/maintenance-preview            desktops and guests on it, room elsewhere, plan  + node.maintenance
+  PUT    .../nodes/<node>/maintenance                    {enable, skip_evacuation?, migrate_templates?, relax_anti_affinity?}  vlab.pool.manage + node.maintenance
+  POST   .../nodes/<node>/action                         {action: reboot|shutdown, confirm: <node>}  vlab.pool.manage + node.reboot
+  GET    .../nodes/<node>/syslog, /sensors, /tasks       the node's log, sensors, task history   vlab.pool.view + node.view
+  GET    /api/vlab/admin/clusters/<id>/ha                Proxmox HA resources, groups, quorum   vlab.pool.view + ha.view
+  POST   .../ha/resources {vmid, state?, group?, ...}, DELETE .../ha/resources/<vmid>   vlab.pool.manage + ha.config
+  POST   .../ha/groups {group, nodes, ...}, DELETE .../ha/groups/<group>               vlab.pool.manage + ha.config
 """
 
 import base64
@@ -3111,3 +3124,465 @@ def desktop_admin_console(desktop_id):
               f"vLAB: administrator console to desktop '{desk['name']}' ({vm_type}/{vmid})"
               + (f", user {desk['assigned_user']}" if desk['assigned_user'] else ''), get_client_ip())
     return jsonify({'type': 'vnc', 'ws_path': ws_path, 'password': ticket, 'clipboard': 'both'})
+
+
+# --- 운영 기본: 작업 진행 · 노드 유지보수 · Proxmox HA -------------------------------------
+#
+# The long Proxmox tasks (clones, golden deploys and rollouts, migrations, backups), the
+# nodes' maintenance and the guests Proxmox HA restarts were core routes only. The console
+# speaks /api/vlab/* (its README, 구조), so these wrap them: the task list and logs are read
+# here, scoped to the caller (an administrator with vlab.pool.view sees every cluster they
+# reach - and only their VMs where the core confines them; anyone else only the tasks of their
+# own desktops and the ones they started), and the node and HA changes are handed to the core
+# routes, which keep their own permissions, their unconfined-caller rule and their audit.
+# Every one of these is a request an administrator makes and waits for; the evacuation thread
+# of a maintenance is the core's, with its own steps. Nothing here runs in the background, so
+# nothing asks ha.confirm_step.
+#
+# MOAVI Desk's own server pair (활성 · 대기) is not wrapped: on a standby every write but the
+# HA routes is handed on to the active (app.py refuse_writes_on_standby lets /api/ha/ through),
+# and a promotion handed on would land on the wrong instance. The console calls /api/ha/*
+# there, as it calls /api/auth/*.
+
+_TASKS_PROGRESS = 8          # running tasks whose progress is read from their log per call
+
+
+def _sees_all_tasks():
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import has_permission
+    return has_permission(build_authz_user(_user(), request.session), 'vlab.pool.view')
+
+
+def _task_vmid(t, parts):
+    for v in (t.get('id'), parts[6] if len(parts) > 6 else None):
+        if str(v or '').isdigit():
+            return int(v)
+    return None
+
+
+def _task_row(cid, cname, t, desks):
+    """A Proxmox task as the console lists it. status is the exit text once it ended."""
+    upid = str(t.get('upid') or '')
+    parts = upid.split(':')
+    vmid = _task_vmid(t, parts)
+    status = str(t.get('status') or '')
+    running = not t.get('endtime') and status in ('', 'running')
+    d = desks.get((cid, vmid)) if vmid is not None else None
+    return {
+        'cluster_id': cid, 'cluster': cname, 'node': str(t.get('node') or (parts[1] if len(parts) > 1 else '')),
+        'upid': upid, 'type': str(t.get('type') or (parts[5] if len(parts) > 5 else '')), 'vmid': vmid,
+        'running': running, 'ok': (not running) and (status == 'OK' or status.startswith('WARNINGS')),
+        'status': '' if running else status[:300],
+        'starttime': core._num(t.get('starttime')) or None, 'endtime': core._num(t.get('endtime')) or None,
+        'user': str(t.get('pegaprox_user') or ''),
+        'desktop': {'id': d['id'], 'name': d['name'], 'pool_id': d['pool_id']} if d else None,
+        'percent': None,
+    }
+
+
+def _task_percent(mgr, node, upid):
+    log = mgr.get_task_log(node, upid, 500)
+    for ln in reversed(log.splitlines() if isinstance(log, str) else []):
+        m = re.search(r'(\d{1,3}(?:\.\d+)?)\s*%', ln)
+        if m:
+            return min(100.0, float(m.group(1)))
+    return None
+
+
+def _task_clusters(only=None):
+    for cid, mgr in list(cluster_managers.items()):
+        if only and cid != only:
+            continue
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox' or not getattr(mgr, 'is_connected', False):
+            continue
+        if core._can_reach(cid):
+            yield cid, mgr
+
+
+@bp.route('/api/vlab/tasks', methods=['GET'])
+@require_auth()
+def vlab_tasks():
+    """The long tasks of the clusters, running ones first, then the latest that ended:
+    {scope: all|mine, running, tasks}. ?cluster= one cluster, ?limit= (1..500, 100)."""
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    try:
+        limit = max(1, min(500, int(request.args.get('limit') or 100)))
+    except ValueError:
+        return _bad('limit: a number')
+    everything = _sees_all_tasks()
+    me = _user()
+    desks = {(d['cluster_id'], int(d['vmid'])): d for d in store.list_desktops()}
+    mine = {(d['cluster_id'], int(d['vmid'])) for d in store.desktops_of_user(me)}
+    authz = build_authz_user(me, request.session) if everything else None
+    rows = []
+    for cid, mgr in _task_clusters(request.args.get('cluster') or None):
+        scoped = everything and caller_is_scoped(authz, cid)
+        cname = core._cluster_name(cid, mgr)
+        for t in mgr.get_tasks(limit=limit) or []:
+            if not isinstance(t, dict) or not str(t.get('upid') or '').startswith('UPID:'):
+                continue
+            row = _task_row(cid, cname, t, desks)
+            if everything:
+                if scoped and (row['vmid'] is None or not user_can_access_vm(authz, cid, row['vmid'], 'vm.view')):
+                    continue
+            elif (cid, row['vmid']) not in mine and row['user'] != me:
+                continue
+            rows.append((row, mgr))
+    rows.sort(key=lambda x: (not x[0]['running'], -(x[0]['starttime'] or 0)))
+    rows = rows[:limit]
+    for row, mgr in [x for x in rows if x[0]['running']][:_TASKS_PROGRESS]:
+        try:
+            row['percent'] = _task_percent(mgr, row['node'], row['upid'])
+        except Exception as e:
+            logging.debug(f"[VLAB] progress of {row['upid']}: {e}")
+    out = [r for r, _ in rows]
+    return jsonify({'scope': 'all' if everything else 'mine', 'running': sum(1 for r in out if r['running']),
+                    'tasks': out})
+
+
+@bp.route('/api/vlab/tasks/log', methods=['GET'])
+@require_auth()
+def vlab_task_log():
+    """?cluster=&upid= - how the task is, and its log (the last 1000 lines)."""
+    from pegaprox.api.helpers import caller_is_scoped, get_task_user
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    cid, upid = request.args.get('cluster') or '', request.args.get('upid') or ''
+    m = _UPID.match(upid)
+    if not m:
+        return _bad('upid: a Proxmox task id')
+    node = m.group(1)
+    mgr = dict(_task_clusters(cid)).get(cid) if cid else None
+    if not mgr:
+        return _bad('Cluster not found', 404)
+    parts = upid.split(':')
+    vmid = _task_vmid({}, parts)
+    me = _user()
+    if _sees_all_tasks():
+        authz = build_authz_user(me, request.session)
+        if caller_is_scoped(authz, cid) and (vmid is None or not user_can_access_vm(authz, cid, vmid, 'vm.view')):
+            return _bad('Task not found', 404)
+    else:
+        mine = {(d['cluster_id'], int(d['vmid'])) for d in store.desktops_of_user(me)}
+        if (cid, vmid) not in mine and get_task_user(upid) != me:
+            return _bad('Task not found', 404)
+    st = mgr.get_task_status(node, upid)
+    if not isinstance(st, dict):
+        return _bad('Task not found', 404)
+    running = st.get('status') == 'running'
+    log = mgr.get_task_log(node, upid, 1000)
+    lines = log.splitlines() if isinstance(log, str) else []
+    return jsonify({'upid': upid, 'node': node, 'type': parts[5] if len(parts) > 5 else '', 'running': running,
+                    'ok': (not running) and str(st.get('exitstatus') or '') == 'OK',
+                    'status': '' if running else str(st.get('exitstatus') or '')[:300], 'lines': lines[-1000:]})
+
+
+# nodes: maintenance, restart and shut down, the log, sensors and tasks of one node
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/maintenance', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.view'])
+def node_maintenance_status(cluster_id, node):
+    """How the node's maintenance goes ({maintenance_mode: false} when it is in none)."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    return core_vms.get_maintenance_status(cluster_id, node)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/maintenance-preview', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.maintenance'])
+def node_maintenance_preview(cluster_id, node):
+    """Before maintenance: the pool desktops on the node (who is on them), its other guests,
+    whether the other nodes have room for the running ones (the core's capacity preview) and
+    what its templates and anti-affinity rules would do (the core's evacuation plan)."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    live = core._vm_states(cluster_id)
+    pools = {p['id']: p for p in store.list_pools()}
+    busy = store.open_session_desktops()
+    desks, desk_vmids = [], set()
+    for d in store.list_desktops():
+        if d['cluster_id'] != cluster_id:
+            continue
+        vm = live.get(int(d['vmid'])) or {}
+        if (vm.get('node') or d['node']) != node:
+            continue
+        desk_vmids.add(int(d['vmid']))
+        desks.append({'id': d['id'], 'name': d['name'], 'vmid': int(d['vmid']), 'pool_id': d['pool_id'],
+                      'pool': (pools.get(d['pool_id']) or {}).get('name', ''), 'status': vm.get('status') or 'unknown',
+                      'assigned_user': d.get('assigned_user') or '', 'in_use': d['id'] in busy})
+    guests = [{'vmid': int(v['vmid']), 'name': v.get('name') or '', 'type': v.get('type'), 'status': v.get('status') or ''}
+              for v in live.values() if v.get('node') == node and v.get('type') in ('qemu', 'lxc')
+              and not v.get('template') and str(v.get('vmid', '')).isdigit() and int(v['vmid']) not in desk_vmids]
+    cap = core._core_body(core_vms.maintenance_capacity_preview_api(cluster_id, node))
+    plan = core._core_body(core_vms.maintenance_evacuation_plan(cluster_id, node))
+    summary = None
+    if isinstance(plan, dict) and plan.get('supported'):
+        summary = {'templates': len(plan.get('templates') or []),
+                   'blocking_rules': [r['rule'] for r in plan.get('negative_rules') or [] if r.get('blocks')],
+                   'online_nodes': plan.get('online_nodes')}
+    return jsonify({'node': node, 'desktops': desks, 'guests': sorted(guests, key=lambda g: g['vmid']),
+                    'capacity': cap if isinstance(cap, dict) else None, 'plan': summary})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/maintenance', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage', 'node.maintenance'])
+def node_maintenance_set(cluster_id, node):
+    """{enable, skip_evacuation?, migrate_templates?, relax_anti_affinity?} - the core moves the
+    running guests off (in its own thread) and answers with its maintenance task."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    data = _body()
+    if set(data) - {'enable', 'skip_evacuation', 'migrate_templates', 'relax_anti_affinity'}:
+        return _bad('Unknown field')
+    if any(not isinstance(v, bool) for v in data.values()) or 'enable' not in data:
+        return _bad('enable, skip_evacuation, migrate_templates, relax_anti_affinity: true or false')
+    return core_vms.set_maintenance_mode(cluster_id, node)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/action', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'node.reboot'])
+def node_power(cluster_id, node):
+    """{action: reboot|shutdown, confirm: <node name>} - only a node in maintenance whose
+    guests have moved off (the core refuses anything else)."""
+    from pegaprox.api import vms as core_vms
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    data = _body()
+    action = data.get('action')
+    if action not in ('reboot', 'shutdown'):
+        return _bad('action: reboot or shutdown')
+    if data.get('confirm') != node:
+        return _bad("confirm: type the node's name")
+    return core_vms.node_action_api(cluster_id, node, action)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/syslog', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.view'])
+def node_syslog(cluster_id, node):
+    """The node's system log, newest first (?limit= 1..5000, 500)."""
+    from pegaprox.api import nodes as core_nodes
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    body = core._core_body(core_nodes.get_node_syslog_api(cluster_id, node))
+    return jsonify({'lines': [str(x) for x in body] if isinstance(body, list) else []})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/sensors', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.view'])
+def node_sensors(cluster_id, node):
+    """Temperatures, fans and voltages over SSH: {sensors, error} (error says why there are none)."""
+    from pegaprox.api import nodes as core_nodes
+    _, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    resp = core_nodes.get_node_sensors_api(cluster_id, node)
+    r = resp[0] if isinstance(resp, tuple) else resp
+    body = r.get_json(silent=True) if hasattr(r, 'get_json') else None
+    if not isinstance(body, dict):
+        return _bad('Could not read the sensors', 502)
+    if body.get('error'):
+        return jsonify({'sensors': [], 'error': str(body['error'])[:300]})
+    rows = [{k: s.get(k) for k in ('chip', 'label', 'kind', 'value', 'max', 'crit', 'alarm')}
+            for s in body.get('sensors') or [] if isinstance(s, dict)]
+    return jsonify({'sensors': rows, 'error': None})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/tasks', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'node.view'])
+def node_tasks(cluster_id, node):
+    """The node's task history (?errors=true failed ones only, ?limit= 1..1000, 50)."""
+    from pegaprox.api import nodes as core_nodes
+    mgr, err = _build_target(cluster_id, node)
+    if err:
+        return err
+    body = core._core_body(core_nodes.get_node_tasks_api(cluster_id, node))
+    desks = {(d['cluster_id'], int(d['vmid'])): d for d in store.list_desktops()}
+    cname = core._cluster_name(cluster_id, mgr)
+    rows = [_task_row(cluster_id, cname, dict(t, node=t.get('node') or node), desks)
+            for t in body or [] if isinstance(t, dict) and str(t.get('upid') or '').startswith('UPID:')]
+    return jsonify({'tasks': rows})
+
+
+# Proxmox HA: the guests the cluster restarts elsewhere when their node fails
+
+_HA_GROUP_RE = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,39}')
+_HA_NODES_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,62}(:\d{1,4})?(,[A-Za-z0-9][A-Za-z0-9.-]{0,62}(:\d{1,4})?){0,63}')
+_HA_SIDS_RE = re.compile(r'(vm|ct):\d{3,9}(,(vm|ct):\d{3,9}){0,255}')
+_HA_STATES = ('started', 'stopped', 'ignored', 'disabled')
+
+
+def _ha_current(mgr):
+    """{sid: {node, state}}, quorate and the master node, from /cluster/ha/status/current."""
+    out, quorate, master = {}, None, ''
+    try:
+        resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/ha/status/current")
+        rows = resp.json().get('data', []) if resp is not None and resp.status_code == 200 else []
+    except Exception as e:
+        logging.debug(f'[VLAB] HA status: {e}')
+        rows = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        if r.get('type') == 'service' and r.get('sid'):
+            out[str(r['sid'])] = {'node': str(r.get('node') or ''), 'state': str(r.get('state') or r.get('crm_state') or '')}
+        elif r.get('type') == 'quorum':
+            quorate = str(r.get('status') or '').upper() == 'OK' or bool(r.get('quorate'))
+        elif r.get('type') == 'master':
+            master = str(r.get('node') or '')
+    return out, quorate, master
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/ha', methods=['GET'])
+@require_auth(perms=['vlab.pool.view', 'ha.view'])
+def cluster_ha(cluster_id):
+    """The cluster's HA resources (where each one runs and how), its groups (node-affinity
+    rules on PVE 9.1+) and whether the HA manager has quorum."""
+    from pegaprox.api import clusters as core_clusters
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    res = core._core_body(core_clusters.get_proxmox_ha_resources(cluster_id))
+    groups = core._core_body(core_clusters.get_proxmox_ha_groups(cluster_id))
+    current, quorate, master = _ha_current(mgr)
+    live = core._vm_states(cluster_id)
+    desks = {(d['cluster_id'], int(d['vmid'])): d for d in store.list_desktops()}
+    rows = []
+    for r in res if isinstance(res, list) else []:
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get('sid') or '')
+        kind, _, num = sid.partition(':')
+        if kind not in ('vm', 'ct') or not num.isdigit():
+            continue
+        vm = live.get(int(num)) or {}
+        cur = current.get(sid) or {}
+        d = desks.get((cluster_id, int(num)))
+        rows.append({'sid': sid, 'vmid': int(num), 'type': kind, 'name': vm.get('name') or '',
+                     'node': cur.get('node') or vm.get('node') or '', 'state': str(r.get('state') or 'started'),
+                     'status': cur.get('state') or '', 'group': str(r.get('group') or ''),
+                     'max_restart': r.get('max_restart', 1), 'max_relocate': r.get('max_relocate', 1),
+                     'comment': str(r.get('comment') or ''),
+                     'desktop': {'id': d['id'], 'name': d['name'], 'pool_id': d['pool_id']} if d else None})
+    out_groups = [{'group': str(g.get('group') or ''), 'nodes': str(g.get('nodes') or ''),
+                   'restricted': bool(g.get('restricted')), 'nofailback': bool(g.get('nofailback')),
+                   'comment': str(g.get('comment') or ''), 'rule': bool(g.get('_pve_rule_id')),
+                   'resources': str(g.get('_pve_rule_resources') or '')}
+                  for g in (groups if isinstance(groups, list) else []) if isinstance(g, dict)]
+    return jsonify({'resources': sorted(rows, key=lambda x: x['vmid']), 'groups': out_groups,
+                    'quorate': quorate, 'master': master})
+
+
+def _ha_guest(cluster_id, vmid):
+    vm = core._vm_states(cluster_id).get(int(vmid))
+    if not vm or vm.get('type') not in ('qemu', 'lxc') or vm.get('template'):
+        return None
+    return 'vm' if vm['type'] == 'qemu' else 'ct'
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/ha/resources', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'ha.config'])
+def cluster_ha_add(cluster_id):
+    """{vmid, state?: started|stopped|ignored|disabled, group?, max_restart?, max_relocate?,
+    comment?} - the guest goes under Proxmox HA."""
+    from pegaprox.api import clusters as core_clusters
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    data = _body()
+    if set(data) - {'vmid', 'state', 'group', 'max_restart', 'max_relocate', 'comment'}:
+        return _bad('Unknown field')
+    try:
+        vmid = _int(data, 'vmid', 100, 999999999)
+        restarts = _int(data, 'max_restart', 0, 10, 1)
+        relocates = _int(data, 'max_relocate', 0, 10, 1)
+        comment = _text(data, 'comment', 200)
+    except ValueError as e:
+        return _bad(str(e))
+    state = data.get('state') or 'started'
+    if state not in _HA_STATES:
+        return _bad(f"state: one of {', '.join(_HA_STATES)}")
+    group = data.get('group') or None
+    if group is not None and not (isinstance(group, str) and _HA_GROUP_RE.fullmatch(group)):
+        return _bad('group: letters, digits, "-" and "_"')
+    kind = _ha_guest(cluster_id, vmid)
+    if not kind:
+        return _bad('No such VM or container on the cluster', 404)
+    if not core_clusters._ha_sid_authorized(cluster_id, f'{kind}:{vmid}'):
+        return _bad('Access denied to this VM', 403)
+    failed = _failed(mgr.add_vm_to_proxmox_ha(vmid, kind, group, restarts, relocates, state, comment), 'Adding to HA')
+    if failed:
+        return failed
+    log_audit(_user(), 'ha.vm_added', f"{kind.upper()} {vmid} added to HA" + (f" (group: {group})" if group else ''),
+              cluster=core._cluster_name(cluster_id, mgr))
+    return jsonify({'success': True, 'sid': f'{kind}:{vmid}'}), 201
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/ha/resources/<int:vmid>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage', 'ha.config'])
+def cluster_ha_remove(cluster_id, vmid):
+    """The guest leaves Proxmox HA (it keeps running where it is)."""
+    from pegaprox.api import clusters as core_clusters
+    mgr, err = _build_target(cluster_id)
+    if err:
+        return err
+    kind = _ha_guest(cluster_id, vmid)
+    if not kind:
+        return _bad('No such VM or container on the cluster', 404)
+    if not core_clusters._ha_sid_authorized(cluster_id, f'{kind}:{vmid}'):
+        return _bad('Access denied to this VM', 403)
+    failed = _failed(mgr.remove_vm_from_proxmox_ha(vmid, kind), 'Removing from HA')
+    if failed:
+        return failed
+    log_audit(_user(), 'ha.vm_removed', f"{kind.upper()} {vmid} removed from HA", cluster=core._cluster_name(cluster_id, mgr))
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/ha/groups', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'ha.config'])
+def cluster_ha_group_add(cluster_id):
+    """{group, nodes: 'pve1:2,pve2', restricted?, nofailback?, comment?, resources?: 'vm:100,...'}
+    - an HA group (a node-affinity rule on PVE 9.1+, which wants its guests named)."""
+    from pegaprox.api import clusters as core_clusters
+    _, err = _build_target(cluster_id)
+    if err:
+        return err
+    data = _body()
+    if set(data) - {'group', 'nodes', 'restricted', 'nofailback', 'comment', 'resources'}:
+        return _bad('Unknown field')
+    if not isinstance(data.get('group'), str) or not _HA_GROUP_RE.fullmatch(data['group']):
+        return _bad('group: letters, digits, "-" and "_", starting with a letter')
+    if not isinstance(data.get('nodes'), str) or not _HA_NODES_RE.fullmatch(data['nodes']):
+        return _bad('nodes: node names separated by commas, each with an optional :priority')
+    res = data.get('resources') or ''
+    if res and not (isinstance(res, str) and _HA_SIDS_RE.fullmatch(res)):
+        return _bad('resources: vm:<vmid> or ct:<vmid>, separated by commas')
+    if any(k in data and not isinstance(data[k], bool) for k in ('restricted', 'nofailback')):
+        return _bad('restricted, nofailback: true or false')
+    try:
+        _text(data, 'comment', 200)
+    except ValueError as e:
+        return _bad(str(e))
+    return core_clusters.create_proxmox_ha_group(cluster_id)
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/ha/groups/<group>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage', 'ha.config'])
+def cluster_ha_group_remove(cluster_id, group):
+    """The HA group (or node-affinity rule) goes; its guests stay under HA without it."""
+    from pegaprox.api import clusters as core_clusters
+    _, err = _build_target(cluster_id)
+    if err:
+        return err
+    if not _HA_GROUP_RE.fullmatch(group):
+        return _bad('Invalid group')
+    return core_clusters.delete_proxmox_ha_group(cluster_id, group)

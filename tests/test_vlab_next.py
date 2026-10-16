@@ -1013,3 +1013,171 @@ def test_admin_console_is_audited(env, monkeypatch):
     assert a['ws_path'].startswith(f'/api/clusters/{CID}/vms/pve1/qemu/300/vncwebsocket?token=') and a['password'] == 'PVEVNC:t'
     assert not store.open_session_desktops()                                          # support is no session
     assert [(u, act) for u, act, _ in seen] == [('root', 'vlab.desktop.admin_console')] and 'user alice' in seen[0][2]
+
+
+# --- 운영 기본: 작업 진행 · 노드 유지보수 · Proxmox HA -------------------------------------------
+
+def _upid(node, kind, vmid, n=1):
+    return f'UPID:{node}:000{n}:0002:0003:{kind}:{vmid}:root@pam:'
+
+
+def test_tasks_admins_see_all_users_their_own(env, monkeypatch):
+    import pegaprox.api.helpers as helpers
+    _, mgr, admin, alice, bob, _ = env
+    pool = store.create_pool('실습', 'dedicated', CID)
+    mine = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    store.set_assignment(mine['id'], 'alice')
+    mgr.get_tasks.return_value = [
+        {'upid': _upid('pve1', 'qmigrate', 300), 'node': 'pve1', 'type': 'qmigrate', 'id': '300', 'starttime': 100},
+        {'upid': _upid('pve2', 'vzdump', 301, 2), 'node': 'pve2', 'type': 'vzdump', 'id': '301', 'starttime': 90,
+         'endtime': 95, 'status': 'job errors'},
+        {'upid': _upid('pve1', 'qmclone', 500, 3), 'node': 'pve1', 'type': 'qmclone', 'id': '500', 'starttime': 80,
+         'endtime': 85, 'status': 'OK', 'pegaprox_user': 'bob'},
+        {'upid': 'not-a-task'}]
+    mgr.get_task_log.return_value = 'migration started\n  37% done\n'
+    r = admin.get('/api/vlab/tasks')
+    assert r.status_code == 200, r.get_json()
+    got = r.get_json()
+    assert got['scope'] == 'all' and got['running'] == 1
+    assert [t['type'] for t in got['tasks']] == ['qmigrate', 'vzdump', 'qmclone']
+    first = got['tasks'][0]
+    assert first['running'] and first['percent'] == 37.0 and first['desktop']['name'] == 'lab-win11-01'
+    assert got['tasks'][1]['ok'] is False and got['tasks'][1]['status'] == 'job errors'
+    assert got['tasks'][2]['ok'] is True and got['tasks'][2]['user'] == 'bob'
+
+    a = alice.get('/api/vlab/tasks').get_json()
+    assert a['scope'] == 'mine' and [t['vmid'] for t in a['tasks']] == [300]
+    assert [t['vmid'] for t in bob.get('/api/vlab/tasks').get_json()['tasks']] == [500]
+
+    mgr.get_task_status.return_value = {'status': 'stopped', 'exitstatus': 'job errors'}
+    mgr.get_task_log.return_value = 'INFO: starting\nERROR: backup of 301 failed\n'
+    up = _upid('pve2', 'vzdump', 301, 2)
+    log = admin.get(f'/api/vlab/tasks/log?cluster={CID}&upid={up}').get_json()
+    assert log['ok'] is False and log['lines'][-1] == 'ERROR: backup of 301 failed' and log['node'] == 'pve2'
+    assert alice.get(f'/api/vlab/tasks/log?cluster={CID}&upid={up}').status_code == 404
+    assert alice.get(f"/api/vlab/tasks/log?cluster={CID}&upid={_upid('pve1', 'qmigrate', 300)}").status_code == 200
+    monkeypatch.setattr(helpers, 'get_task_user', lambda u: 'bob')
+    assert bob.get(f"/api/vlab/tasks/log?cluster={CID}&upid={_upid('pve1', 'qmclone', 500, 3)}").status_code == 200
+    assert admin.get(f'/api/vlab/tasks/log?cluster={CID}&upid=UPID:../x').status_code == 400
+    assert admin.get(f'/api/vlab/tasks/log?cluster=nope&upid={up}').status_code == 404
+
+
+def test_node_maintenance_preview_set_and_power(env, monkeypatch):
+    import pegaprox.api.vms as core_vms
+    from flask import jsonify, request
+    _, mgr, admin, alice, _, viewer = env
+    pool = store.create_pool('실습', 'dedicated', CID)
+    d1 = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    store.add_desktop(pool, 'pve2', 301, 'lab-win11-02')
+    store.set_assignment(d1['id'], 'alice')
+    store.start_session('alice', d1, 'vnc', '127.0.0.1')
+    monkeypatch.setattr(core_vms, 'maintenance_capacity_preview_api',
+                        lambda c, n: jsonify({'ok': False, 'over_threshold': ['pve2'], 'guest_count': 1}))
+    monkeypatch.setattr(core_vms, 'maintenance_evacuation_plan',
+                        lambda c, n: jsonify({'supported': True, 'templates': [{'vmid': 900}], 'online_nodes': 2,
+                                              'negative_rules': [{'rule': 'ad-pair', 'resources': ['vm:1', 'vm:2'], 'blocks': True}]}))
+    base = f'/api/vlab/admin/clusters/{CID}/nodes/pve1'
+    assert alice.get(f'{base}/maintenance-preview').status_code == 403
+    r = admin.get(f'{base}/maintenance-preview')
+    assert r.status_code == 200, r.get_json()
+    p = r.get_json()
+    assert [(d['name'], d['in_use'], d['assigned_user']) for d in p['desktops']] == [('lab-win11-01', True, 'alice')]
+    assert [g['vmid'] for g in p['guests']] == [500]                      # the template and the desktop are not in it
+    assert p['capacity']['over_threshold'] == ['pve2']
+    assert p['plan'] == {'templates': 1, 'blocking_rules': ['ad-pair'], 'online_nodes': 2}
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/nodes/bad_node/maintenance-preview').status_code == 400
+
+    seen = {}
+
+    def fake_set(c, n):
+        seen['set'] = (c, n, request.get_json())
+        return jsonify({'message': 'ok', 'task': {'status': 'evacuating'}})
+    monkeypatch.setattr(core_vms, 'set_maintenance_mode', fake_set)
+    assert viewer.put(f'{base}/maintenance', json={'enable': True}).status_code == 403
+    assert admin.put(f'{base}/maintenance', json={'enable': 'yes'}).status_code == 400
+    assert admin.put(f'{base}/maintenance', json={'skip_evacuation': True}).status_code == 400
+    assert admin.put(f'{base}/maintenance', json={'enable': True, 'force': True}).status_code == 400
+    r = admin.put(f'{base}/maintenance', json={'enable': True, 'migrate_templates': True})
+    assert r.status_code == 200 and seen['set'] == (CID, 'pve1', {'enable': True, 'migrate_templates': True})
+
+    monkeypatch.setattr(core_vms, 'node_action_api', lambda c, n, a: jsonify({'message': f'{a} {n}'}))
+    assert admin.post(f'{base}/action', json={'action': 'reboot'}).status_code == 400          # no confirm
+    assert admin.post(f'{base}/action', json={'action': 'halt', 'confirm': 'pve1'}).status_code == 400
+    r = admin.post(f'{base}/action', json={'action': 'shutdown', 'confirm': 'pve1'})
+    assert r.status_code == 200 and r.get_json()['message'] == 'shutdown pve1'
+
+
+def test_node_log_sensors_and_tasks(env, monkeypatch):
+    import pegaprox.api.nodes as core_nodes
+    from flask import jsonify
+    _, _, admin, alice, _, _ = env
+    base = f'/api/vlab/admin/clusters/{CID}/nodes/pve1'
+    monkeypatch.setattr(core_nodes, 'get_node_syslog_api', lambda c, n: jsonify(['Oct 16 pvedaemon: started', 'Oct 16 kernel: x']))
+    assert alice.get(f'{base}/syslog').status_code == 403
+    assert admin.get(f'{base}/syslog').get_json()['lines'][0] == 'Oct 16 pvedaemon: started'
+
+    monkeypatch.setattr(core_nodes, 'get_node_sensors_api', lambda c, n: (jsonify(
+        {'error': 'SSH is switched off for this cluster, and sensors are read over SSH'}), 502))
+    s = admin.get(f'{base}/sensors').get_json()
+    assert s['sensors'] == [] and 'SSH' in s['error']
+    monkeypatch.setattr(core_nodes, 'get_node_sensors_api', lambda c, n: jsonify(
+        {'sensors': [{'chip': 'coretemp', 'label': 'Package id 0', 'kind': 'temp', 'value': 51.0, 'max': 84, 'crit': 100,
+                      'alarm': False, 'extra': 1}], 'count': 1}))
+    s = admin.get(f'{base}/sensors').get_json()
+    assert s['error'] is None and s['sensors'][0] == {'chip': 'coretemp', 'label': 'Package id 0', 'kind': 'temp',
+                                                      'value': 51.0, 'max': 84, 'crit': 100, 'alarm': False}
+
+    monkeypatch.setattr(core_nodes, 'get_node_tasks_api', lambda c, n: jsonify(
+        [{'upid': _upid('pve1', 'vzdump', 300), 'type': 'vzdump', 'id': '300', 'starttime': 5, 'endtime': 9, 'status': 'OK'}]))
+    t = admin.get(f'{base}/tasks').get_json()['tasks']
+    assert [(x['type'], x['node'], x['ok']) for x in t] == [('vzdump', 'pve1', True)]
+
+
+def test_proxmox_ha_resources_and_groups(env, monkeypatch):
+    import pegaprox.api.clusters as core_clusters
+    from flask import jsonify, request
+    _, mgr, admin, alice, _, viewer = env
+    pool = store.create_pool('라이선스', 'dedicated', CID)
+    store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    monkeypatch.setattr(core_clusters, 'get_proxmox_ha_resources', lambda c: jsonify(
+        [{'sid': 'vm:300', 'state': 'started', 'max_restart': 2, 'max_relocate': 1, 'group': 'lab'}, {'sid': 'bogus'}]))
+    monkeypatch.setattr(core_clusters, 'get_proxmox_ha_groups', lambda c: jsonify(
+        [{'group': 'lab', 'nodes': 'pve1:2,pve2', 'restricted': 0, 'nofailback': 0, '_pve_rule_id': 'lab'}]))
+    mgr._api_get.return_value = _Resp([
+        {'type': 'quorum', 'status': 'OK'}, {'type': 'master', 'node': 'pve2'},
+        {'type': 'service', 'sid': 'vm:300', 'node': 'pve1', 'state': 'started'}])
+    base = f'/api/vlab/admin/clusters/{CID}/ha'
+    assert alice.get(base).status_code == 403
+    r = admin.get(base)
+    assert r.status_code == 200, r.get_json()
+    h = r.get_json()
+    assert h['quorate'] is True and h['master'] == 'pve2'
+    assert [(x['sid'], x['node'], x['status'], x['desktop']['name']) for x in h['resources']] == [('vm:300', 'pve1', 'started', 'lab-win11-01')]
+    assert h['groups'][0]['nodes'] == 'pve1:2,pve2' and h['groups'][0]['rule'] is True
+
+    mgr.add_vm_to_proxmox_ha.return_value = {'success': True}
+    mgr.remove_vm_from_proxmox_ha.return_value = {'success': True}
+    assert viewer.post(f'{base}/resources', json={'vmid': 301}).status_code == 403
+    assert admin.post(f'{base}/resources', json={'vmid': 301, 'state': 'on'}).status_code == 400
+    assert admin.post(f'{base}/resources', json={'vmid': 301, 'group': 'a b'}).status_code == 400
+    assert admin.post(f'{base}/resources', json={'vmid': 900}).status_code == 404                # a template
+    assert admin.post(f'{base}/resources', json={'vmid': 777}).status_code == 404
+    r = admin.post(f'{base}/resources', json={'vmid': 301, 'max_restart': 3, 'comment': '라이선스 서버'})
+    assert r.status_code == 201 and r.get_json()['sid'] == 'vm:301'
+    assert mgr.add_vm_to_proxmox_ha.call_args[0] == (301, 'vm', None, 3, 1, 'started', '라이선스 서버')
+    assert admin.delete(f'{base}/resources/300').status_code == 200
+    assert mgr.remove_vm_from_proxmox_ha.call_args[0] == (300, 'vm')
+
+    seen = {}
+
+    def fake_group(c):
+        seen['g'] = request.get_json()
+        return jsonify({'success': True})
+    monkeypatch.setattr(core_clusters, 'create_proxmox_ha_group', fake_group)
+    monkeypatch.setattr(core_clusters, 'delete_proxmox_ha_group', lambda c, g: jsonify({'success': True, 'g': g}))
+    assert admin.post(f'{base}/groups', json={'group': 'lab', 'nodes': 'pve1;rm -rf'}).status_code == 400
+    assert admin.post(f'{base}/groups', json={'group': '1lab', 'nodes': 'pve1'}).status_code == 400
+    assert admin.post(f'{base}/groups', json={'group': 'lab', 'nodes': 'pve1', 'resources': 'vm:abc'}).status_code == 400
+    body = {'group': 'lab2', 'nodes': 'pve1:2,pve2', 'restricted': True, 'resources': 'vm:300,vm:301'}
+    assert admin.post(f'{base}/groups', json=body).status_code == 200 and seen['g'] == body
+    assert admin.delete(f'{base}/groups/lab2').get_json()['g'] == 'lab2'
