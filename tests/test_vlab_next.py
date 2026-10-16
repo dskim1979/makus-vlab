@@ -60,6 +60,118 @@ def test_departments_tree_and_members(env):
     assert catalog.department_of('alice') is None
 
 
+# --- accounts and roles (thin wrappers over pegaprox/api/users.py) --------------------------
+
+PW = 'Str0ng!Passw0rd#'
+
+
+def test_accounts_made_changed_and_deleted_through_the_vlab_api(env):
+    _, _, admin, alice, _, _ = env
+    from pegaprox.utils.auth import load_users
+    body = {'username': 'kim', 'password': PW, 'display_name': '김교수', 'email': 'kim@example.com', 'role': 'user'}
+    assert alice.post('/api/vlab/admin/users', json=body).status_code == 403
+    # only the form's fields: no tenant, no extra permissions, no portal_only
+    for extra in ({'tenant_id': 'other'}, {'permissions': ['admin.users']}, {'portal_only': True}):
+        r = admin.post('/api/vlab/admin/users', json=dict(body, **extra))
+        assert r.status_code == 400 and 'Not accepted' in r.get_json()['error']
+    assert admin.post('/api/vlab/admin/users', json=dict(body, password='short')).status_code == 400
+    assert admin.post('/api/vlab/admin/users', json=dict(body, department_id='dep_nope')).status_code == 400
+    dep = admin.post('/api/vlab/admin/departments', json={'name': '전자공학과'}).get_json()['department']
+    r = admin.post('/api/vlab/admin/users', json=dict(body, department_id=dep['id'], must_change_password=True))
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json()['user']['must_change_password'] is True
+    assert admin.post('/api/vlab/admin/users', json=body).status_code == 409
+    u = load_users()['kim']
+    assert u['force_password_change'] and u['display_name'] == '김교수'
+    assert catalog.department_of('kim') == dep['id']
+    listed = {x['username']: x for x in admin.get('/api/vlab/admin/users?all=1').get_json()['users']}
+    assert listed['kim']['department_id'] == dep['id'] and listed['kim']['must_change_password'] is True
+    assert listed['kim']['totp_enabled'] is False
+
+    r = admin.put('/api/vlab/admin/users/kim', json={'display_name': '김 교수', 'enabled': False, 'department_id': None})
+    assert r.status_code == 200, r.get_json()
+    u = load_users()['kim']
+    assert u['display_name'] == '김 교수' and u['enabled'] is False and catalog.department_of('kim') is None
+    assert admin.put('/api/vlab/admin/users/kim', json={'password': PW}).status_code == 400
+    assert admin.put('/api/vlab/admin/users/kim', json={'enabled': 'no'}).status_code == 400
+    assert admin.put('/api/vlab/admin/users/kim', json={'role': 'nope'}).status_code == 400
+    assert admin.put('/api/vlab/admin/users/nobody', json={'display_name': 'x'}).status_code == 404
+    assert admin.put('/api/vlab/admin/users/root', json={'role': 'user'}).status_code == 403    # own role
+
+    assert admin.delete('/api/vlab/admin/users/root').status_code == 400                      # self
+    admin.put('/api/vlab/admin/users/kim/department', json={'department_id': dep['id']})
+    assert admin.delete('/api/vlab/admin/users/kim').status_code == 200
+    assert 'kim' not in load_users() and catalog.department_of('kim') is None
+
+
+def test_password_and_2fa_reset_and_unlock(env):
+    _, _, admin, alice, _, _ = env
+    import time
+    from pegaprox.globals import login_attempts_by_user
+    from pegaprox.utils.auth import load_users, save_single_user
+    assert alice.put('/api/vlab/admin/users/bob/password', json={'password': PW}).status_code == 403
+    assert admin.put('/api/vlab/admin/users/bob/password', json={'password': PW, 'role': 'admin'}).status_code == 400
+    r = admin.put('/api/vlab/admin/users/bob/password', json={'password': PW, 'must_change_password': True})
+    assert r.status_code == 200, r.get_json()
+    assert load_users()['bob']['force_password_change'] is True
+    admin.put('/api/vlab/admin/users/bob/password', json={'password': PW})
+    assert load_users()['bob']['force_password_change'] is False
+
+    ldap = load_users()['vera']
+    ldap['auth_source'] = 'ldap'
+    save_single_user('vera', ldap)
+    assert admin.put('/api/vlab/admin/users/vera/password', json={'password': PW}).status_code == 400
+
+    b = load_users()['bob']
+    b.update(totp_enabled=True, totp_secret='JBSWY3DPEHPK3PXP')
+    save_single_user('bob', b)
+    assert alice.delete('/api/vlab/admin/users/bob/2fa').status_code == 403
+    assert admin.delete('/api/vlab/admin/users/bob/2fa').status_code == 200
+    assert load_users()['bob']['totp_enabled'] is False
+
+    login_attempts_by_user['bob'] = {'locked_until': time.time() + 600, 'attempts': [1, 2, 3]}
+    try:
+        assert alice.get('/api/vlab/admin/locked-users').status_code == 403
+        locked = admin.get('/api/vlab/admin/locked-users').get_json()['users']
+        assert [x['username'] for x in locked] == ['bob'] and locked[0]['attempt_count'] == 3
+        assert admin.delete('/api/vlab/admin/locked-users/bob').status_code == 200
+        assert admin.get('/api/vlab/admin/locked-users').get_json()['users'] == []
+        assert admin.delete('/api/vlab/admin/locked-users/bob').status_code == 404
+    finally:
+        login_attempts_by_user.pop('bob', None)
+
+
+def test_custom_roles_through_the_vlab_api(env):
+    _, _, admin, alice, _, _ = env
+    perms = admin.get('/api/vlab/admin/permissions').get_json()
+    assert 'vlab.desk' in {p['permission'] for p in perms} and all('category' in p for p in perms)
+    roles = {r['id']: r for r in admin.get('/api/vlab/admin/roles').get_json()}
+    assert roles['admin']['builtin'] and roles['user']['builtin']
+    assert any(t['id'] == 'tenant_admin' for t in admin.get('/api/vlab/admin/roles/templates').get_json())
+
+    body = {'id': 'ta', 'name': '조교', 'permissions': ['vlab.desk', 'vm.view']}
+    assert alice.post('/api/vlab/admin/roles', json=body).status_code == 403
+    assert admin.post('/api/vlab/admin/roles', json=dict(body, created_by='x')).status_code == 400
+    assert admin.post('/api/vlab/admin/roles', json=dict(body, permissions='vm.view')).status_code == 400
+    assert admin.post('/api/vlab/admin/roles', json=dict(body, permissions=['no.such'])).status_code == 400
+    r = admin.post('/api/vlab/admin/roles', json=body)
+    assert r.status_code == 200, r.get_json()
+    assert admin.put('/api/vlab/admin/roles/ta', json={'name': '조교(전자)', 'permissions': ['vlab.desk']}).status_code == 200
+    got = {x['id']: x for x in admin.get('/api/vlab/admin/roles').get_json()}['ta']
+    assert got['name'] == '조교(전자)' and got['permissions'] == ['vlab.desk']
+    assert admin.put('/api/vlab/admin/roles/user', json={'name': 'x'}).status_code == 400       # builtin
+
+    assert admin.post('/api/vlab/admin/users', json={'username': 'cho', 'password': PW, 'role': 'ta'}).status_code == 201
+    r = admin.delete('/api/vlab/admin/roles/ta')
+    assert r.status_code == 409 and r.get_json()['users'] == ['cho']
+    admin.put('/api/vlab/admin/users/cho', json={'role': 'user'})
+    assert admin.delete('/api/vlab/admin/roles/ta').status_code == 200
+
+    r = admin.post('/api/vlab/admin/roles/templates/tenant_admin/apply', json={'role_id': 'dept_admin', 'name': '학과 관리자'})
+    assert r.status_code == 200, r.get_json()
+    assert 'dept_admin' in {x['id'] for x in admin.get('/api/vlab/admin/roles').get_json()}
+
+
 # --- sign-up review ----------------------------------------------------------------------
 
 def test_signup_closed_by_default_and_reviewed_by_an_admin(env):

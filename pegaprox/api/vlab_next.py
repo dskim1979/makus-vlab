@@ -11,6 +11,16 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/departments/<id>/members        ?children=1 includes sub-departments  vlab.pool.view
   PUT    /api/vlab/admin/users/<username>/department     {department_id|null}                 admin.users
 
+  POST   /api/vlab/admin/users                           {username, password, display_name?, email?, role?, department_id?, must_change_password?}  admin.users
+  PUT    /api/vlab/admin/users/<username>                {display_name?, email?, role?, enabled?, department_id?}  admin.users
+  DELETE /api/vlab/admin/users/<username>                                                     admin.users
+  PUT    /api/vlab/admin/users/<username>/password       {password, must_change_password?}    admin.users
+  DELETE /api/vlab/admin/users/<username>/2fa            clear the account's TOTP             admin.users
+  GET    /api/vlab/admin/locked-users, DELETE .../<username>   sign-in lockouts            security.lockout.view / manage
+  GET    /api/vlab/admin/permissions, /roles, /roles/templates  the permission grid and roles  signed in
+  POST   /api/vlab/admin/roles, PUT/DELETE .../<id>, POST .../templates/<id>/apply   custom roles  admin.roles
+  (thin wrappers over the core routes of pegaprox/api/users.py)
+
   GET    /api/vlab/signup/config                         is sign-up open, the departments     public
   POST   /api/vlab/signup                                {username, password, display_name?, email?, department_id?, note?}  public
   GET    /api/vlab/admin/signups                         ?status=pending|approved|rejected     admin.users
@@ -222,6 +232,231 @@ def set_user_department(username):
     catalog.set_department(username, dep)
     log_audit(_user(), 'vlab.department.member', f"{username} -> {dep or '(none)'}", get_client_ip())
     return jsonify({'username': username, 'department_id': dep})
+
+
+# --- accounts and roles (사용자 > 사용자 목록, 역할 관리) --------------------------------------
+#
+# The console speaks /api/vlab/* only (its README, 구조), and making, changing and deleting
+# accounts, resetting a password or 2FA, unlocking and the custom roles were core routes
+# (pegaprox/api/users.py). These wrappers stay thin: each accepts only the fields the
+# console's forms have, refuses any other key - so the core never sees a tenant_id, a
+# permission grant or portal_only on an account from here - and hands the request on to the
+# core route, which keeps its own permission, tenant and outrank checks, the last-admin
+# guard, the password policy, the session revocation and the audit. Two things the core does
+# not do are added after it answers 200: the department (catalog) and "change the password
+# at the next sign-in" (force_password_change, answered by the login as
+# requires_password_change and cleared by /api/auth/change-password).
+
+_USER_CREATE_KEYS = ('username', 'password', 'display_name', 'email', 'role', 'department_id', 'must_change_password')
+_USER_UPDATE_KEYS = ('display_name', 'email', 'role', 'enabled', 'department_id')
+_ROLE_KEYS = ('name', 'permissions', 'tenant_id')
+
+
+def _only(data, allowed):
+    extra = sorted(k for k in data if k not in allowed)
+    if extra:
+        raise ValueError('Not accepted here: ' + ', '.join(extra))
+    for k in ('must_change_password', 'enabled'):
+        if k in data and not isinstance(data[k], bool):
+            raise ValueError(f'{k} must be true or false')
+    for k in ('id', 'role_id', 'username', 'password', 'name', 'display_name', 'email', 'role', 'tenant_id'):
+        if k in data and data[k] is not None and not isinstance(data[k], str):
+            raise ValueError(f'{k} must be text')
+    if 'permissions' in data and not (isinstance(data['permissions'], list)
+                                      and all(isinstance(p, str) for p in data['permissions'])):
+        raise ValueError('permissions must be a list of names')
+    dep = data.get('department_id')
+    if dep is not None and (not isinstance(dep, str) or (dep and not catalog.get_department(dep))):
+        raise ValueError('department_id: no such department')
+
+
+def _core_ok(resp):
+    """The core route's answer as (ok, body)."""
+    r = resp[0] if isinstance(resp, tuple) else resp
+    status = resp[1] if isinstance(resp, tuple) and len(resp) > 1 else getattr(r, 'status_code', 200)
+    try:
+        body = r.get_json()
+    except Exception:
+        body = None
+    return status == 200, body
+
+
+def _force_password_change(username, on):
+    from pegaprox.utils.auth import load_users, save_single_user
+    rec = load_users().get(username)
+    if rec is not None and bool(rec.get('force_password_change')) != on:
+        rec['force_password_change'] = on
+        save_single_user(username, rec)
+
+
+@bp.route('/api/vlab/admin/users', methods=['POST'])
+@require_auth(perms=['admin.users'])
+def create_account():
+    """{username, password, display_name?, email?, role?, department_id?, must_change_password?}"""
+    from pegaprox.api import users as core_users
+    data = _body()
+    try:
+        _only(data, _USER_CREATE_KEYS)
+    except ValueError as e:
+        return _bad(str(e))
+    resp = core_users.create_user()
+    ok, body = _core_ok(resp)
+    if not ok:
+        return resp
+    name = body['user']['username']
+    if data.get('department_id'):
+        catalog.set_department(name, data['department_id'])
+    if data.get('must_change_password'):
+        _force_password_change(name, True)
+    return jsonify({'user': dict(body['user'], department_id=data.get('department_id') or None,
+                                 must_change_password=bool(data.get('must_change_password')))}), 201
+
+
+@bp.route('/api/vlab/admin/users/<username>', methods=['PUT'])
+@require_auth(perms=['admin.users'])
+def update_account(username):
+    """{display_name?, email?, role?, enabled?, department_id?} - a password goes to .../password"""
+    from pegaprox.api import users as core_users
+    username = username.lower()
+    if username not in core._visible_users():
+        return _bad('User not found', 404)
+    data = _body()
+    try:
+        _only(data, _USER_UPDATE_KEYS)
+    except ValueError as e:
+        return _bad(str(e))
+    if any(k in data for k in _USER_UPDATE_KEYS if k != 'department_id'):
+        resp = core_users.update_user(username)
+        if not _core_ok(resp)[0]:
+            return resp
+    if 'department_id' in data:
+        catalog.set_department(username, data['department_id'] or None)
+        log_audit(_user(), 'vlab.department.member', f"{username} -> {data['department_id'] or '(none)'}", get_client_ip())
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/admin/users/<username>', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def delete_account(username):
+    from pegaprox.api import users as core_users
+    username = username.lower()
+    if username not in core._visible_users():
+        return _bad('User not found', 404)
+    resp = core_users.delete_user(username)
+    if _core_ok(resp)[0]:
+        catalog.set_department(username, None)
+    return resp
+
+
+@bp.route('/api/vlab/admin/users/<username>/password', methods=['PUT'])
+@require_auth(perms=['admin.users'])
+def reset_account_password(username):
+    """{password, must_change_password?} - every session and API token of the account ends"""
+    from pegaprox.api import users as core_users
+    username = username.lower()
+    data = _body()
+    try:
+        _only(data, ('password', 'must_change_password'))
+    except ValueError as e:
+        return _bad(str(e))
+    resp = core_users.admin_change_password(username)
+    if _core_ok(resp)[0]:
+        _force_password_change(username, bool(data.get('must_change_password')))
+    return resp
+
+
+@bp.route('/api/vlab/admin/users/<username>/2fa', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def reset_account_2fa(username):
+    from pegaprox.api import users as core_users
+    return core_users.admin_disable_2fa(username)
+
+
+@bp.route('/api/vlab/admin/locked-users', methods=['GET'])
+@require_auth(perms=['security.lockout.view'])
+def locked_accounts():
+    """Accounts locked after failed sign-ins: [{username, locked_until, remaining_seconds, attempt_count}]"""
+    from pegaprox.api import users as core_users
+    resp = core_users.get_locked_ips()
+    ok, body = _core_ok(resp)
+    if not ok:
+        return resp
+    return jsonify({'users': (body or {}).get('locked_users', [])})
+
+
+@bp.route('/api/vlab/admin/locked-users/<username>', methods=['DELETE'])
+@require_auth(perms=['security.lockout.manage'])
+def unlock_account(username):
+    from pegaprox.api import users as core_users
+    return core_users.unlock_user(username)
+
+
+@bp.route('/api/vlab/admin/permissions', methods=['GET'])
+@require_auth()
+def list_permissions():
+    """[{permission, description, category, warning}] - the grid a role is ticked in"""
+    from pegaprox.api import users as core_users
+    return core_users.get_all_permissions()
+
+
+@bp.route('/api/vlab/admin/roles', methods=['GET'])
+@require_auth()
+def list_roles():
+    """Built-in and custom roles the caller may see: [{id, name, builtin, permissions, scope, tenant_id?}]"""
+    from pegaprox.api import users as core_users
+    return core_users.list_all_roles()
+
+
+@bp.route('/api/vlab/admin/roles/templates', methods=['GET'])
+@require_auth()
+def list_role_templates():
+    """[{id, name, description, permissions, permission_count}]"""
+    from pegaprox.api import users as core_users
+    return core_users.get_role_templates()
+
+
+@bp.route('/api/vlab/admin/roles', methods=['POST'])
+@require_auth(perms=['admin.roles'])
+def create_role():
+    """{id, name?, permissions[], tenant_id?}"""
+    from pegaprox.api import users as core_users
+    try:
+        _only(_body(), _ROLE_KEYS + ('id',))
+    except ValueError as e:
+        return _bad(str(e))
+    return core_users.create_custom_role()
+
+
+@bp.route('/api/vlab/admin/roles/templates/<template_id>/apply', methods=['POST'])
+@require_auth(perms=['admin.roles'])
+def create_role_from_template(template_id):
+    """{role_id?, name?, tenant_id?} - a new custom role with the template's permissions"""
+    from pegaprox.api import users as core_users
+    try:
+        _only(_body(), ('role_id', 'name', 'tenant_id'))
+    except ValueError as e:
+        return _bad(str(e))
+    return core_users.apply_role_template(template_id)
+
+
+@bp.route('/api/vlab/admin/roles/<role_id>', methods=['PUT'])
+@require_auth(perms=['admin.roles'])
+def update_role(role_id):
+    """{name?, permissions?, tenant_id?} - tenant_id says which tenant's role it is"""
+    from pegaprox.api import users as core_users
+    try:
+        _only(_body(), _ROLE_KEYS)
+    except ValueError as e:
+        return _bad(str(e))
+    return core_users.update_custom_role(role_id)
+
+
+@bp.route('/api/vlab/admin/roles/<role_id>', methods=['DELETE'])
+@require_auth(perms=['admin.roles'])
+def delete_role(role_id):
+    """?tenant_id= for a tenant's role; 409 with the holders while accounts still have it"""
+    from pegaprox.api import users as core_users
+    return core_users.delete_custom_role(role_id)
 
 
 # --- sign-up requests --------------------------------------------------------------------

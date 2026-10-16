@@ -1948,7 +1948,8 @@ def assignable_users():
     Outside the default tenant a caller only sees their own tenant's accounts, so the
     screens cannot list another tenant's people."""
     include_disabled = request.args.get('all') == '1'
-    desks_per, last = {}, store.last_session_per_user()
+    from pegaprox.vlab import catalog
+    desks_per, last, deps = {}, store.last_session_per_user(), catalog.user_departments()
     for d in store.list_desktops():
         if d['assigned_user']:
             desks_per[d['assigned_user']] = desks_per.get(d['assigned_user'], 0) + 1
@@ -1960,6 +1961,9 @@ def assignable_users():
                     'role': u.get('role', ''), 'auth_source': u.get('auth_source', 'local'),
                     'email': u.get('email', ''), 'enabled': bool(u.get('enabled', True)),
                     'tenant_id': u.get('tenant_id') or 'default',
+                    'totp_enabled': bool(u.get('totp_enabled')), 'last_login': u.get('last_login'),
+                    'must_change_password': bool(u.get('force_password_change')),
+                    'department_id': deps.get(name),
                     'desktops': desks_per.get(name, 0), 'last_connected': last.get(name)})
     out.sort(key=lambda u: u['username'])
     return jsonify({'users': out})
