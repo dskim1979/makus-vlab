@@ -3531,15 +3531,16 @@ def cluster_ha_add(cluster_id):
 @require_auth(perms=['vlab.pool.manage', 'ha.config'])
 def cluster_ha_remove(cluster_id, vmid):
     """The guest leaves Proxmox HA (it keeps running where it is)."""
-    from pegaprox.api import clusters as core_clusters
     mgr, err = _build_target(cluster_id)
     if err:
         return err
     kind = _ha_guest(cluster_id, vmid)
     if not kind:
         return _bad('No such VM or container on the cluster', 404)
-    if not core_clusters._ha_sid_authorized(cluster_id, f'{kind}:{vmid}'):
-        return _bad('Access denied to this VM', 403)
+    from pegaprox.api.vms import _require_vm_access
+    denied = _require_vm_access(cluster_id, vmid, 'vm.config', 'qemu' if kind == 'vm' else 'lxc')   # per-VM ACLs
+    if denied:
+        return denied
     failed = _failed(mgr.remove_vm_from_proxmox_ha(vmid, kind), 'Removing from HA')
     if failed:
         return failed
