@@ -25,6 +25,11 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     $(if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ]; then echo g++ make zlib1g-dev libjpeg62-turbo-dev; fi) \
     && rm -rf /var/lib/apt/lists/*
 
+# MOAVI Desk licence seats: lmutil (Flexera's, it comes with each vendor's tools and is not
+# shipped here) is mounted at /opt/moavi/lmutil; most Linux builds of it load through the LSB
+# loader name, which Debian does not have
+RUN mkdir -p /opt/moavi/lmutil     && if [ "$TARGETARCH" = "amd64" ] && [ -e /lib64/ld-linux-x86-64.so.2 ]; then ln -sf /lib64/ld-linux-x86-64.so.2 /lib64/ld-lsb-x86-64.so.3; fi
+
 # Create non-root user
 RUN groupadd -r pegaprox && useradd -r -g pegaprox -d /app -s /bin/false pegaprox
 

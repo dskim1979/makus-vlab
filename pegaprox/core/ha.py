@@ -269,6 +269,9 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     # a bulk migration runs in the process of the instance that started it (#952)
     '/api/bulk-migrations',
     '/api/bulk-migrations/<run_id>',
+    # MOAVI Desk licence seats: only the active's license_tick reads and keeps them
+    '/api/vlab/admin/license-servers/<lid>/usage',
+    '/api/vlab/admin/reports/licenses',
 ))
 # The one rule every plugin route is served behind (api/plugins.py plugin_proxy). A
 # plugin handler serves every method from one function and most never look at which
@@ -342,6 +345,8 @@ LOCAL_TABLES = (
     'hw_state', 'hw_events',
     # sFlow traffic this instance's collector rolled up per hour (background/sflow_collector.py)
     'flows_hourly',
+    # MOAVI Desk licence seats: what this instance's license_tick read (pegaprox/vlab/license_usage.py)
+    'vlab_license_samples', 'vlab_license_checkouts', 'vlab_license_denials',
 )
 
 # server_settings keys that describe this host, not the deployment

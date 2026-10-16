@@ -48,6 +48,7 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/buildfarm                       build farm pools: size, in use, load  vlab.pool.view
 
   GET/POST /api/vlab/admin/license-servers, PUT/DELETE .../<id>, POST .../<id>/check   licence servers  vlab.pool.view / vlab.accel.manage
+  (their seats - lmstat per feature, holders, report - are in pegaprox/api/vlab_license.py; license_tick reads them)
 
   GET/PUT /api/vlab/admin/pools/<id>/grants          who may claim / use a pool (user, department, group)  vlab.pool.view / manage
   GET    /api/vlab/me/pools, POST .../<id>/claim, POST .../<id>/route   claim a desktop, route into a shared pool  vlab.desk
@@ -1327,6 +1328,8 @@ def delete_license_server(lid):
     if not s:
         return _bad('Licence server not found', 404)
     catalog.delete_license_server(lid)
+    from pegaprox.vlab import license_usage
+    license_usage.forget(lid)
     log_audit(_user(), 'vlab.license.delete', f"licence server '{s['name']}'", get_client_ip())
     return jsonify({'success': True})
 
@@ -1767,11 +1770,12 @@ LICENSE_EVERY = 300
 _license_last = [0.0]
 
 
-def _alert(title, text, data):
-    """Licence alerts go to every webhook channel and the alert mail recipients."""
+def _alert(title, text, data, channels=None):
+    """Licence alerts go to the webhook channels (every one, or the ids in `channels`) and the
+    alert mail recipients."""
     try:
         from pegaprox.utils.webhooks import send_to_channels
-        send_to_channels(dict(data, title=title, message=text, source='moavi-desk', severity=data.get('severity', 'critical')))
+        send_to_channels(dict(data, title=title, message=text, source='moavi-desk', severity=data.get('severity', 'critical')), channels)
     except Exception as e:
         logging.warning(f'[VLAB] licence alert webhooks: {e}')
     try:
@@ -1815,6 +1819,12 @@ def license_tick(force=False):
             log_audit('system', 'vlab.license.up', f"licence server '{s['name']}' answers again", '')
         elif ok and was is None:
             pass
+    # the seats of the servers that read them (lmstat per feature, pegaprox/api/vlab_license.py)
+    from pegaprox.api.vlab_license import usage_tick
+    try:
+        usage_tick()
+    except Exception as e:
+        logging.warning(f'[VLAB] licence seats: {e}')
     return n
 
 

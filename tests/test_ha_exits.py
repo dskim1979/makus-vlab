@@ -439,7 +439,8 @@ EXITS = {
     # the listening socket of the console websocket servers (`sock_cls = socket.socket`)
     ('pegaprox/utils/concurrent.py', 'gevent_listen_socket', 'socket'): (3, 'local'),
     ('pegaprox/background/syslog_server.py', '_tcp_listener', 'socket'): (1, 'local'),
-    ('pegaprox/background/syslog_server.py', '_udp_listener', 'socket'): (1, 'local'),
+    ('pegaprox/background/syslog_server.py', '_udp_listener', 'socket'): (1, 'local'),
+
     # MAKUS - sFlow collector: listens for the nodes' sFlow datagrams, changes nothing
     ('pegaprox/background/sflow_collector.py', '_udp_listener', 'socket'): (1, 'local'),
     # outside the clusters
@@ -448,6 +449,8 @@ EXITS = {
     ('pegaprox/api/settings.py', 'get_pegaprox_changelog', 'http-direct'): (1, 'external'),
     ('pegaprox/background/alerts.py', 'check_update_available_alert', 'http-direct'): (1, 'external'),
     ('pegaprox/background/site_recovery.py', '_fire_webhook', 'http-direct'): (1, 'external'),
+    # MOAVI Desk licence seats: `lmutil lmstat -a` against a FlexLM server outside the clusters (reads only)
+    ('pegaprox/vlab/license_usage.py', 'run_lmutil', 'subprocess'): (1, 'external'),
     ('pegaprox/utils/webhooks.py', '_post_ntfy', 'http-direct'): (1, 'external'),
     ('pegaprox/utils/webhooks.py', 'send_to_channel', 'http-direct'): (1, 'external'),
     ('plugins/notifications/__init__.py', '_send_ntfy', 'http-direct'): (1, 'external'),
@@ -511,8 +514,9 @@ def test_the_inventory_counts_what_the_report_says():
     # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 46 of
     # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
-    assert len({(f, q) for f, q, _k in EXITS}) == 140
+    # (+1 since: the licence seats' lmstat, an external read)
+    assert sum(n for n, _v in EXITS.values()) == 260 and len(EXITS) == 155
+    assert len({(f, q) for f, q, _k in EXITS}) == 141
     assert by['guard'] == 46 and by['client'] == 85
 
 
@@ -762,7 +766,8 @@ AUTOMATIONS = {
     ('pegaprox/background/site_recovery.py', 'start_heartbeat'): (1, 'confirm'),
     ('pegaprox/background/syslog_server.py', '_tcp_listener'): (1, 'local'),
     ('pegaprox/background/syslog_server.py', '_syslog_loop'): (3, 'local'),
-    ('pegaprox/background/syslog_server.py', 'start_syslog_server'): (1, 'local'),
+    ('pegaprox/background/syslog_server.py', 'start_syslog_server'): (1, 'local'),
+
     # MAKUS - sFlow collector thread, its listener and its hourly flush to flows.db
     ('pegaprox/background/sflow_collector.py', '_collector_loop'): (2, 'local'),
     ('pegaprox/background/sflow_collector.py', 'start_sflow_collector'): (1, 'local'),
@@ -1143,6 +1148,9 @@ READ_SITES = [
     # the progress of an ESXi import: stat, lvs and the dd log of the target volume, from
     # a plain thread of the import job
     ('pegaprox/core/v2p.py', '_monitor_disk_write.probe', {'_pve_node_exec': 1}),
+    # MOAVI Desk licence seats: lmstat and the tail of the lmgrd debug log on the licence
+    # server's VM through the guest agent (its exec is a POST), every 5 minutes from license_tick
+    ('pegaprox/api/vlab_license.py', '_guest_read', {'_agent_run': 2}),
 ]
 
 

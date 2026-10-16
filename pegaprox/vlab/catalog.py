@@ -155,6 +155,18 @@ _COLUMNS = (
     ('vlab_boards', 'lease_until', 'TEXT'),
     ('vlab_license_servers', 'watch', 'INTEGER NOT NULL DEFAULT 1'),
     ('vlab_license_servers', 'alerted_at', 'TEXT'),
+    # licence seats (pegaprox/vlab/license_usage.py): how they are read, thresholds, the last read
+    ('vlab_license_servers', 'usage_mode', "TEXT NOT NULL DEFAULT 'off'"),
+    ('vlab_license_servers', 'lm_ports', "TEXT NOT NULL DEFAULT '[]'"),
+    ('vlab_license_servers', 'lmutil_path', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_license_servers', 'debug_log', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_license_servers', 'seat_threshold', 'INTEGER NOT NULL DEFAULT 90'),
+    ('vlab_license_servers', 'feature_thresholds', "TEXT NOT NULL DEFAULT '{}'"),
+    ('vlab_license_servers', 'alert_channels', 'TEXT'),
+    ('vlab_license_servers', 'seat_alerted', "TEXT NOT NULL DEFAULT '{}'"),
+    ('vlab_license_servers', 'usage_at', 'TEXT'),
+    ('vlab_license_servers', 'usage_ok', 'INTEGER'),
+    ('vlab_license_servers', 'usage_error', "TEXT NOT NULL DEFAULT ''"),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -536,11 +548,15 @@ def _license_row(r):
     if not r:
         return None
     s = dict(r)
-    for k, empty in (('ports', []), ('last_detail', [])):
+    for k, empty in (('ports', []), ('last_detail', []), ('lm_ports', []), ('feature_thresholds', {}), ('seat_alerted', {})):
         try:
             s[k] = json.loads(s.get(k) or 'null') or empty
         except ValueError:
             s[k] = empty
+    try:
+        s['alert_channels'] = json.loads(s['alert_channels']) if s.get('alert_channels') else None
+    except ValueError:
+        s['alert_channels'] = None
     return s
 
 
@@ -572,6 +588,23 @@ def mark_license_server(lid, ok, detail):
     db().execute('UPDATE vlab_license_servers SET last_check = ?, last_ok = ?, last_detail = ? WHERE id = ?',
                  (now(), int(ok), json.dumps(detail), lid))
     return get_license_server(lid)
+
+
+def save_license_usage_settings(lid, mode, lm_ports, lmutil_path, debug_log, seat_threshold, feature_thresholds, alert_channels):
+    db().execute('UPDATE vlab_license_servers SET usage_mode = ?, lm_ports = ?, lmutil_path = ?, debug_log = ?, seat_threshold = ?, '
+                 'feature_thresholds = ?, alert_channels = ? WHERE id = ?',
+                 (mode, json.dumps(lm_ports), lmutil_path, debug_log, int(seat_threshold), json.dumps(feature_thresholds, ensure_ascii=False),
+                  None if alert_channels is None else json.dumps(alert_channels), lid))
+    return get_license_server(lid)
+
+
+def mark_license_usage(lid, ok, error=''):
+    db().execute('UPDATE vlab_license_servers SET usage_at = ?, usage_ok = ?, usage_error = ? WHERE id = ?',
+                 (now(), int(ok), (error or '')[:300], lid))
+
+
+def mark_license_seat_alerted(lid, state):
+    db().execute('UPDATE vlab_license_servers SET seat_alerted = ? WHERE id = ?', (json.dumps(state, ensure_ascii=False), lid))
 
 
 def delete_license_server(lid):
