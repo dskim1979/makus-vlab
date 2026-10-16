@@ -1977,7 +1977,9 @@ def assignable_users():
     screens cannot list another tenant's people."""
     include_disabled = request.args.get('all') == '1'
     from pegaprox.vlab import catalog
+    from pegaprox.api.vlab_accounts import expiry_fields
     desks_per, last, deps = {}, store.last_session_per_user(), catalog.user_departments()
+    expiry = expiry_fields()
     for d in store.list_desktops():
         if d['assigned_user']:
             desks_per[d['assigned_user']] = desks_per.get(d['assigned_user'], 0) + 1
@@ -1992,6 +1994,8 @@ def assignable_users():
                     'totp_enabled': bool(u.get('totp_enabled')), 'last_login': u.get('last_login'),
                     'must_change_password': bool(u.get('force_password_change')),
                     'department_id': deps.get(name),
+                    'expires_at': (expiry.get(name) or {}).get('expires_at'),
+                    'expired': bool((expiry.get(name) or {}).get('expired')),
                     'desktops': desks_per.get(name, 0), 'last_connected': last.get(name)})
     out.sort(key=lambda u: u['username'])
     return jsonify({'users': out})

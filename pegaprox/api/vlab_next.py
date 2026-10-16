@@ -11,8 +11,8 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/departments/<id>/members        ?children=1 includes sub-departments  vlab.pool.view
   PUT    /api/vlab/admin/users/<username>/department     {department_id|null}                 admin.users
 
-  POST   /api/vlab/admin/users                           {username, password, display_name?, email?, role?, department_id?, must_change_password?}  admin.users
-  PUT    /api/vlab/admin/users/<username>                {display_name?, email?, role?, enabled?, department_id?}  admin.users
+  POST   /api/vlab/admin/users                           {username, password, display_name?, email?, role?, department_id?, must_change_password?, expires_at?}  admin.users
+  PUT    /api/vlab/admin/users/<username>                {display_name?, email?, role?, enabled?, department_id?, expires_at?}  admin.users
   DELETE /api/vlab/admin/users/<username>                                                     admin.users
   PUT    /api/vlab/admin/users/<username>/password       {password, must_change_password?}    admin.users
   DELETE /api/vlab/admin/users/<username>/2fa            clear the account's TOTP             admin.users
@@ -21,12 +21,15 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   /api/vlab/admin/roles, PUT/DELETE .../<id>, POST .../templates/<id>/apply   custom roles  admin.roles
   (thin wrappers over the core routes of pegaprox/api/users.py)
 
-  GET    /api/vlab/signup/config                         is sign-up open, the departments     public
-  POST   /api/vlab/signup                                {username, password, display_name?, email?, department_id?, note?}  public
-  GET    /api/vlab/admin/signups                         ?status=pending|approved|rejected     admin.users
-  POST   /api/vlab/admin/signups/<id>/approve            makes the account (role user, portal only)  admin.users
+  GET    /api/vlab/signup/config                         is sign-up open, the departments, mail check, terms  public
+  POST   /api/vlab/signup                                {username, password, display_name?, email?, department_id?, note?, terms_version?}  public
+  GET    /api/vlab/admin/signups                         ?status=pending|approved|rejected (with email_verified)  admin.users
+  POST   /api/vlab/admin/signups/<id>/approve            {expires_at?} makes the account (role user, portal only)  admin.users
   POST   /api/vlab/admin/signups/<id>/reject             {reason?}                            admin.users
-  GET/PUT /api/vlab/admin/signup-settings                {enabled}                            admin.settings
+  GET/PUT /api/vlab/admin/signup-settings                {enabled, verify_email, auto_domains, auto_role, auto_department_id,
+                                                         auto_pool_ids, auto_expires_at}      admin.settings
+  (mail verification, institution auto approval, password reset, bulk import, expiry and
+  terms: pegaprox/api/vlab_accounts.py)
 
   GET/POST /api/vlab/admin/usb-devices, PUT/DELETE .../<id>   the USB device library       vlab.pool.view / manage
   GET/POST /api/vlab/admin/gateways, PUT/DELETE .../<id>, POST .../<id>/check   gateways    vlab.pool.view / manage
@@ -126,6 +129,7 @@ from urllib.parse import quote as _quote
 from flask import Blueprint, has_request_context, jsonify, request
 
 from pegaprox.api import vlab as core
+from pegaprox.api import vlab_accounts as acct
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
@@ -281,8 +285,9 @@ def set_user_department(username):
 # at the next sign-in" (force_password_change, answered by the login as
 # requires_password_change and cleared by /api/auth/change-password).
 
-_USER_CREATE_KEYS = ('username', 'password', 'display_name', 'email', 'role', 'department_id', 'must_change_password')
-_USER_UPDATE_KEYS = ('display_name', 'email', 'role', 'enabled', 'department_id')
+_USER_CREATE_KEYS = ('username', 'password', 'display_name', 'email', 'role', 'department_id', 'must_change_password', 'expires_at')
+_USER_UPDATE_KEYS = ('display_name', 'email', 'role', 'enabled', 'department_id', 'expires_at')
+_OURS = ('department_id', 'expires_at')    # kept here, not by the core route
 _ROLE_KEYS = ('name', 'permissions', 'tenant_id')
 
 
@@ -302,6 +307,9 @@ def _only(data, allowed):
     dep = data.get('department_id')
     if dep is not None and (not isinstance(dep, str) or (dep and not catalog.get_department(dep))):
         raise ValueError('department_id: no such department')
+    if 'expires_at' in data:
+        from pegaprox.vlab import accounts
+        accounts.parse_day(data['expires_at'])
 
 
 def _core_ok(resp):
@@ -333,6 +341,8 @@ def create_account():
         _only(data, _USER_CREATE_KEYS)
     except ValueError as e:
         return _bad(str(e))
+    if data.get('expires_at') and (data.get('role') or 'user') == 'admin':
+        return _bad('expires_at: an administrator account does not expire')
     resp = core_users.create_user()
     ok, body = _core_ok(resp)
     if not ok:
@@ -342,8 +352,11 @@ def create_account():
         catalog.set_department(name, data['department_id'])
     if data.get('must_change_password'):
         _force_password_change(name, True)
+    exp = None
+    if data.get('expires_at'):
+        exp = (acct.apply_expiry(name, data['expires_at'], _user()) or {}).get('expires_at')
     return jsonify({'user': dict(body['user'], department_id=data.get('department_id') or None,
-                                 must_change_password=bool(data.get('must_change_password')))}), 201
+                                 must_change_password=bool(data.get('must_change_password')), expires_at=exp)}), 201
 
 
 @bp.route('/api/vlab/admin/users/<username>', methods=['PUT'])
@@ -359,13 +372,21 @@ def update_account(username):
         _only(data, _USER_UPDATE_KEYS)
     except ValueError as e:
         return _bad(str(e))
-    if any(k in data for k in _USER_UPDATE_KEYS if k != 'department_id'):
+    if 'expires_at' in data:
+        from pegaprox.utils.auth import load_users
+        role = data.get('role') or ((load_users() or {}).get(username) or {}).get('role')
+        if data['expires_at'] and role == 'admin':
+            return _bad('expires_at: an administrator account does not expire')
+    if any(k in data for k in _USER_UPDATE_KEYS if k not in _OURS):
         resp = core_users.update_user(username)
         if not _core_ok(resp)[0]:
             return resp
     if 'department_id' in data:
         catalog.set_department(username, data['department_id'] or None)
         log_audit(_user(), 'vlab.department.member', f"{username} -> {data['department_id'] or '(none)'}", get_client_ip())
+    if 'expires_at' in data:
+        row = acct.apply_expiry(username, data['expires_at'], _user())
+        log_audit(_user(), 'vlab.account.expiry', f"{username}: last day {row['expires_at'] if row else 'none'}", get_client_ip())
     return jsonify({'success': True})
 
 
@@ -378,7 +399,9 @@ def delete_account(username):
         return _bad('User not found', 404)
     resp = core_users.delete_user(username)
     if _core_ok(resp)[0]:
+        from pegaprox.vlab import accounts
         catalog.set_department(username, None)
+        accounts.forget(username)
     return resp
 
 
@@ -502,17 +525,21 @@ MAX_PENDING_PER_IP = 5
 
 
 def _signup_settings():
-    from pegaprox.api.helpers import load_server_settings
-    saved = (load_server_settings() or {}).get(_SIGNUP_KEY) or {}
-    return {'enabled': bool(saved.get('enabled', False))}
+    return acct.signup_settings()
 
 
 @bp.route('/api/vlab/signup/config', methods=['GET'])
 def signup_config():
-    """For the sign-in screen: whether to offer 가입 신청, and the departments to pick."""
+    """For the sign-in screen: whether to offer 가입 신청, the departments to pick, whether
+    the mail is checked, the institution domains approved at once, and the terms version."""
     s = _signup_settings()
     deps = [{'id': d['id'], 'name': d['name'], 'parent_id': d['parent_id']} for d in catalog.list_departments()] if s['enabled'] else []
-    return jsonify({'enabled': s['enabled'], 'departments': deps})
+    t = acct.terms_settings()
+    out = {'enabled': s['enabled'], 'departments': deps}
+    if s['enabled']:
+        out.update(verify_email=s['verify_email'], auto_domains=s['auto_domains'],
+                   terms={'enabled': t['enabled'], 'version': t['version']})
+    return jsonify(out)
 
 
 @bp.route('/api/vlab/signup', methods=['POST'])
@@ -538,6 +565,13 @@ def signup():
         return _bad(str(e))
     if email and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
         return _bad('email is not valid')
+    settings = _signup_settings()
+    if settings['verify_email'] == 'required' and not email:
+        return _bad('email: a mail address is needed to check it')
+    terms = acct.terms_settings()
+    if terms['enabled'] and str(data.get('terms_version') or '') != terms['version']:
+        return jsonify({'error': 'Agree to the terms of use and the privacy policy', 'code': 'TERMS_REQUIRED',
+                        'version': terms['version']}), 400
     dep = str(data.get('department_id') or '').strip() or None
     if dep and not catalog.get_department(dep):
         return _bad('department_id: no such department')
@@ -551,7 +585,12 @@ def signup():
     salt, pw_hash = hash_password(password)
     req = catalog.add_signup(username, display, email, dep, note, salt, pw_hash, ip)
     log_audit(username, 'vlab.signup.request', f"sign-up request {req['id']}", ip)
-    return jsonify({'request': {'id': req['id'], 'status': req['status']}}), 201
+    from pegaprox.vlab import accounts
+    if terms['enabled']:
+        accounts.add_consent(username, terms['version'], 'signup', ip)
+    verify = acct.after_signup(req)
+    return jsonify({'request': {'id': req['id'], 'status': req['status'], 'verify': verify,
+                                'auto': verify != 'none' and accounts.domain_matches(email, settings['auto_domains'])}}), 201
 
 
 @bp.route('/api/vlab/admin/signups', methods=['GET'])
@@ -560,36 +599,31 @@ def list_signups():
     status = request.args.get('status') or None
     if status and status not in ('pending', 'approved', 'rejected'):
         return _bad('status must be pending, approved or rejected')
-    return jsonify({'signups': catalog.list_signups(status), 'pending': catalog.count_pending()})
+    return jsonify({'signups': acct.signup_view(catalog.list_signups(status)), 'pending': catalog.count_pending(),
+                    'verify_email': _signup_settings()['verify_email']})
 
 
 @bp.route('/api/vlab/admin/signups/<sid>/approve', methods=['POST'])
 @require_auth(perms=['admin.users'])
 def approve_signup(sid):
-    from pegaprox.core.db import DEFAULT_TENANT_ID
-    from pegaprox.models.permissions import ROLE_USER
-    from pegaprox.utils.auth import load_users, save_users
+    """{expires_at?}: the account's last day of use (사용 기한)."""
+    from pegaprox.vlab import accounts
     req = catalog.get_signup(sid, with_secret=True)
     if not req:
         return _bad('Request not found', 404)
     if req['status'] != 'pending':
         return _bad(f"This request is already {req['status']}", 409)
-    users = load_users()
-    if req['username'] in users:
-        catalog.review_signup(sid, 'rejected', _user(), 'username taken meanwhile')
-        return _bad('The username was taken meanwhile - the request is rejected', 409)
-    stamp = datetime.now().isoformat()
-    users[req['username']] = {
-        'password_salt': req['password_salt'], 'password_hash': req['password_hash'], 'password_changed_at': stamp,
-        'role': ROLE_USER, 'display_name': req['display_name'] or req['username'], 'email': req['email'], 'enabled': True,
-        'created_at': stamp, 'last_login': None, 'tenant_id': DEFAULT_TENANT_ID, 'permissions': [], 'denied_permissions': [],
-        'portal_only': True,
-    }
-    save_users(users)
-    if req['department_id'] and catalog.get_department(req['department_id']):
-        catalog.set_department(req['username'], req['department_id'])
-    out = catalog.review_signup(sid, 'approved', _user())
-    log_audit(_user(), 'user.created', f"Approved sign-up of {req['username']} (role: user, portal only)", get_client_ip())
+    try:
+        day = accounts.parse_day(_body().get('expires_at'))
+    except ValueError as e:
+        return _bad(str(e))
+    err = acct.create_from_signup(req, _user(), expires_at=day.isoformat() if day else None)
+    if err:
+        return _bad(err, 409)
+    out = acct.signup_view([catalog.get_signup(sid)])[0]
+    log_audit(_user(), 'user.created', f"Approved sign-up of {req['username']} (role: user, portal only)"
+              + (f', until {day.isoformat()}' if day else '') + ('' if out['email_verified'] else ', mail not verified'),
+              get_client_ip())
     return jsonify({'signup': out})
 
 
@@ -619,15 +653,21 @@ def get_signup_settings():
 @bp.route('/api/vlab/admin/signup-settings', methods=['PUT'])
 @require_auth(perms=['admin.settings'])
 def put_signup_settings():
+    """Keys left out stay. auto_domains: mail of these domains (and their sub-domains), once
+    verified, makes the account at once with auto_role, auto_department_id, auto_pool_ids
+    and auto_expires_at; any other address waits for the review as before."""
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     data = _body()
-    if not isinstance(data.get('enabled'), bool):
-        return _bad('enabled must be true or false')
+    try:
+        new = acct.clean_signup_settings(data)
+    except ValueError as e:
+        return _bad(str(e))
     settings = load_server_settings() or {}
-    settings[_SIGNUP_KEY] = {'enabled': data['enabled']}
+    settings[_SIGNUP_KEY] = new
     if not save_server_settings(settings):
         return _bad('Could not save the settings', 500)
-    log_audit(_user(), 'vlab.signup.settings', f"sign-up {'open' if data['enabled'] else 'closed'}", get_client_ip())
+    log_audit(_user(), 'vlab.signup.settings', f"sign-up {'open' if new['enabled'] else 'closed'}, mail check "
+              f"{new['verify_email']}, auto domains {', '.join(new['auto_domains']) or '-'}", get_client_ip())
     return jsonify({'signup': _signup_settings()})
 
 

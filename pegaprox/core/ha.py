@@ -334,6 +334,8 @@ SYNC_TABLES = (
     'vlab_enroll_codes', 'vlab_terminal_enrollments',
     # research data (pegaprox/vlab/datasets.py): the catalog, export rules and requests, the transfer log
     'vlab_datasets', 'vlab_data_policies', 'vlab_data_requests', 'vlab_data_transfers',
+    # account extras: reset links, sign-up mail checks, expiry, terms consents (pegaprox/vlab/accounts.py)
+    'vlab_password_resets', 'vlab_signup_verify', 'vlab_account_expiry', 'vlab_terms_consents',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
