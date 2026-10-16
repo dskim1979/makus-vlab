@@ -321,6 +321,8 @@ SYNC_TABLES = (
     'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
     'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
     'vlab_desktop_versions', 'vlab_build_jobs',
+    # MOAVI Desk shared storage (pegaprox/vlab/nas.py): the pool's NAS and the last mount per desktop and user
+    'vlab_pool_storage', 'vlab_storage_mounts', 'vlab_storage_ids',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -375,6 +377,7 @@ ENCRYPTED_COLUMNS = {
     'pbs_servers': ('pass_encrypted', 'api_token_secret_encrypted', 'ssh_key_encrypted'),
     'vmware_servers': ('pass_encrypted',),
     'auto_install_profiles': ('answer_encrypted',),
+    'vlab_pool_storage': ('password_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 

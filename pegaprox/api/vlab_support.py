@@ -7,7 +7,7 @@
 the period is at most MAX_DAYS long and defaults to the last 24 hours. Options (0/1):
   logs=1        engine and per-cluster log lines in the period
   audit=1       the audit log in the period
-  sessions=1    vLAB sessions, card loans, build jobs, alerts in the period
+  sessions=1    vLAB sessions, card loans, build jobs, alerts in the period, shared storage checks (last per desktop and user)
   tasks=1       Proxmox tasks that started in the period
   config=1      pools, desktops, gateways, licence servers ... as they are now
   mask_ips=1    192.168.10.21 -> 192.x.x.x everywhere in the bundle
@@ -143,14 +143,30 @@ def _activity(start, end):
         'card_loans.json': _rows('SELECT * FROM vlab_leases WHERE starts_at <= ? AND (COALESCE(returned_at, ends_at) IS NULL OR COALESCE(returned_at, ends_at) >= ?) ORDER BY starts_at', (b, a)),
         'build_jobs.json': [dict(j, output=(j.get('output') or '')[-4000:]) for j in
                             _rows('SELECT * FROM vlab_build_jobs WHERE created_at <= ? AND (finished_at IS NULL OR finished_at >= ?) ORDER BY created_at', (b, a))],
+        'storage_mounts.json': _storage_rows(),
         'alerts.json': _rows('SELECT * FROM active_alerts WHERE triggered_at <= ? AND (resolved_at IS NULL OR resolved_at >= ?) ORDER BY triggered_at', (_local(end), _local(start))),
     }
+
+
+def _storage_rows():
+    """공유 저장소: the last check per desktop and user, failures and warnings first."""
+    try:
+        from pegaprox.vlab import nas
+        rows = nas.results(limit=5000)
+    except Exception as e:
+        return [{'error': str(e)}]
+    return sorted(rows, key=lambda r: (r['ok'] is True and not r['warnings'], r['at']))
 
 
 def _audit(start, end):
     # the core audit log keeps naive local ISO text
     return _rows('SELECT timestamp, user, action, details, ip_address, cluster, severity FROM audit_log '
                  'WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp', (_local(start), _local(end)))
+
+
+def _pool_storage():
+    from pegaprox.vlab import nas
+    return {p['id']: nas.get(p['id']) for p in store.list_pools()}
 
 
 def _config():
@@ -167,6 +183,8 @@ def _config():
         'license_servers.json': catalog.list_license_servers(),
         'usb_devices.json': catalog.list_usb_devices(),
         'departments.json': catalog.list_departments(),
+        # 공유 저장소 per pool: has_password only, never the password
+        'pool_storage.json': _pool_storage(),
     }
     try:
         from pegaprox.api.helpers import load_server_settings

@@ -101,6 +101,13 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   GET    /api/vlab/admin/clusters/<id>/ha                Proxmox HA resources, groups, quorum   vlab.pool.view + ha.view
   POST   .../ha/resources {vmid, state?, group?, ...}, DELETE .../ha/resources/<vmid>   vlab.pool.manage + ha.config
   POST   .../ha/groups {group, nodes, ...}, DELETE .../ha/groups/<group>               vlab.pool.manage + ha.config
+
+  공유 저장소 (shared NAS storage, pegaprox/vlab/nas.py, the block at the end):
+  GET    /api/vlab/admin/pools/<id>/storage              the setting (never the password), last results  vlab.pool.view
+  PUT    /api/vlab/admin/pools/<id>/storage              {enabled, kind, server, share, ..., smb_password?}  vlab.pool.manage
+  POST   /api/vlab/admin/pools/<id>/storage/check        {desktop_id?} apply it now on running VMs     vlab.pool.manage
+  GET    /api/vlab/me/storage                            the caller's build folders                    vlab.desk
+  (applied on connect, on a shared pool's routing and before a build job starts)
 """
 
 import base64
@@ -121,7 +128,7 @@ from pegaprox.api import vlab as core
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import catalog, store
+from pegaprox.vlab import catalog, nas, store
 
 bp = Blueprint('vlab_next', __name__)
 
@@ -1445,6 +1452,13 @@ def put_pool_grants(pool_id):
         settings['shared'] = dict(settings.get('shared') or {}, max_sessions=ms)
         store.set_pool_settings(pool_id, settings)
     out = catalog.set_pool_grants(pool_id, clean)
+    try:
+        made = provision_granted(pool, [g['subject_id'] for g in clean if g['subject_type'] == 'user'])
+        for u, why in made.items():
+            if why:
+                log_audit(_user(), 'vlab.storage.fail', f"pool '{pool['name']}': folders of {u} not made: {why}", get_client_ip())
+    except Exception as e:
+        logging.warning(f"[VLAB] shared storage folders on grant: {e}")
     log_audit(_user(), 'vlab.pool.grants', f"pool '{pool['name']}': {len(out)} grants "
               + ', '.join(f"{g['subject_type']}:{g['subject_id']}" for g in out[:10]), get_client_ip())
     return jsonify({'grants': out, 'max_sessions': _max_sessions(store.get_pool(pool_id))})
@@ -1542,7 +1556,11 @@ def route_shared(pool_id):
     d = best[1]
     if not core._acl_set(d['cluster_id'], d['vmid'], username, True):
         return _bad('VM access list unavailable - try again', 503)
-    return jsonify({'desktop': {'id': d['id'], 'name': d['name']}, 'sessions': counts.get(d['id'], 0), 'limit': limit})
+    out = {'desktop': {'id': d['id'], 'name': d['name']}, 'sessions': counts.get(d['id'], 0), 'limit': limit}
+    st = storage_on_connect(d, pool, None, (live.get(int(d['vmid'])) or {}).get('node') or d['node'], username)
+    if st:
+        out['storage'] = st
+    return jsonify(out)
 
 
 # --- RDP files and Guacamole -------------------------------------------------------------
@@ -1805,9 +1823,15 @@ def _agent(mgr, node, vmid, path):
     return f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(vmid)}/agent/{path}"
 
 
-def _start_job(job, desk, mgr, node):
-    cmd = job['command'] if not job['workdir'] else f"cd {shlex.quote(job['workdir'])} && {job['command']}"
-    resp = mgr._api_post(_agent(mgr, node, desk['vmid'], 'exec'), data={'command': ['/bin/bash', '-lc', cmd]})
+def _start_job(job, desk, mgr, node, as_user=None):
+    """as_user: a job in the user's scratch folder runs as that user (their files, their uid on
+    the NAS) and makes its own folder first."""
+    wd = shlex.quote(job['workdir']) if job['workdir'] else ''
+    cmd = job['command'] if not wd else (f"mkdir -p {wd} && cd {wd} && {job['command']}" if as_user else f"cd {wd} && {job['command']}")
+    argv = ['/bin/bash', '-lc', cmd]
+    if as_user:
+        argv = ['runuser', '-u', as_user, '--'] + argv
+    resp = mgr._api_post(_agent(mgr, node, desk['vmid'], 'exec'), data={'command': argv})
     if getattr(resp, 'status_code', 0) != 200:
         return None, (getattr(resp, 'text', '') or 'guest agent refused')[:300]
     try:
@@ -1855,7 +1879,17 @@ def refresh_jobs(pool_id=None):
             continue
         d = free[0]
         node = (live.get(int(d['vmid'])) or {}).get('node') or d['node']
-        pid, err = _start_job(job, d, mgr, node)
+        st = storage_on_connect(d, pool, mgr, node, job['username'])
+        cfg = storage_config(pool['id']) if st else None
+        on_nas = bool(cfg and job['workdir'].startswith(cfg['linux_path'] + '/'))
+        if on_nas and st['ok'] is False:
+            # the job would start in a folder that is not there; say why instead
+            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], finished_at=store.now(),
+                                     error=f"shared storage not ready on {d['name']}: {st['code']} {st['detail']}"[:300])
+            continue
+        scratch = _scratch_dir(pool, job['username'])
+        mine = bool(on_nas and scratch and job['workdir'].startswith(scratch + '/'))
+        pid, err = _start_job(job, d, mgr, node, as_user=nas.guest_name(job['username']) if mine else None)
         if err:
             catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], error=err, finished_at=store.now())
         else:
@@ -1867,6 +1901,13 @@ def _job_view(j):
     desk = store.get_desktop(j['desktop_id']) if j.get('desktop_id') else None
     pool = store.get_pool(j['pool_id'])
     return dict(j, desktop=desk['name'] if desk else None, pool=pool['name'] if pool else None)
+
+
+def _add_job(pool, username, name, command, workdir):
+    """A queued job; with no work folder and shared storage on, it gets scratch/<user>/<job id>."""
+    job = catalog.add_build_job(pool['id'], username, name, command, workdir)
+    base = '' if workdir else _scratch_dir(pool, username)
+    return catalog.update_build_job(job['id'], workdir=f"{base}/{job['id']}") if base else job
 
 
 def _job_body():
@@ -1884,7 +1925,7 @@ def _job_body():
 @require_auth(perms=['vlab.desk'])
 def my_build_jobs():
     refresh_jobs()
-    pools = [{'id': p['id'], 'name': p['name']} for p in store.list_pools()
+    pools = [{'id': p['id'], 'name': p['name'], 'workdir': _scratch_dir(p, _user())} for p in store.list_pools()
              if p['type'] == 'buildfarm' and core._can_reach(p['cluster_id']) and granted(p['id'], _user())]
     return jsonify({'jobs': [_job_view(j) for j in catalog.list_build_jobs(username=_user(), limit=100)], 'pools': pools})
 
@@ -1902,7 +1943,7 @@ def submit_build_job():
         return _bad('Build farm pool not found', 404)
     if len(catalog.jobs_in('queued')) >= 500:
         return _bad('The build queue is full', 429)
-    job = catalog.add_build_job(pool['id'], _user(), name, command, workdir)
+    job = _add_job(pool, _user(), name, command, workdir)
     log_audit(_user(), 'vlab.build.submit', f"build '{name}' to pool '{pool['name']}'", get_client_ip())
     refresh_jobs(pool['id'])
     return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
@@ -1947,7 +1988,7 @@ def admin_submit_build_job():
     owner = str(_body().get('username') or '').strip() or _user()
     if owner not in load_users():
         return _bad('No such user')
-    job = catalog.add_build_job(pool['id'], owner, name, command, workdir)
+    job = _add_job(pool, owner, name, command, workdir)
     log_audit(_user(), 'vlab.build.submit', f"build '{name}' for {owner} to pool '{pool['name']}'", get_client_ip())
     refresh_jobs(pool['id'])
     return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
@@ -3593,3 +3634,397 @@ def cluster_ha_group_remove(cluster_id, group):
     if not _HA_GROUP_RE.fullmatch(group):
         return _bad('Invalid group')
     return core_clusters.delete_proxmox_ha_group(cluster_id, group)
+
+
+# --- 공유 저장소 (shared NAS storage, pegaprox/vlab/nas.py) ---------------------------------
+#
+# Folders by purpose (home, project, scratch), reached through autofs on Linux and a sign-in
+# script in the user's own session on Windows; the engine checks through the QEMU guest agent
+# that the map and the folders are there and fixes only what is missing. It runs inside the
+# request that asks for it - a connect, a shared pool's routing, a build job's start
+# (refresh_jobs), a pool grant - so the exits go out as that request's (ha.guard asks for a round
+# of its own there) and no background step is added: nothing here asks ha.confirm_step. A guest
+# without an agent, or a check that fails, never stops the connect: the answer carries it, the
+# pool page shows it, the audit trail keeps it, the alert channels hear of it (once an hour per
+# pool) and the support bundle has it.
+
+STORAGE_FRESH = 300      # seconds a good result stands before the guest is asked again
+STORAGE_WAIT = 8.0       # seconds a connect waits for the guest script
+STORAGE_ALERT_EVERY = 3600
+USAGE_EVERY = 6 * 3600   # how often a folder's size is measured (du) on a connect
+CLEAN_EVERY = 24 * 3600  # how often old build job folders in scratch are removed
+DATA_ON_NAS_ONLY = ('reset', 'classroom')   # pools whose desktops go back to their base
+_storage_alerted = {}
+
+
+def storage_config(pool_id):
+    cfg = nas.get(pool_id)
+    return cfg if cfg['enabled'] and cfg['server'] and cfg['share'] else None
+
+
+def _dept_name(username):
+    dep = catalog.department_of(username)
+    d = catalog.get_department(dep) if dep else None
+    return d['name'] if d else ''
+
+
+def _user_folders(cfg, pool, username):
+    try:
+        return nas.folders_for(cfg, username, _dept_name(username), pool['name'])
+    except ValueError:
+        return None
+
+
+def storage_paths(pool, username):
+    """The user's folders in the pool: {kind, folders: {home|project|scratch: {linux, windows,
+    nas, folder, quota_gb, retention_days?}}, data_on_nas_only}; None without shared storage."""
+    cfg = storage_config(pool['id'])
+    folders = _user_folders(cfg, pool, username) if cfg else None
+    if not folders:
+        return None
+    out = {}
+    for key, p in nas.paths(cfg, folders).items():
+        f = cfg['folders'][key]
+        out[key] = dict(p, folder=folders[key], quota_gb=f['quota_gb'], **({'retention_days': f['retention_days']} if key == 'scratch' else {}))
+    return {'kind': cfg['kind'], 'folders': out, 'data_on_nas_only': pool.get('type') in DATA_ON_NAS_ONLY}
+
+
+def _scratch_dir(pool, username):
+    """Where the user's build jobs start (a folder per job under it), '' when not on the NAS."""
+    cfg = storage_config(pool['id'])
+    if not cfg or not cfg['build_workdir'] or not cfg['folders']['scratch']['enabled']:
+        return ''
+    folders = _user_folders(cfg, pool, username)
+    return f"{cfg['linux_path']}/{folders['scratch']}" if folders else ''
+
+
+def _guest_os(mgr, node, vmid):
+    """'windows' or 'linux' from the agent's get-osinfo, None when the agent does not answer."""
+    try:
+        resp = mgr._api_get(_agent(mgr, node, vmid, 'get-osinfo'))
+        if getattr(resp, 'status_code', 0) != 200:
+            return None
+        info = ((resp.json() or {}).get('data') or {}).get('result') or {}
+    except Exception:
+        return None
+    return 'windows' if str(info.get('id') or '').lower().startswith('mswindows') else 'linux'
+
+
+def _agent_run(mgr, node, vmid, command, stdin=None, wait=STORAGE_WAIT):
+    """Run a command through the guest agent and wait up to `wait` seconds.
+    (exit code or None while it runs, stdout, stderr, error text)."""
+    data = {'command': command}
+    if stdin:
+        data['input-data'] = stdin
+    try:
+        resp = mgr._api_post(_agent(mgr, node, vmid, 'exec'), data=data)
+    except Exception as e:
+        return None, '', '', str(e)[:300]
+    if getattr(resp, 'status_code', 0) != 200:
+        return None, '', '', (getattr(resp, 'text', '') or 'guest agent refused')[:300]
+    try:
+        pid = (resp.json().get('data') or {}).get('pid')
+    except Exception:
+        pid = None
+    if not pid:
+        return None, '', '', 'guest agent returned no pid'
+    end = time.monotonic() + wait
+    while True:
+        try:
+            st = mgr._api_get(_agent(mgr, node, vmid, 'exec-status'), params={'pid': pid})
+            st = (st.json().get('data') or {}) if getattr(st, 'status_code', 0) == 200 else {}
+        except Exception:
+            st = {}
+        if st.get('exited'):
+            return st.get('exitcode'), st.get('out-data') or '', st.get('err-data') or '', ''
+        if time.monotonic() >= end:
+            return None, '', '', ''
+        time.sleep(0.4)
+
+
+def _age(iso):
+    """Seconds since a store.now() time (UTC, with its offset)."""
+    from datetime import timezone
+    try:
+        then = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return 1e9
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def _storage_view(r, pool=None):
+    if not r:
+        return None
+    v = {k: r[k] for k in ('ok', 'code', 'detail', 'path', 'os', 'at', 'changed', 'warnings', 'usage')}
+    if pool and r.get('username'):
+        p = storage_paths(pool, r['username'])
+        if p:
+            v['paths'] = p
+    return v
+
+
+def _storage_failed(pool, desk, username, code, detail):
+    log_audit(username or 'system', 'vlab.storage.fail',
+              f"shared storage on {desk['name']} (qemu/{desk['vmid']}) for {username or '-'}: {code} {detail[:200]}", '')
+    if time.time() - _storage_alerted.get(pool['id'], 0) < STORAGE_ALERT_EVERY:
+        return
+    _storage_alerted[pool['id']] = time.time()
+    _alert(f"공유 저장소 연결 실패: {pool['name']}",
+           f"{desk['name']} 에서 {username or '-'} 사용자의 공유 저장소를 준비하지 못했습니다 ({code}). {detail[:300]}",
+           {'kind': 'storage_failed', 'pool': pool['name'], 'desktop': desk['name'], 'code': code, 'severity': 'warning'})
+
+
+def _storage_record(desk, pool, username, ok, code, detail, path, changed, os_kind, **extra):
+    nas.record(desk['id'], username, pool['id'], ok, code, detail, path, changed, os_kind, **extra)
+    return _storage_view(nas.last(desk['id'], username), pool)
+
+
+def _desk_users(cfg, pool, desk, username):
+    """{guest account: {template: folder}} of everyone who used the desktop, and the caller."""
+    out = {}
+    for u in set(nas.users_on(desk['id']) + ([username] if username else [])):
+        n, f = nas.guest_name(u), _user_folders(cfg, pool, u)
+        if n and f:
+            out[n] = f
+    return out
+
+
+def _engine_folders(cfg, folders, keys, uid, gid):
+    """create_by engine: make the missing folders on the engine host. Error text or None."""
+    for key in keys:
+        if key == 'project' or key not in folders:
+            continue
+        err = nas.engine_make(cfg, folders[key], uid, gid)
+        if err:
+            return err
+    return None
+
+
+def ensure_storage(desk, pool, username, mgr=None, node=None, force=False, wait=STORAGE_WAIT):
+    """Check the pool's share on the desktop (the autofs map, or the sign-in script on Windows)
+    and the user's folders; fix only what is missing. username '': the share alone. A good
+    result less than STORAGE_FRESH old is answered without asking the guest. Returns the
+    result view, None when the pool has no shared storage or the desktop is a container."""
+    cfg = storage_config(pool['id'])
+    if not cfg or desk.get('vm_type') != 'qemu':
+        return None
+    username = username or ''
+    prev = nas.last(desk['id'], username)
+    if not force and prev and prev['ok'] and _age(prev['at']) < STORAGE_FRESH:
+        return _storage_view(prev, pool)
+    name, folders = None, {}
+    if username:
+        name, folders = nas.guest_name(username), _user_folders(cfg, pool, username)
+        if not name or not folders:
+            return _storage_record(desk, pool, username, False, 'BAD_NAME',
+                                   f'{username!r} cannot be an account or folder name on the guest', '', False, '')
+    mgr = mgr or cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return _storage_view(prev, pool)
+    if not node:
+        live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
+        if live.get('status') != 'running':
+            return _storage_record(desk, pool, username, None, 'NOT_RUNNING', '', '', False, '')
+        node = live.get('node') or desk['node']
+    os_kind = _guest_os(mgr, node, desk['vmid'])
+    if not os_kind:
+        _storage_failed(pool, desk, username, 'NO_AGENT', '')
+        return _storage_record(desk, pool, username, False, 'NO_AGENT',
+                               'the QEMU guest agent does not answer (qemu-guest-agent installed, agent: 1 on the VM?)', '', False, '')
+    first = next((folders[k] for k in ('home', 'scratch', 'project') if k in folders), '')
+    users = _desk_users(cfg, pool, desk, username)
+    if os_kind == 'windows':
+        script = nas.windows_script(cfg, users)
+        command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]
+        path = (nas.paths(cfg, folders)[next(iter(folders))]['windows'] or '') if folders else ''
+        secret, measure, clean = '', False, 0
+    else:
+        measure = bool(username) and (force or _age((prev or {}).get('usage_at')) > USAGE_EVERY)
+        days = cfg['folders']['scratch'].get('retention_days') or 0
+        clean = days if username and 'scratch' in folders and _age((prev or {}).get('cleaned_at')) > CLEAN_EVERY else 0
+        script = nas.linux_script(cfg, name, folders, users=users, measure=measure, cleanup_days=clean)
+        command = ['/bin/sh', '-c', script]
+        path = f"{cfg['linux_path']}/{first}" if first else cfg['linux_path']
+        secret = nas.password(pool['id']) if cfg['kind'] == 'smb' and cfg['smb_auth'] == 'service' else ''
+    code, out, err, e = _agent_run(mgr, node, desk['vmid'], command, stdin=secret or None, wait=wait)
+    if code is None:
+        if e:
+            _storage_failed(pool, desk, username, 'AGENT_ERROR', e)
+            return _storage_record(desk, pool, username, False, 'AGENT_ERROR', e, path, False, os_kind)
+        return _storage_record(desk, pool, username, None, 'PENDING', 'still running on the guest', path, False, os_kind)
+    got = nas.parse_output(out)
+    changed = got.get('changed') == '1'
+    if code != 0:
+        label = nas.CODES.get(code, 'FAILED')
+        detail = (err or '').strip()[-500:] or f'exit {code}'
+        _storage_failed(pool, desk, username, label, detail)
+        return _storage_record(desk, pool, username, False, label, detail, path, False, os_kind)
+    warnings = []
+    if os_kind == 'windows':
+        warnings.append('AT_SIGN_IN')        # the drives come with the user's next sign-in
+    if got.get('autofs') == 'missing':
+        warnings.append('NO_AUTOFS')
+    if username and got.get('uid', '').isdigit() and got.get('gid', '').isdigit():
+        local = got.get('local') == '1'
+        nas.remember_ids(username, got['uid'], got['gid'], local)
+        if local and cfg['kind'] == 'nfs':
+            warnings.append('LOCAL_ACCOUNT')
+        missing = [k for k in got['missing'] if k != 'project']
+        if missing and cfg['create_by'] == 'engine':
+            why = _engine_folders(cfg, folders, missing, got['uid'], got['gid'])
+            if why:
+                _storage_failed(pool, desk, username, 'ENGINE_FOLDER', why)
+                return _storage_record(desk, pool, username, False, 'ENGINE_FOLDER', why, path, False, os_kind)
+            changed = True
+    if 'project' in got['missing']:
+        warnings.append('PROJECT_MISSING')
+    if got['atsignin']:
+        warnings.append('AT_SIGN_IN')
+    usage = got['usage']
+    for key, kb in usage.items():
+        q = (cfg['folders'].get(key) or {}).get('quota_gb') or 0
+        if q and kb > q * 1024 * 1024 and 'OVER_QUOTA' not in warnings:
+            warnings.append('OVER_QUOTA')
+    if changed:
+        log_audit(username or 'system', 'vlab.storage.mount', f"shared storage on {desk['name']} (qemu/{desk['vmid']}): {path}", '')
+    if 'LOCAL_ACCOUNT' in warnings and not (prev and 'LOCAL_ACCOUNT' in (prev.get('warnings') or [])):
+        log_audit(username, 'vlab.storage.warn', f"{desk['name']}: {name} is a local account - its uid is not the NAS's", '')
+    return _storage_record(desk, pool, username, True, 'OK', '', path, changed, os_kind, warnings=sorted(set(warnings)),
+                           usage=usage if measure else None, cleaned=bool(clean))
+
+
+def storage_on_connect(desk, pool, mgr, node, username):
+    """The connect route's step: never raises, never stops the connect."""
+    try:
+        return ensure_storage(desk, pool, username, mgr, node)
+    except Exception as e:
+        logging.warning(f"[VLAB] shared storage on {desk.get('name')}: {e}")
+        return None
+
+
+def provision_granted(pool, usernames):
+    """create_by engine: make the folders of users a grant names, when a guest already told the
+    engine their uid/gid (else at their first connect). Returns {username: error or None}."""
+    cfg = storage_config(pool['id'])
+    if not cfg or cfg['create_by'] != 'engine':
+        return {}
+    out = {}
+    for u in usernames:
+        ids, folders = nas.ids_of(u), _user_folders(cfg, pool, u)
+        if ids and folders:
+            out[u] = _engine_folders(cfg, folders, list(folders), ids['uid'], ids['gid'])
+    return out
+
+
+def _pool_storage_out(pool_id):
+    cfg = nas.get(pool_id)
+    rows = nas.results(pool_id=pool_id, limit=200)
+    desks = {d['id']: d['name'] for d in store.list_desktops(pool_id)}
+    for r in rows:
+        r['desktop'] = desks.get(r['desktop_id'])
+    status = {'ok': sum(1 for r in rows if r['ok'] is True), 'failed': sum(1 for r in rows if r['ok'] is False),
+              'pending': sum(1 for r in rows if r['ok'] is None),
+              'warnings': sum(1 for r in rows if r['ok'] and r['warnings']), 'last': rows[0] if rows else None}
+    pool = store.get_pool(pool_id)
+    files = None
+    if storage_config(pool_id) and not (cfg['kind'] == 'smb' and cfg['smb_auth'] == 'service'):
+        master, amap = nas.autofs_files(cfg)
+        files = {nas.AUTOFS_MASTER: master, nas.AUTOFS_MAP: amap}
+    return {'storage': cfg, 'status': status, 'results': rows[:50], 'autofs': files,
+            'data_on_nas_only': bool(pool and pool.get('type') in DATA_ON_NAS_ONLY)}
+
+
+def _storage_pool(pool_id):
+    pool = store.get_pool(pool_id)
+    if not pool or not core._can_reach(pool['cluster_id']):
+        return None, _bad('Pool not found', 404)
+    return pool, None
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/storage', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def get_pool_storage(pool_id):
+    _, err = _storage_pool(pool_id)
+    if err:
+        return err
+    return jsonify(dict(_pool_storage_out(pool_id), defaults=nas.DEFAULTS))
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/storage', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def set_pool_storage(pool_id):
+    pool, err = _storage_pool(pool_id)
+    if err:
+        return err
+    cfg, new_password, why = nas.validate(request.get_json(silent=True), nas.get(pool_id))
+    if why:
+        return _bad(why)
+    saved = nas.save(pool_id, cfg, new_password)
+    on = [k for k in nas.TEMPLATES if cfg['folders'][k]['enabled']]
+    what = (f"{cfg['kind']} {cfg['server']}:{cfg['share']} -> {cfg['linux_path']}, folders {', '.join(on)}, "
+            f"made by {cfg['create_by']}" if cfg['enabled'] else 'off')
+    if new_password is not None:
+        what += ', password changed' if new_password else ', password removed'
+    log_audit(_user(), 'vlab.pool.storage', f"pool '{pool['name']}': {what}", get_client_ip())
+    return jsonify({'storage': saved})
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/storage/check', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def check_pool_storage(pool_id):
+    """Check and fix it now on the pool's running VMs (at most 10), folder sizes measured: each
+    assigned user's folders, or the share alone on an unassigned one. {desktop_id?} for one."""
+    pool, err = _storage_pool(pool_id)
+    if err:
+        return err
+    if not storage_config(pool_id):
+        return _bad('Shared storage is off for this pool', 409)
+    mgr = cluster_managers.get(pool['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return _bad('Cluster not connected', 503)
+    only = str(_body().get('desktop_id') or '')
+    live = core._vm_states(pool['cluster_id'])
+    out = []
+    for d in store.list_desktops(pool_id):
+        if (only and d['id'] != only) or d['vm_type'] != 'qemu':
+            continue
+        vm = live.get(int(d['vmid'])) or {}
+        if vm.get('status') != 'running':
+            continue
+        r = ensure_storage(d, pool, d.get('assigned_user') or '', mgr, vm.get('node') or d['node'], force=True, wait=15.0)
+        out.append(dict(r or {}, desktop=d['name'], desktop_id=d['id'], username=d.get('assigned_user') or ''))
+        if len(out) >= 10:
+            break
+    log_audit(_user(), 'vlab.pool.storage.check', f"pool '{pool['name']}': {len(out)} VMs", get_client_ip())
+    return jsonify(dict(_pool_storage_out(pool_id), checked=out))
+
+
+@bp.route('/api/vlab/me/storage', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_storage():
+    """The caller's folders on shared storage: every pool with it the caller has a desktop in or
+    is granted (shared, build farm), the paths, quota, last measured size and last check."""
+    username = _user()
+    pools = {}
+    for d in store.desktops_of_user(username):
+        p = store.get_pool(d['pool_id'])
+        if p and core._can_reach(p['cluster_id']):
+            pools[p['id']] = p
+    for p in store.list_pools():
+        if (p['id'] not in pools and p['type'] in ('shared', 'buildfarm') and core._can_reach(p['cluster_id'])
+                and granted(p['id'], username)):
+            pools[p['id']] = p
+    out = []
+    for p in sorted(pools.values(), key=lambda x: x['name']):
+        paths = storage_paths(p, username)
+        if not paths:
+            continue
+        rows = nas.results(pool_id=p['id'], username=username, limit=20)
+        measured = next((r for r in rows if r.get('usage')), None)
+        out.append({'pool_id': p['id'], 'pool': p['name'], 'pool_type': p['type'], 'kind': paths['kind'],
+                    'folders': paths['folders'], 'data_on_nas_only': paths['data_on_nas_only'],
+                    'usage': measured['usage'] if measured else {}, 'usage_at': measured['usage_at'] if measured else None,
+                    'last': _storage_view(rows[0]) if rows else None})
+    return jsonify({'folders': out})

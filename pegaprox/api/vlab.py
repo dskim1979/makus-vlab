@@ -313,6 +313,9 @@ def my_desktops():
     for cid in {d['cluster_id'] for d in rows}:
         live[cid] = _vm_states(cid)
     last = store.last_connected(_user())
+    from pegaprox.api.vlab_next import storage_paths
+    from pegaprox.vlab import nas
+    pools = {}
     out = []
     for d in rows:
         v = _desktop_view(d, live.get(d['cluster_id'], {}))
@@ -321,6 +324,12 @@ def my_desktops():
         pol = pool_policy.effective(_settings_of(d))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
                        'start_on_connect': pol['start_on_connect']}
+        pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
+        paths = storage_paths(pool, _user()) if pool else None
+        if paths:
+            got = nas.last(d['id'], _user())
+            v['storage'] = dict(paths, ok=got['ok'] if got else None, code=got['code'] if got else '',
+                                warnings=got['warnings'] if got else [])
         out.append(v)
     return jsonify({'desktops': out})
 
@@ -455,6 +464,12 @@ def connect_desktop(desktop_id):
             ws_path += f"&pve_ticket={quote(str(ticket), safe='')}&pve_port={quote(str(port), safe='')}"
         answer = {'type': 'vnc', 'ws_path': ws_path, 'password': ticket, 'clipboard': pol['clipboard']}
 
+    if vm_type == 'qemu':
+        # 공유 저장소: mount the pool's NAS and make the user's folder; a failure is told, not fatal
+        from pegaprox.api.vlab_next import storage_on_connect
+        storage = storage_on_connect(desk, pool, mgr, node, username)
+        if storage:
+            answer['storage'] = storage
     answer['session_id'] = store.start_session(username, desk, protocol, get_client_ip())
     log_audit(username, 'vm.console', f"vLAB: {protocol} to desktop '{desk['name']}' ({vm_type}/{vmid})",
               get_client_ip())
@@ -2224,6 +2239,8 @@ def delete_pool(pool_id):
     if store.list_desktops(pool_id):
         return _bad('The pool still has desktops - take them out first', 409)
     store.delete_pool(pool_id)
+    from pegaprox.vlab import nas
+    nas.forget_pool(pool_id)
     log_audit(_user(), 'vlab.pool.delete', f"pool '{pool['name']}'", get_client_ip())
     return jsonify({'success': True})
 

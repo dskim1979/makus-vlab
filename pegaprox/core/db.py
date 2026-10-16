@@ -4867,7 +4867,12 @@ class PegaProxDB:
                                 # password of the host it builds. Missing here would mean a
                                 # rotation leaves every stored profile unreadable and the
                                 # next ISO fetch answering 500.
-                                ('auto_install_profiles', ('answer_encrypted',))):
+                                ('auto_install_profiles', ('answer_encrypted',)),
+                                # MOAVI Desk: the SMB service account of a pool's shared storage
+                                ('vlab_pool_storage', ('password_encrypted',))):
+                if not cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                      (_tbl,)).fetchone():
+                    continue    # a MOAVI Desk table is made on first use: nothing sealed in it yet
                 try:
                     cursor.execute(f"SELECT id, {', '.join(_cols)} FROM {_tbl}")
                     for _r in cursor.fetchall():

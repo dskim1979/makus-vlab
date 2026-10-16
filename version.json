@@ -197,6 +197,7 @@
     "pegaprox/vlab/catalog.py",
     "pegaprox/vlab/labs.py",
     "pegaprox/vlab/loans.py",
+    "pegaprox/vlab/nas.py",
     "pegaprox/vlab/policy.py",
     "pegaprox/vlab/store.py",
     "pegaprox/witness.py",

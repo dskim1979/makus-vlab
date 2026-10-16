@@ -651,7 +651,7 @@ def jobs_in(status, pool_id=None):
 
 
 def update_build_job(jid, **fields):
-    keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at')]
+    keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at', 'workdir')]
     if keys:
         db().execute(f"UPDATE vlab_build_jobs SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
                      tuple(fields[k] for k in keys) + (jid,))
