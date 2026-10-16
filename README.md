@@ -2,7 +2,7 @@
   <img src="images/vlab-logo.svg" alt="MOAVI Desk" height="56">
 </p>
 
-<h3 align="center">연구소·기업·교육 기관의 LAB과 FPGA 개발을 위한 가상 데스크톱(VDI) 플랫폼</h3>
+<h3 align="center">일반 업무 · 대학교 실습실 · 연구소 · FPGA/AI 연구실을 위한 가상 데스크톱(VDI) 플랫폼</h3>
 
 <p align="center">
   <img alt="Engine version" src="https://img.shields.io/badge/version-1.3.0-blue">
@@ -30,10 +30,29 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | ![VM 관리](docs/images/vm-manage.png) | ![서포트 번들](docs/images/support-bundle.png) |
 | **LAB 예약** | **단말 관리 (MOAVI Desk Agent)** |
 | ![LAB 예약](docs/images/reservations.png) | ![단말 관리](docs/images/terminals.png) |
+| **첫 설정 — 사이트 프로필** | **GPU 작업 큐** |
+| ![첫 설정](docs/images/setup-profile.png) | ![GPU 작업 큐](docs/images/gpu-queue.png) |
+| **환경 카탈로그** | **연구 데이터셋** |
+| ![환경 카탈로그](docs/images/env-catalog.png) | ![데이터셋](docs/images/datasets.png) |
 
 화면 전체는 [콘솔 저장소](https://github.com/dskim1979/makus-vlab-console#화면)에 있습니다.
 
 ## 주요 기능
+
+사이트마다 쓰는 기능이 달라서, 처음 설정 때 **사이트 프로필**을 고르면 그에 맞는 메뉴만 보입니다(`pegaprox/vlab/features.py`,
+`GET /api/vlab/features` · `PUT /api/vlab/admin/features`). 꺼진 기능 묶음은 화면에서 숨고 백그라운드 작업(LAB 일정 · 카드 회수 ·
+라이선스 감시 · GPU 큐)도 돌지 않으며, 데이터는 그대로 남습니다.
+
+| 프로필 | 켜지는 기능 묶음 |
+|---|---|
+| `general` 일반 업무 VDI (데스크톱 100대 안팎) | `org` 조직 · 권한, `external` 외부 접속 |
+| `small_lab` 소규모 연구실 | (기본만) |
+| `university` 대학교 실습실 | `lab` LAB · 단말 · 예약 · 키오스크, `signup` 가입 · 대량 계정, `org` |
+| `research` 연구소 · 기업 R&D | `org`, `external`, `data` 연구 데이터, `ha` 고가용성 |
+| 추가 묶음 | `fpga` FPGA 개발, `gpuai` GPU · AI 연구 |
+
+아직 고르지 않았으면 모든 기능이 켜져 있습니다. 무인 설치는 환경 변수 `VLAB_PROFILE=university`, `VLAB_FEATURES=gpuai,fpga`로
+처음 값을 정합니다(한 번만 적용, 이후는 콘솔 **운영 > 플랫폼 설정 > 기능**).
 
 | 영역 | 내용 |
 |---|---|
@@ -45,10 +64,12 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
 | FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
-| 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림 |
+| 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림, 기능별 좌석 사용 · 대기 · 거절 |
+| GPU · AI 연구 | 환경 카탈로그(OS · 드라이버 · CUDA · 툴체인 버전, 게스트에서 읽기, 호환표), NVIDIA MIG(레이아웃 · 모드, MIG vGPU 프로필), GPU 작업 큐(공정 분배 · 할당량 · 월 GPU-시간), 웹 IDE(JupyterLab · VS Code, vlab-proxy `/ide/`), GPU-시간 보고서, 실사용률과 유휴 카드 회수, 긴 작업 중 끄지 않기 |
+| 연구 데이터 | 데이터셋(NAS 위치 · 풀 · 접근), 포털 파일 전송(이어 올리기 · 이어 받기), 반출 신청 · 승인 · 일회용 링크, 풀별 반출 · 업로드 규칙, 용량 · 반출 보고서(CSV) |
 | LAB | LAB · 주간 시간표, 일정형 풀 준비 · 정리, 키오스크, LAB 예약(충돌 검사 · 승인 · 반복 · 참가자 · 자동 준비 · 노쇼 보고서), 단말 에이전트(MOAVI Desk Agent: 등록 코드 · 하트비트 · 키 자동 전달 · 1파일 설치) |
 | 공유 저장소 | 풀마다 NFS(autofs) · SMB, 사용자별 home · project · scratch 폴더(엔진이나 사용자가 만들고 VM root는 쓰지 않음), Windows 로그온 드라이브, 빌드 작업은 scratch에서, 실패해도 접속은 막지 않음 |
-| 사용자 | 로컬 계정 만들기 · 수정 · 삭제 · 비밀번호 · 2단계 인증 초기화 · 잠금 해제, 역할 관리, 내 계정(비밀번호 · TOTP), AD/LDAP, 가입 심사, 부서, 유효 권한 조회(권한이 어디서 왔는지) |
+| 사용자 | 로컬 계정 만들기 · 수정 · 삭제 · 비밀번호 · 2단계 인증 초기화 · 잠금 해제, 역할 관리, 내 계정(비밀번호 · TOTP), AD/LDAP, 가입 신청(메일 확인 · 약관 동의) · 심사, 비밀번호 찾기, CSV 일괄 등록 · 계정 만료, 부서, 유효 권한 조회(권한이 어디서 왔는지) |
 | 운영 | 대시보드, 시스템 요약, 작업 진행(Proxmox 작업 진행률 · 로그), 접속 끊기, 공지 배너, 사용률 보고서(일·풀·사용자별, CSV), 작업 기록(감사), 플랫폼 설정(폐쇄망 모드 포함), 서포트 번들(기간 지정 · 비밀 정보 제거 · IP/사용자 가리기) |
 | 클러스터 | Proxmox 클러스터 연결, 노드·스토리지 개요, 노드 유지보수 · 재시작, Proxmox HA 리소스 · 그룹, MOAVI Desk 서버 이중화(활성 · 대기) |
 
