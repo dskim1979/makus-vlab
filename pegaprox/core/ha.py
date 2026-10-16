@@ -316,6 +316,8 @@ SYNC_TABLES = (
     # MOAVI Desk (pegaprox/vlab/store.py): pools, desktops, grants and card loans are configuration;
     # sessions too, so the usage reports and session time limits carry over a failover
     'vlab_pools', 'vlab_desktops', 'vlab_pool_grants', 'vlab_leases', 'vlab_sessions',
+    # MOAVI Desk LABs: rooms, their terminals and weekly schedules (pegaprox/vlab/labs.py)
+    'vlab_labs', 'vlab_terminals', 'vlab_lab_schedules',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

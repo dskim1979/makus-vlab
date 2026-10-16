@@ -78,6 +78,42 @@ _SCHEMA = (
         result TEXT NOT NULL DEFAULT '',
         fail_reason TEXT NOT NULL DEFAULT ''
     )''',
+    # LABs: rooms, their terminals, and the weekly schedules of their pools (pegaprox/vlab/labs.py)
+    '''CREATE TABLE IF NOT EXISTS vlab_labs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        location TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        seats INTEGER NOT NULL DEFAULT 0,
+        tenant_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    )''',
+    '''CREATE TABLE IF NOT EXISTS vlab_terminals (
+        id TEXT PRIMARY KEY,
+        lab_id TEXT,
+        name TEXT NOT NULL DEFAULT '',
+        mac TEXT NOT NULL UNIQUE,
+        ip TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT 'pending',
+        registered_by TEXT NOT NULL DEFAULT '',
+        last_seen TEXT,
+        created_at TEXT NOT NULL
+    )''',
+    '''CREATE TABLE IF NOT EXISTS vlab_lab_schedules (
+        id TEXT PRIMARY KEY,
+        lab_id TEXT NOT NULL,
+        pool_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        weekdays TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        prepare_min INTEGER NOT NULL DEFAULT 10,
+        after TEXT NOT NULL DEFAULT 'reset',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_prepared TEXT NOT NULL DEFAULT '',
+        last_finished TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    )''',
 )
 
 _lock = threading.Lock()
@@ -150,6 +186,7 @@ def set_pool_settings(pool_id, settings):
 
 
 def delete_pool(pool_id):
+    db().execute('DELETE FROM vlab_lab_schedules WHERE pool_id = ?', (pool_id,))
     d = db()
     d.execute('DELETE FROM vlab_pool_grants WHERE pool_id = ?', (pool_id,))
     d.execute('DELETE FROM vlab_pools WHERE id = ?', (pool_id,))
@@ -344,3 +381,116 @@ def end_session(session_id, username):
         return False
     d.execute("UPDATE vlab_sessions SET ended_at = ?, result = 'ended' WHERE id = ?", (now(), session_id))
     return True
+
+
+# --- LABs, terminals, schedules -----------------------------------------------------
+
+def list_labs():
+    rows = db().query("""SELECT l.*,
+                                (SELECT COUNT(*) FROM vlab_terminals t WHERE t.lab_id = l.id AND t.state = 'approved') AS terminals,
+                                (SELECT COUNT(*) FROM vlab_terminals t WHERE t.lab_id = l.id AND t.state = 'pending') AS pending
+                         FROM vlab_labs l ORDER BY l.name""")
+    return [dict(r) for r in rows]
+
+
+def get_lab(lab_id):
+    r = db().query_one('SELECT * FROM vlab_labs WHERE id = ?', (lab_id,))
+    return dict(r) if r else None
+
+
+def save_lab(lab_id, name, location='', description='', seats=0, tenant_id=''):
+    d = db()
+    if lab_id:
+        d.execute('UPDATE vlab_labs SET name = ?, location = ?, description = ?, seats = ? WHERE id = ?',
+                  (name, location, description, int(seats), lab_id))
+        return get_lab(lab_id)
+    lid = new_id('lab')
+    d.execute('INSERT INTO vlab_labs (id, name, location, description, seats, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              (lid, name, location, description, int(seats), tenant_id, now()))
+    return get_lab(lid)
+
+
+def delete_lab(lab_id):
+    d = db()
+    d.execute('DELETE FROM vlab_lab_schedules WHERE lab_id = ?', (lab_id,))
+    d.execute('UPDATE vlab_terminals SET lab_id = NULL WHERE lab_id = ?', (lab_id,))
+    d.execute('DELETE FROM vlab_labs WHERE id = ?', (lab_id,))
+
+
+def list_terminals(lab_id=None):
+    if lab_id:
+        rows = db().query('SELECT * FROM vlab_terminals WHERE lab_id = ? ORDER BY name, mac', (lab_id,))
+    else:
+        rows = db().query('SELECT * FROM vlab_terminals ORDER BY state DESC, name, mac')
+    return [dict(r) for r in rows]
+
+
+def get_terminal(terminal_id):
+    r = db().query_one('SELECT * FROM vlab_terminals WHERE id = ?', (terminal_id,))
+    return dict(r) if r else None
+
+
+def terminal_by_mac(mac):
+    r = db().query_one('SELECT * FROM vlab_terminals WHERE mac = ?', (mac,))
+    return dict(r) if r else None
+
+
+def add_terminal(mac, name='', lab_id=None, ip='', state='pending', registered_by=''):
+    tid = new_id('term')
+    db().execute("""INSERT INTO vlab_terminals (id, lab_id, name, mac, ip, state, registered_by, last_seen, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (tid, lab_id, name, mac, ip, state, registered_by, now(), now()))
+    return get_terminal(tid)
+
+
+def update_terminal(terminal_id, **fields):
+    allowed = {k: v for k, v in fields.items() if k in ('lab_id', 'name', 'ip', 'state', 'last_seen')}
+    if allowed:
+        db().execute(f"UPDATE vlab_terminals SET {', '.join(f'{k} = ?' for k in allowed)} WHERE id = ?",
+                     (*allowed.values(), terminal_id))
+    return get_terminal(terminal_id)
+
+
+def delete_terminal(terminal_id):
+    db().execute('DELETE FROM vlab_terminals WHERE id = ?', (terminal_id,))
+
+
+def list_lab_schedules(lab_id=None):
+    if lab_id:
+        rows = db().query('SELECT * FROM vlab_lab_schedules WHERE lab_id = ? ORDER BY start_time', (lab_id,))
+    else:
+        rows = db().query('SELECT * FROM vlab_lab_schedules ORDER BY lab_id, start_time')
+    return [dict(r) for r in rows]
+
+
+def get_lab_schedule(schedule_id):
+    r = db().query_one('SELECT * FROM vlab_lab_schedules WHERE id = ?', (schedule_id,))
+    return dict(r) if r else None
+
+
+def save_lab_schedule(schedule_id, lab_id, pool_id, clean):
+    d = db()
+    if schedule_id:
+        d.execute("""UPDATE vlab_lab_schedules SET lab_id = ?, pool_id = ?, title = ?, weekdays = ?, start_time = ?,
+                     end_time = ?, prepare_min = ?, after = ?, enabled = ? WHERE id = ?""",
+                  (lab_id, pool_id, clean['title'], clean['weekdays'], clean['start_time'], clean['end_time'],
+                   clean['prepare_min'], clean['after'], clean['enabled'], schedule_id))
+        return get_lab_schedule(schedule_id)
+    sid = new_id('sch')
+    d.execute("""INSERT INTO vlab_lab_schedules (id, lab_id, pool_id, title, weekdays, start_time, end_time, prepare_min,
+                 after, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              (sid, lab_id, pool_id, clean['title'], clean['weekdays'], clean['start_time'], clean['end_time'],
+               clean['prepare_min'], clean['after'], clean['enabled'], now()))
+    return get_lab_schedule(sid)
+
+
+def mark_lab_schedule(schedule_id, phase, day):
+    col = 'last_prepared' if phase == 'prepare' else 'last_finished'
+    db().execute(f'UPDATE vlab_lab_schedules SET {col} = ? WHERE id = ?', (day, schedule_id))
+
+
+def delete_lab_schedule(schedule_id):
+    db().execute('DELETE FROM vlab_lab_schedules WHERE id = ?', (schedule_id,))
+
+
+def schedules_of_pool(pool_id):
+    return [dict(r) for r in db().query('SELECT * FROM vlab_lab_schedules WHERE pool_id = ?', (pool_id,))]

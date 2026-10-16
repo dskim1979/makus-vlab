@@ -38,6 +38,20 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   DELETE /api/vlab/admin/alert-channels/<cid>         remove one  admin.settings
   POST   /api/vlab/admin/alert-channels/<cid>/test    send a test alert  admin.settings
   GET    /api/vlab/admin/clusters/<cluster_id>/rightsizing  which VMs need more / can give back (core insights, ?days=7|30)  vlab.pool.view
+  GET    /api/vlab/admin/labs                         LABs with terminals, schedules, what runs now and next  vlab.pool.view
+  POST   /api/vlab/admin/labs                         {name, location?, description?, seats?}   vlab.pool.manage
+  PUT    /api/vlab/admin/labs/<lab_id>                change it                                 vlab.pool.manage
+  DELETE /api/vlab/admin/labs/<lab_id>                remove it (its schedules; terminals stay)  vlab.pool.manage
+  GET    /api/vlab/admin/terminals                    terminals (?lab_id)                       vlab.pool.view
+  POST   /api/vlab/admin/terminals                    {mac, name?, lab_id?, ip?} add one, approved  vlab.pool.manage
+  PUT    /api/vlab/admin/terminals/<terminal_id>      {name?, lab_id?, state?}                  vlab.pool.manage
+  DELETE /api/vlab/admin/terminals/<terminal_id>      remove it                                 vlab.pool.manage
+  POST   /api/vlab/terminals/register                 a client asks to be known {mac, name?} (waits for approval)  signed in
+  GET    /api/vlab/admin/lab-schedules                schedules (?lab_id)                       vlab.pool.view
+  POST   /api/vlab/admin/lab-schedules                {lab_id, pool_id, weekdays, start_time, end_time, prepare_min?, after?, title?}  vlab.pool.manage
+  PUT    /api/vlab/admin/lab-schedules/<id>           change it                                 vlab.pool.manage
+  DELETE /api/vlab/admin/lab-schedules/<id>           remove it                                 vlab.pool.manage
+  POST   /api/vlab/admin/lab-schedules/<id>/run       {phase: prepare|finish} now               vlab.pool.manage
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/storages  where backups can go (PBS first)  vlab.pool.view
   GET    /api/vlab/admin/clusters/<cluster_id>/backup/jobs      scheduled backups (the core route) + their pool  vlab.pool.view
   POST   /api/vlab/admin/pools/<pool_id>/backup/job   a scheduled backup of the pool's desktops (the core route)  vlab.pool.manage
@@ -87,6 +101,7 @@ able to reach that cluster (tenant scope) to see or change it. docs/vlab-design.
 """
 
 import json
+from datetime import datetime
 import re
 import logging
 
@@ -99,6 +114,7 @@ from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
 from pegaprox.vlab import VLAB_API_VERSION
 from pegaprox.vlab import accel
+from pegaprox.vlab import labs
 from pegaprox.vlab import policy as pool_policy
 from pegaprox.vlab import store
 
@@ -2319,6 +2335,304 @@ def reset_pool(pool_id):
     log_audit(_user(), 'vlab.pool.reset',
               f"pool '{pool['name']}': {len(done)} reset, {len(skipped)} skipped, {len(failed)} failed", get_client_ip())
     return jsonify({'reset': done, 'skipped': skipped, 'failed': failed})
+
+
+# --- LABs: rooms, terminals, schedules (pegaprox/vlab/labs.py) ---------------------------
+# A room's schedule gets the pool's desktops started `prepare_min` before a session and, at
+# its end, back to their base and off (or just off). lab_tick runs once a minute beside the
+# loan returns (pegaprox/vlab/loans.py); the routes manage rooms, terminals and schedules.
+
+LAB_POOL_TYPES = ('classroom', 'reset', 'shared')
+
+
+def _local_now():
+    return datetime.now()
+
+
+def _lab_view(lab, schedules, now):
+    current, upcoming = labs.state_at([x for x in schedules if x['lab_id'] == lab['id']], now)
+    return {**lab, 'schedules': sum(1 for x in schedules if x['lab_id'] == lab['id']), 'current': current, 'next': upcoming}
+
+
+@bp.route('/api/vlab/admin/labs', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_labs():
+    now = _local_now()
+    schedules = store.list_lab_schedules()
+    return jsonify({'labs': [_lab_view(l, schedules, now) for l in store.list_labs()], 'now': now.isoformat(timespec='minutes')})
+
+
+def _lab_body():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    if not name or len(name) > 80:
+        return None, _bad('A name of 1-80 characters is required')
+    try:
+        seats = max(0, min(10000, int(data.get('seats') or 0)))
+    except (TypeError, ValueError):
+        return None, _bad('seats must be a number')
+    return {'name': name, 'location': str(data.get('location') or '')[:120],
+            'description': str(data.get('description') or '')[:500], 'seats': seats}, None
+
+
+@bp.route('/api/vlab/admin/labs', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def create_lab():
+    body, err = _lab_body()
+    if err:
+        return err
+    lab = store.save_lab(None, **body)
+    log_audit(_user(), 'vlab.lab.create', f"LAB '{lab['name']}'", get_client_ip())
+    return jsonify({'lab': lab}), 201
+
+
+@bp.route('/api/vlab/admin/labs/<lab_id>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def update_lab(lab_id):
+    if not store.get_lab(lab_id):
+        return _bad('LAB not found', 404)
+    body, err = _lab_body()
+    if err:
+        return err
+    lab = store.save_lab(lab_id, **body)
+    log_audit(_user(), 'vlab.lab.update', f"LAB '{lab['name']}'", get_client_ip())
+    return jsonify({'lab': lab})
+
+
+@bp.route('/api/vlab/admin/labs/<lab_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_lab(lab_id):
+    lab = store.get_lab(lab_id)
+    if not lab:
+        return _bad('LAB not found', 404)
+    store.delete_lab(lab_id)
+    log_audit(_user(), 'vlab.lab.delete', f"LAB '{lab['name']}' (its schedules too; terminals kept unassigned)", get_client_ip())
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/admin/terminals', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_terminals():
+    return jsonify({'terminals': store.list_terminals(request.args.get('lab_id') or None)})
+
+
+@bp.route('/api/vlab/admin/terminals', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def add_terminal():
+    data = request.get_json(silent=True) or {}
+    mac = labs.norm_mac(data.get('mac'))
+    if not mac:
+        return _bad('A MAC address like 00:11:22:33:44:55 is required')
+    if store.terminal_by_mac(mac):
+        return _bad('This MAC address is registered already', 409)
+    lab_id = data.get('lab_id') or None
+    if lab_id and not store.get_lab(lab_id):
+        return _bad('LAB not found', 404)
+    t = store.add_terminal(mac, str(data.get('name') or '')[:80], lab_id, str(data.get('ip') or '')[:64], 'approved', _user())
+    log_audit(_user(), 'vlab.terminal.add', f"terminal {mac} '{t['name']}'", get_client_ip())
+    return jsonify({'terminal': t}), 201
+
+
+@bp.route('/api/vlab/admin/terminals/<terminal_id>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def update_terminal(terminal_id):
+    t = store.get_terminal(terminal_id)
+    if not t:
+        return _bad('Terminal not found', 404)
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    if 'name' in data:
+        fields['name'] = str(data.get('name') or '')[:80]
+    if 'lab_id' in data:
+        lab_id = data.get('lab_id') or None
+        if lab_id and not store.get_lab(lab_id):
+            return _bad('LAB not found', 404)
+        fields['lab_id'] = lab_id
+    if data.get('state') in ('approved', 'pending'):
+        fields['state'] = data['state']
+    t = store.update_terminal(terminal_id, **fields)
+    log_audit(_user(), 'vlab.terminal.update', f"terminal {t['mac']} '{t['name']}' {fields}", get_client_ip())
+    return jsonify({'terminal': t})
+
+
+@bp.route('/api/vlab/admin/terminals/<terminal_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_terminal(terminal_id):
+    t = store.get_terminal(terminal_id)
+    if not t:
+        return _bad('Terminal not found', 404)
+    store.delete_terminal(terminal_id)
+    log_audit(_user(), 'vlab.terminal.delete', f"terminal {t['mac']} '{t['name']}'", get_client_ip())
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/terminals/register', methods=['POST'])
+@require_auth()
+def register_terminal():
+    """A MOAVI Desk Client on a room's PC asks to be known: {mac, name?}. New ones wait for an
+    admin's approval; a known one only has its last contact and address updated."""
+    data = request.get_json(silent=True) or {}
+    mac = labs.norm_mac(data.get('mac'))
+    if not mac:
+        return _bad('A MAC address is required')
+    ip = get_client_ip() or ''
+    t = store.terminal_by_mac(mac)
+    if t:
+        t = store.update_terminal(t['id'], ip=ip, last_seen=store.now())
+    else:
+        t = store.add_terminal(mac, str(data.get('name') or '')[:80], None, ip, 'pending', _user())
+        log_audit(_user(), 'vlab.terminal.register', f"terminal {mac} '{t['name']}' waits for approval", ip)
+    lab = store.get_lab(t['lab_id']) if t.get('lab_id') else None
+    return jsonify({'state': t['state'], 'lab': {'id': lab['id'], 'name': lab['name']} if lab else None})
+
+
+def _schedule_body(schedule_id=None):
+    data = request.get_json(silent=True) or {}
+    clean, e = labs.validate(data)
+    if e:
+        return None, None, None, _bad(e)
+    lab = store.get_lab(data.get('lab_id') or '')
+    if not lab:
+        return None, None, None, _bad('LAB not found', 404)
+    pool = store.get_pool(data.get('pool_id') or '')
+    if not pool or not _can_reach(pool['cluster_id']):
+        return None, None, None, _bad('Pool not found', 404)
+    if pool['type'] not in LAB_POOL_TYPES:
+        return None, None, None, _bad('A LAB schedule takes a scheduled (classroom), reset or shared pool')
+    for other in store.list_lab_schedules(lab['id']):
+        if other['id'] != schedule_id and other['enabled'] and clean['enabled'] and labs.overlaps(other, clean):
+            return None, None, None, (jsonify({'error': 'This LAB has another schedule at that time', 'code': 'OVERLAP',
+                                               'schedule_id': other['id']}), 409)
+    return lab, pool, clean, None
+
+
+@bp.route('/api/vlab/admin/lab-schedules', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_lab_schedules():
+    pools = {p['id']: p for p in store.list_pools()}
+    rooms = {l['id']: l['name'] for l in store.list_labs()}
+    out = []
+    for x in store.list_lab_schedules(request.args.get('lab_id') or None):
+        p = pools.get(x['pool_id']) or {}
+        out.append({**x, 'enabled': bool(x['enabled']), 'weekdays': labs.weekdays(x['weekdays']),
+                    'lab': rooms.get(x['lab_id']), 'pool': p.get('name'), 'pool_type': p.get('type')})
+    return jsonify({'schedules': out})
+
+
+@bp.route('/api/vlab/admin/lab-schedules', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def create_lab_schedule():
+    lab, pool, clean, err = _schedule_body()
+    if err:
+        return err
+    x = store.save_lab_schedule(None, lab['id'], pool['id'], clean)
+    log_audit(_user(), 'vlab.lab.schedule', f"LAB '{lab['name']}': pool '{pool['name']}' {clean['weekdays']} "
+              f"{clean['start_time']}-{clean['end_time']} (prepare {clean['prepare_min']} min, after: {clean['after']})", get_client_ip())
+    return jsonify({'schedule': x}), 201
+
+
+@bp.route('/api/vlab/admin/lab-schedules/<schedule_id>', methods=['PUT'])
+@require_auth(perms=['vlab.pool.manage'])
+def update_lab_schedule(schedule_id):
+    if not store.get_lab_schedule(schedule_id):
+        return _bad('Schedule not found', 404)
+    lab, pool, clean, err = _schedule_body(schedule_id)
+    if err:
+        return err
+    x = store.save_lab_schedule(schedule_id, lab['id'], pool['id'], clean)
+    log_audit(_user(), 'vlab.lab.schedule', f"LAB '{lab['name']}' schedule {schedule_id} changed", get_client_ip())
+    return jsonify({'schedule': x})
+
+
+@bp.route('/api/vlab/admin/lab-schedules/<schedule_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_lab_schedule(schedule_id):
+    x = store.get_lab_schedule(schedule_id)
+    if not x:
+        return _bad('Schedule not found', 404)
+    store.delete_lab_schedule(schedule_id)
+    log_audit(_user(), 'vlab.lab.schedule.delete', f"schedule {schedule_id} of LAB {x['lab_id']}", get_client_ip())
+    return jsonify({'success': True})
+
+
+@bp.route('/api/vlab/admin/lab-schedules/<schedule_id>/run', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def run_lab_schedule(schedule_id):
+    """Run a phase now: {phase: prepare|finish} - before a session that starts early, or to
+    clean the room right away."""
+    x = store.get_lab_schedule(schedule_id)
+    if not x:
+        return _bad('Schedule not found', 404)
+    phase = (request.get_json(silent=True) or {}).get('phase')
+    if phase not in ('prepare', 'finish'):
+        return _bad('phase must be prepare or finish')
+    pool = store.get_pool(x['pool_id'])
+    if not pool or not _can_reach(pool['cluster_id']):
+        return _bad('Pool not found', 404)
+    result = _lab_phase(x, pool, phase, after=x['after'] if phase == 'finish' else None)
+    log_audit(_user(), f'vlab.lab.{phase}', f"schedule {schedule_id}, pool '{pool['name']}' by hand: {result}", get_client_ip())
+    return jsonify(result)
+
+
+def _lab_phase(sched, pool, phase, after=None):
+    """Start the pool's desktops (prepare) or put them back (finish: reset = base and off,
+    off = shut down). Desktops someone is connected to are left alone at the finish."""
+    done, skipped, failed = [], [], []
+    mgr = cluster_managers.get(pool['cluster_id'])
+    live = _vm_states(pool['cluster_id'])
+    busy = store.open_session_desktops()
+    for d in store.list_desktops(pool['id']):
+        vm = live.get(int(d['vmid']))
+        if not mgr or not vm:
+            failed.append({'id': d['id'], 'name': d['name'], 'error': 'the VM is not on the cluster'})
+            continue
+        if phase == 'prepare':
+            if vm.get('status') == 'running':
+                skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'running'})
+                continue
+            if not ha.confirm_step(f"LAB prepare {d['id']}"):
+                break
+            r = mgr.vm_action(vm.get('node') or d['node'], int(d['vmid']), d['vm_type'], 'start')
+        else:
+            if d['id'] in busy:
+                skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'in_use'})
+                continue
+            if after == 'reset' and d.get('base_snap'):
+                if not ha.confirm_step(f"LAB reset {d['id']}"):
+                    break
+                e = _reset_one(d)
+                (failed.append({'id': d['id'], 'name': d['name'], 'error': e}) if e else done.append({'id': d['id'], 'name': d['name']}))
+                continue
+            if vm.get('status') != 'running':
+                skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'stopped'})
+                continue
+            if not ha.confirm_step(f"LAB shutdown {d['id']}"):
+                break
+            r = mgr.vm_action(vm.get('node') or d['node'], int(d['vmid']), d['vm_type'], 'shutdown')
+        if isinstance(r, dict) and r.get('success'):
+            done.append({'id': d['id'], 'name': d['name']})
+        else:
+            failed.append({'id': d['id'], 'name': d['name'], 'error': str((r or {}).get('error') if isinstance(r, dict) else r)})
+    return {'phase': phase, 'done': done, 'skipped': skipped, 'failed': failed}
+
+
+def lab_tick(now=None):
+    """Once a minute (pegaprox/vlab/loans.py): run every LAB schedule phase that is due.
+    Returns [(schedule_id, phase, result)]."""
+    now = now or _local_now()
+    pools = {p['id']: p for p in store.list_pools()}
+    out = []
+    for sched in store.list_lab_schedules():
+        phase = labs.due(sched, now)
+        pool = pools.get(sched['pool_id'])
+        if not phase or not pool:
+            continue
+        result = _lab_phase(sched, pool, phase, after=sched['after'] if phase == 'finish' else None)
+        store.mark_lab_schedule(sched['id'], phase, now.date().isoformat())
+        log_audit('system', f'vlab.lab.{phase}', f"pool '{pool['name']}' ({sched['start_time']}-{sched['end_time']}): "
+                  f"{len(result['done'])} done, {len(result['skipped'])} skipped, {len(result['failed'])} failed")
+        out.append((sched['id'], phase, result))
+    return out
 
 
 # --- directory (AD / LDAP) ---------------------------------------------------------

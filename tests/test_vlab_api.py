@@ -1347,3 +1347,88 @@ def test_rightsizing_names_the_desktop_behind_each_vm(connectable, monkeypatch):
     assert second['desktop'] is None and second['actions'] == ['idle']
     assert admin.get(f'/api/vlab/admin/clusters/{CID}/rightsizing?days=3').status_code == 400
     assert admin.get('/api/vlab/admin/clusters/nope/rightsizing').status_code == 404
+
+
+# --- LABs: rooms, terminals, weekly schedules ----------------------------------------------
+
+def test_lab_schedule_rules():
+    from datetime import datetime
+    from pegaprox.vlab import labs
+    ok, e = labs.validate({'weekdays': [0, 2, 4], 'start_time': '09:00', 'end_time': '12:00', 'prepare_min': 15})
+    assert e is None and ok['weekdays'] == '0,2,4' and ok['after'] == 'reset'
+    assert labs.validate({'weekdays': [], 'start_time': '09:00', 'end_time': '12:00'})[1]
+    assert labs.validate({'weekdays': [1], 'start_time': '12:00', 'end_time': '09:00'})[1]
+    assert labs.validate({'weekdays': [1], 'start_time': '9:00', 'end_time': '12:00'})[1]
+    assert labs.norm_mac('00-11-22-AA-bb-cc') == '00:11:22:aa:bb:cc' and labs.norm_mac('xyz') is None
+    s = {'id': 's1', 'pool_id': 'p', 'weekdays': '0', 'start_time': '09:00', 'end_time': '12:00', 'prepare_min': 15,
+         'after': 'reset', 'enabled': 1, 'last_prepared': '', 'last_finished': ''}
+    mon = datetime(2026, 10, 12, 8, 50)                     # a Monday
+    assert labs.due(s, mon) == 'prepare'
+    assert labs.due({**s, 'last_prepared': '2026-10-12'}, mon) is None
+    assert labs.due(s, mon.replace(hour=8, minute=40)) is None
+    assert labs.due(s, mon.replace(hour=12, minute=5)) == 'finish'
+    assert labs.due(s, mon.replace(hour=13, minute=30)) is None     # missed by more than an hour
+    assert labs.due(s, datetime(2026, 10, 13, 9, 0)) is None         # Tuesday
+    assert labs.overlaps(s, {**s, 'start_time': '11:00', 'end_time': '13:00'})
+    assert not labs.overlaps(s, {**s, 'start_time': '12:00', 'end_time': '13:00'})
+    assert not labs.overlaps(s, {**s, 'weekdays': '1'})
+    cur, nxt = labs.state_at([s], mon.replace(hour=10))
+    assert cur['schedule_id'] == 's1' and not cur['preparing'] and nxt['start'] == '2026-10-19T09:00'
+
+
+def test_labs_terminals_and_schedules(connectable, monkeypatch):
+    admin, alice, _, _, desk, stopped = connectable
+    from datetime import datetime
+    import pegaprox.api.vlab as vlab_api
+    r = admin.post('/api/vlab/admin/labs', json={'name': '교육장 A', 'location': '3층', 'seats': 30})
+    assert r.status_code == 201
+    lab = r.get_json()['lab']
+    assert admin.post('/api/vlab/admin/labs', json={'name': ''}).status_code == 400
+
+    # a client registers itself, waits, and an admin approves it into the room
+    r = alice.post('/api/vlab/terminals/register', json={'mac': '00-11-22-33-44-55', 'name': 'PC-01'})
+    assert r.get_json()['state'] == 'pending'
+    (t,) = admin.get('/api/vlab/admin/terminals').get_json()['terminals']
+    r = admin.put(f"/api/vlab/admin/terminals/{t['id']}", json={'state': 'approved', 'lab_id': lab['id']})
+    assert r.get_json()['terminal']['state'] == 'approved'
+    assert alice.post('/api/vlab/terminals/register', json={'mac': '00:11:22:33:44:55'}).get_json()['lab']['name'] == '교육장 A'
+    assert admin.post('/api/vlab/admin/terminals', json={'mac': '00:11:22:33:44:55'}).status_code == 409
+    assert alice.get('/api/vlab/admin/terminals').status_code == 403
+
+    pool_id = stopped['pool_id']
+    body = {'lab_id': lab['id'], 'pool_id': pool_id, 'weekdays': [0], 'start_time': '09:00', 'end_time': '12:00',
+            'prepare_min': 15, 'after': 'off', 'title': '파이썬 기초'}
+    r = admin.post('/api/vlab/admin/lab-schedules', json=body)
+    assert r.status_code == 201, r.get_json()
+    sched = r.get_json()['schedule']
+    r = admin.post('/api/vlab/admin/lab-schedules', json={**body, 'start_time': '11:00', 'end_time': '13:00'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'OVERLAP'
+    (row,) = admin.get('/api/vlab/admin/lab-schedules').get_json()['schedules']
+    assert row['weekdays'] == [0] and row['lab'] == '교육장 A' and row['pool']
+
+    # the minute loop: before the session the stopped desktop is started, once
+    from pegaprox.globals import cluster_managers
+    mgr = cluster_managers[CID]
+    mgr.vm_action.reset_mock()
+    mon = datetime(2026, 10, 12, 8, 50)
+    ((sid, phase, res),) = vlab_api.lab_tick(mon)
+    assert (sid, phase) == (sched['id'], 'prepare') and [d['id'] for d in res['done']] == [stopped['id']]
+    assert mgr.vm_action.call_args[0][3] == 'start'
+    assert vlab_api.lab_tick(mon.replace(minute=55)) == []
+    labs_now = admin.get('/api/vlab/admin/labs').get_json()['labs']
+    assert labs_now[0]['terminals'] == 1 and labs_now[0]['schedules'] == 1
+
+    # after it: a reset pool goes back to its base (stand-in) when the schedule says reset
+    reset_calls = []
+    monkeypatch.setattr(vlab_api, '_reset_one', lambda d: reset_calls.append(d['id']))
+    assert admin.put(f"/api/vlab/admin/lab-schedules/{sched['id']}", json={**body, 'after': 'reset'}).status_code == 200
+    store_desk = vlab_api.store.get_desktop(stopped['id'])
+    vlab_api.store.set_base_snap(stopped['id'], 'vlab-base')
+    ((_, phase, res),) = vlab_api.lab_tick(datetime(2026, 10, 12, 12, 5))
+    assert phase == 'finish' and reset_calls == [stopped['id']] and store_desk
+
+    r = admin.post(f"/api/vlab/admin/lab-schedules/{sched['id']}/run", json={'phase': 'prepare'})
+    assert r.status_code == 200 and r.get_json()['phase'] == 'prepare'
+    assert admin.delete(f"/api/vlab/admin/labs/{lab['id']}").status_code == 200
+    assert admin.get('/api/vlab/admin/lab-schedules').get_json()['schedules'] == []
+    assert admin.get('/api/vlab/admin/terminals').get_json()['terminals'][0]['lab_id'] is None

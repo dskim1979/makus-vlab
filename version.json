@@ -190,6 +190,7 @@
     "pegaprox/utils/zpool.py",
     "pegaprox/vlab/__init__.py",
     "pegaprox/vlab/accel.py",
+    "pegaprox/vlab/labs.py",
     "pegaprox/vlab/loans.py",
     "pegaprox/vlab/policy.py",
     "pegaprox/vlab/store.py",

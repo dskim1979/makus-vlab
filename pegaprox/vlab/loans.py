@@ -46,8 +46,10 @@ def _loop():
             if ha.is_active():
                 return_due()
                 # the pool policies' idle shutdown and session limit ride the same minute
-                from pegaprox.api.vlab import policy_tick
+                from pegaprox.api.vlab import lab_tick, policy_tick
                 policy_tick()
+                # and the LAB schedules: desktops ready before a session, put back after it
+                lab_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         time.sleep(INTERVAL)
