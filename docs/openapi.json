@@ -51934,7 +51934,7 @@
             "description": "Not authenticated"
           }
         },
-        "summary": "A MOAVI Desk Client on a room's PC asks to be known: {mac, name?}. New ones wait for an admin's approval; a known one only has its last contact and address updated.",
+        "summary": "A signed-in MOAVI Desk Client on a room's PC says it is there: {mac, name?}. A known terminal has its last contact and address updated; an unknown PC is not taken - PCs come in only with an enrolment code, through the MOAVI Desk Agent (api/vlab_enroll.py).",
         "requestBody": {
           "required": false,
           "content": {
@@ -58544,6 +58544,319 @@
         ]
       }
     },
+    "/api/vlab/admin/terminal-install": {
+      "get": {
+        "operationId": "vlab_enroll.install_settings_get_get",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_enroll.install_settings_put_put",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/admin/terminal-install/msi/upload": {
+      "post": {
+        "operationId": "vlab_enroll.install_msi_upload_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "multipart file: MOAVI-Desk-<version>-x64.msi. Kept in the config folder of this instance (an HA peer needs its own upload) and served at /api/vlab/client/msi with its SHA-256.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/admin/terminal-install/msi": {
+      "delete": {
+        "operationId": "vlab_enroll.install_msi_delete_delete",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/client/msi": {
+      "get": {
+        "operationId": "vlab_enroll.client_msi_get",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The client MSI the install files fetch (they check its SHA-256). Public, like a release download.",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/lab-install": {
+      "get": {
+        "operationId": "vlab_enroll.lab_install_info_get",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "For the portal: may the caller install a room's PC from here, and into which LABs.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "vlab_enroll.lab_install_file_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "{lab_id?, uses?}: install.cmd with an enrolment token for the caller (token_hours, `uses` PCs, the LAB picked). The PCs wait for an admin unless the caller's role is auto-approved.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/vlab/client/installer": {
+      "get": {
+        "operationId": "vlab_enroll.personal_installer_get",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "install.cmd for a personal PC: the server filled in, no enrolment, no kiosk.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/vlab/admin/installer": {
+      "post": {
+        "operationId": "vlab_enroll.admin_installer_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{code, kiosk?}: install.cmd for a room's PCs with an enrolment code the admin holds.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
     "/api/vlab/terminals/enroll": {
       "post": {
         "operationId": "vlab_enroll.enroll_terminal_post",
@@ -58558,7 +58871,7 @@
             "description": "Bad request"
           }
         },
-        "summary": "A MOAVI Desk Client's first start with the code its installer was given: {mac, name?, code}. A new PC becomes a terminal (pending, or approved in the code's LAB when the code says so); a known one waits for an admin again if it held a key, unless the code approves at once. Answers {token, state, lab, poll_seconds}; the token is for /enroll/status only.",
+        "summary": "The MOAVI Desk Agent's first start with the code its installer was given: {mac, name?, code, info?}. A new PC becomes a terminal (pending, or approved in the code's LAB when the code says so); a known one waits for an admin again if it held a key, unless the code approves at once. A refused PC stays refused. Answers {token, state, lab, heartbeat_seconds}; the token is the agent's for its heartbeats.",
         "requestBody": {
           "required": false,
           "content": {
@@ -58572,9 +58885,9 @@
         "x-pegaprox-auth": "public"
       }
     },
-    "/api/vlab/terminals/enroll/status": {
+    "/api/vlab/terminals/heartbeat": {
       "post": {
-        "operationId": "vlab_enroll.enroll_status_post",
+        "operationId": "vlab_enroll.agent_heartbeat_post",
         "tags": [
           "vlab_enroll"
         ],
@@ -58586,7 +58899,7 @@
             "description": "Bad request"
           }
         },
-        "summary": "The enrolled PC asks again: {token}. While it waits -> {state: pending}. Once approved -> {state: approved, key}: the key is made now and handed out this once; the token stops.",
+        "summary": "The agent's heartbeat (header X-Agent-Token, body {info}): records what it said and answers the terminal's state and LAB; once the terminal is approved and its key has not gone out, the kiosk key, made now and handed out this once.",
         "requestBody": {
           "required": false,
           "content": {
@@ -58793,7 +59106,107 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "{ids: [...], lab_id?}: approve these terminals (and put them in the LAB, when one is given). An enrolled client picks its key up on its next poll.",
+        "summary": "{ids: [...], lab_id?}: approve these terminals (and put them in the LAB, when one is given). Their agents pick their keys up with the next heartbeat.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/terminals/reject": {
+      "post": {
+        "operationId": "vlab_enroll.reject_terminals_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{ids: [...]}: refuse these PCs. Their agent tokens and kiosk keys stop; the same MAC cannot enrol again until an admin deletes the terminal.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/terminals/{terminal_id}/resend-key": {
+      "post": {
+        "operationId": "vlab_enroll.resend_terminal_key_post",
+        "tags": [
+          "vlab_enroll"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The terminal's agent gets a new kiosk key with its next heartbeat (the old one keeps working until then).",
+        "parameters": [
+          {
+            "name": "terminal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "required": false,
           "content": {

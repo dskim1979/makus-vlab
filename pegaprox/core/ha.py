@@ -325,7 +325,7 @@ SYNC_TABLES = (
     'vlab_desktop_versions', 'vlab_build_jobs',
     # MOAVI Desk shared storage (pegaprox/vlab/nas.py): the pool's NAS and the last mount per desktop and user
     'vlab_pool_storage', 'vlab_storage_mounts', 'vlab_storage_ids',
-    # LAB terminal enrolment: codes and the PCs still waiting for their key (pegaprox/vlab/enroll.py)
+    # LAB terminal enrolment: codes and the agents of the PCs (pegaprox/vlab/enroll.py)
     'vlab_enroll_codes', 'vlab_terminal_enrollments',
 )
 LOCAL_TABLES = (
@@ -367,6 +367,8 @@ VOLATILE_COLUMNS = {
     'plugin_state': ('loaded_at', 'error'),
     'siem_targets': ('last_status', 'last_ok_at', 'last_error_at', 'last_error',
                      'sent_count', 'error_count'),
+    # MOAVI Desk Agent heartbeats every few minutes (pegaprox/vlab/enroll.py)
+    'vlab_terminal_enrollments': ('last_poll_at', 'info', 'recent'),
 }
 
 # Encrypted columns, the same inventory db.rotate_encryption_key walks. A value

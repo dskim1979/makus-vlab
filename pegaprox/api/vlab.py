@@ -48,8 +48,8 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   POST   /api/vlab/admin/terminals                    {mac, name?, lab_id?, ip?} add one, approved  vlab.pool.manage
   PUT    /api/vlab/admin/terminals/<terminal_id>      {name?, lab_id?, state?}                  vlab.pool.manage
   DELETE /api/vlab/admin/terminals/<terminal_id>      remove it                                 vlab.pool.manage
-  POST   /api/vlab/terminals/register                 a client asks to be known {mac, name?} (waits for approval)  signed in
-           (enrolment codes, a PC's first start without signing in, approving many: api/vlab_enroll.py)
+  POST   /api/vlab/terminals/register                 a signed-in client on a known terminal says it is there {mac, name?}  signed in
+           (new PCs come in with an enrolment code through the MOAVI Desk Agent: api/vlab_enroll.py)
   GET    /api/vlab/client/config                      what the Windows client should do (update, protocol)  signed in
   GET    /api/vlab/admin/client                       the client settings                       admin.settings
   PUT    /api/vlab/admin/client                       {latest_version?, min_version?, download_url?, protocol?}  admin.settings
@@ -2676,8 +2676,9 @@ def delete_terminal(terminal_id):
 @bp.route('/api/vlab/terminals/register', methods=['POST'])
 @require_auth()
 def register_terminal():
-    """A MOAVI Desk Client on a room's PC asks to be known: {mac, name?}. New ones wait for an
-    admin's approval; a known one only has its last contact and address updated."""
+    """A signed-in MOAVI Desk Client on a room's PC says it is there: {mac, name?}. A known
+    terminal has its last contact and address updated; an unknown PC is not taken - PCs come in
+    only with an enrolment code, through the MOAVI Desk Agent (api/vlab_enroll.py)."""
     data = request.get_json(silent=True) or {}
     mac = labs.norm_mac(data.get('mac'))
     if not mac:
@@ -2687,8 +2688,7 @@ def register_terminal():
     if t:
         t = store.update_terminal(t['id'], ip=ip, last_seen=store.now())
     else:
-        t = store.add_terminal(mac, str(data.get('name') or '')[:80], None, ip, 'pending', _user())
-        log_audit(_user(), 'vlab.terminal.register', f"terminal {mac} '{t['name']}' waits for approval", ip)
+        return jsonify({'state': 'unknown', 'lab': None})
     lab = store.get_lab(t['lab_id']) if t.get('lab_id') else None
     return jsonify({'state': t['state'], 'lab': {'id': lab['id'], 'name': lab['name']} if lab else None})
 
@@ -2889,7 +2889,7 @@ def make_terminal_key(terminal_id):
     key = 'mdt_' + secrets.token_urlsafe(24)
     store.set_terminal_key(terminal_id, _key_hash(key))
     from pegaprox.vlab import enroll
-    enroll.close(terminal_id, 'manual')   # typed in by hand: an enrolled client stops waiting for one
+    enroll.set_key_state(terminal_id, 'manual')   # typed in by hand: its agent is not sent one
     log_audit(_user(), 'vlab.terminal.key', f"terminal {t['mac']} '{t['name']}': new kiosk key", get_client_ip())
     return jsonify({'key': key, 'terminal': store.get_terminal(terminal_id)})
 

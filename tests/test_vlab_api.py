@@ -1385,10 +1385,12 @@ def test_labs_terminals_and_schedules(connectable, monkeypatch):
     lab = r.get_json()['lab']
     assert admin.post('/api/vlab/admin/labs', json={'name': ''}).status_code == 400
 
-    # a client registers itself, waits, and an admin approves it into the room
+    # a signed-in client on an unknown PC is not taken (PCs come in with an enrolment code,
+    # test_vlab_enroll.py); an admin adds this one by its MAC and puts it in the room
     r = alice.post('/api/vlab/terminals/register', json={'mac': '00-11-22-33-44-55', 'name': 'PC-01'})
-    assert r.get_json()['state'] == 'pending'
-    (t,) = admin.get('/api/vlab/admin/terminals').get_json()['terminals']
+    assert r.get_json()['state'] == 'unknown'
+    assert admin.get('/api/vlab/admin/terminals').get_json()['terminals'] == []
+    t = admin.post('/api/vlab/admin/terminals', json={'mac': '00-11-22-33-44-55', 'name': 'PC-01'}).get_json()['terminal']
     r = admin.put(f"/api/vlab/admin/terminals/{t['id']}", json={'state': 'approved', 'lab_id': lab['id']})
     assert r.get_json()['terminal']['state'] == 'approved'
     assert alice.post('/api/vlab/terminals/register', json={'mac': '00:11:22:33:44:55'}).get_json()['lab']['name'] == '교육장 A'

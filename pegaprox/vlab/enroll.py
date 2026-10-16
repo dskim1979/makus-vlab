@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk - enrolling a room's PCs (LAB terminals) without signing in on each of them.
+MOAVI Desk - enrolling a room's PCs (LAB terminals) through the MOAVI Desk Agent.
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).
 
-An admin makes an enrolment code (a LAB to put the PCs in, how long it lasts, how many PCs
-may use it, whether they are approved at once). The code goes into the client's installer
-(msiexec ... ENROLL_CODE=...). On its first start the client sends {mac, name, code}; the
-engine makes the terminal (pending, or approved in the code's LAB) and answers with a poll
-token for that PC alone. The client asks with the token until the terminal is approved, and
-then gets its kiosk key - once: the key is made at that moment, only its hash is kept, and
-the token stops working.
+An enrolment code is what lets a PC ask to become a terminal; without one the engine takes no
+PC. A code is made by an admin (kind 'admin': LAB, how long, how many PCs, approved at once or
+not) or by the portal's "실습실 PC로 설치" for the signed-in user (kind 'user': 24 hours, a few
+PCs, the LAB they picked; approved at once only when their role is in the auto-approve list).
+The code goes into the installer (msiexec ... ENROLL_CODE= / ENROLL_TOKEN=). The MOAVI Desk
+Agent - a Windows service beside the client - enrols with it on the PC's first start and gets
+an agent token for that PC alone. With the token it sends a heartbeat every few minutes (name,
+MAC, IP, OS, versions, whether someone is signed in to Windows); once an admin approves the
+PC, the next heartbeat carries the kiosk key, once.
 
-Codes and tokens are kept as SHA-256 hashes. Both tables are configuration and travel to the
-HA peers (ha.SYNC_TABLES), so a failover keeps the codes and the PCs still waiting.
+Codes and agent tokens are kept as SHA-256 hashes. Both tables are configuration and travel to
+the HA peers (ha.SYNC_TABLES); the heartbeat columns are left out of the sync's change count
+(ha.VOLATILE_COLUMNS).
 """
 
 import hashlib
+import json
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -39,8 +43,8 @@ _SCHEMA = (
         created_at TEXT NOT NULL,
         last_used_at TEXT
     )''',
-    # one row per terminal that came in with a code: its poll token (hash) while it waits,
-    # and whether its key went out (state waiting | delivered | manual)
+    # one row per terminal that came in with a code: its agent token (hash), how its kiosk key
+    # goes out (state waiting | delivered | manual | expired) and what its last heartbeats said
     '''CREATE TABLE IF NOT EXISTS vlab_terminal_enrollments (
         terminal_id TEXT PRIMARY KEY,
         code_id TEXT NOT NULL DEFAULT '',
@@ -52,11 +56,23 @@ _SCHEMA = (
     )''',
     'CREATE INDEX IF NOT EXISTS idx_vlab_enroll_token ON vlab_terminal_enrollments(token_hash)',
 )
+# columns added after the tables first shipped
+_COLUMNS = (
+    ('vlab_enroll_codes', 'kind', "TEXT NOT NULL DEFAULT 'admin'"),
+    ('vlab_terminal_enrollments', 'info', "TEXT NOT NULL DEFAULT '{}'"),
+    ('vlab_terminal_enrollments', 'recent', "TEXT NOT NULL DEFAULT '[]'"),
+)
 
 # a PC that waits longer than this for approval has to enrol again
 TOKEN_DAYS = 30
 MAX_DAYS = 365
 MAX_USES = 10000
+# the agent's heartbeat; a terminal is online while its last one is younger than 3 of them
+HEARTBEAT_SECONDS = 120
+RECENT = 20
+# what the agent may tell about its PC (anything else is dropped), and how long each may be
+INFO_FIELDS = {'hostname': 80, 'mac': 17, 'macs': 200, 'ip': 64, 'os': 120, 'client_version': 32,
+               'agent_version': 32, 'user_logged_in': None, 'user': 64}
 # no 0/O, 1/I/L: the code is read off a screen and typed
 _ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 
@@ -70,6 +86,10 @@ def db():
             if not getattr(d, '_vlab_enroll', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                for table, col, definition in _COLUMNS:
+                    have = {r['name'] for r in d.query(f'PRAGMA table_info({table})')}
+                    if col not in have:
+                        d.execute(f'ALTER TABLE {table} ADD COLUMN {col} {definition}')
                 d._vlab_enroll = True
     return d
 
@@ -95,6 +115,22 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def clean_info(data):
+    """What the agent said about its PC, kept to the known fields and lengths."""
+    out = {}
+    if not isinstance(data, dict):
+        return out
+    for k, n in INFO_FIELDS.items():
+        v = data.get(k)
+        if v is None:
+            continue
+        if n is None:
+            out[k] = bool(v)
+        elif isinstance(v, (str, int, float)):
+            out[k] = str(v)[:n]
+    return out
+
+
 # --- codes -------------------------------------------------------------------------------
 
 def _code_row(r):
@@ -118,8 +154,12 @@ def code_status(c, at=None):
     return 'active'
 
 
-def list_codes():
-    return [_code_row(r) for r in db().query('SELECT * FROM vlab_enroll_codes ORDER BY created_at DESC')]
+def list_codes(kind=None):
+    if kind:
+        rows = db().query('SELECT * FROM vlab_enroll_codes WHERE kind = ? ORDER BY created_at DESC', (kind,))
+    else:
+        rows = db().query('SELECT * FROM vlab_enroll_codes ORDER BY created_at DESC')
+    return [_code_row(r) for r in rows]
 
 
 def get_code(code_id):
@@ -127,17 +167,22 @@ def get_code(code_id):
     return _code_row(r) if r else None
 
 
-def make_code(name, lab_id, auto_approve, max_uses, days, created_by):
+def make_code(name, lab_id, auto_approve, max_uses, days, created_by, kind='admin', hours=None):
     """A new code; returns (row, the code in clear - shown this once)."""
     body = ''.join(secrets.choice(_ALPHABET) for _ in range(12))
     code = f'MDE-{body[:4]}-{body[4:8]}-{body[8:]}'
     cid = new_id('enc')
-    expires = (_now() + timedelta(days=days)).isoformat(timespec='seconds') if days else None
+    span = timedelta(hours=hours) if hours else timedelta(days=days) if days else None
+    expires = (_now() + span).isoformat(timespec='seconds') if span else None
     db().execute("""INSERT INTO vlab_enroll_codes (id, name, code_hash, hint, lab_id, auto_approve, max_uses, expires_at,
-                    enabled, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                    enabled, created_by, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
                  (cid, name, _hash(norm_code(code)), body[8:], lab_id, int(bool(auto_approve)), int(max_uses),
-                  expires, created_by, now()))
+                  expires, created_by, now(), kind))
     return get_code(cid), code
+
+
+def active_user_codes(username):
+    return [c for c in list_codes('user') if c['created_by'] == username and c['status'] == 'active']
 
 
 def update_code(code_id, **fields):
@@ -175,59 +220,100 @@ def count_use(code_id):
     db().execute('UPDATE vlab_enroll_codes SET uses = uses + 1, last_used_at = ? WHERE id = ?', (now(), code_id))
 
 
-# --- enrolments of terminals ---------------------------------------------------------------
+# --- terminals that came in through the agent ----------------------------------------------
 
-def start(terminal_id, code_id):
-    """A new poll token for this terminal (an older one stops working); returns it in clear."""
-    token = 'mdp_' + secrets.token_urlsafe(32)
+def start(terminal_id, code_id, info=None):
+    """A new agent token for this terminal (an older one stops working); returns it in clear.
+    The kiosk key waits for the terminal's approval."""
+    token = 'mda_' + secrets.token_urlsafe(32)
     d = db()
     d.execute('DELETE FROM vlab_terminal_enrollments WHERE terminal_id = ?', (terminal_id,))
-    d.execute("""INSERT INTO vlab_terminal_enrollments (terminal_id, code_id, token_hash, state, created_at)
-                 VALUES (?, ?, ?, 'waiting', ?)""", (terminal_id, code_id, _hash(token), now()))
+    d.execute("""INSERT INTO vlab_terminal_enrollments (terminal_id, code_id, token_hash, state, created_at, last_poll_at, info)
+                 VALUES (?, ?, ?, 'waiting', ?, ?, ?)""",
+              (terminal_id, code_id, _hash(token), now(), now(), json.dumps(clean_info(info), ensure_ascii=False)))
     return token
 
 
 def by_token(token):
-    """The waiting enrolment for a poll token; (row, None) or (None, reason)."""
+    """The enrolment an agent token belongs to; (row, None) or (None, reason). A PC still not
+    approved after TOKEN_DAYS has to enrol again."""
     token = str(token or '').strip()
-    if not token.startswith('mdp_'):
+    if not token.startswith('mda_'):
         return None, 'BAD_TOKEN'
-    r = db().query_one("SELECT * FROM vlab_terminal_enrollments WHERE token_hash = ? AND state = 'waiting'",
-                       (_hash(token),))
+    r = db().query_one('SELECT * FROM vlab_terminal_enrollments WHERE token_hash = ?', (_hash(token),))
     if not r:
         return None, 'BAD_TOKEN'
-    e = dict(r)
+    return dict(r), None
+
+
+def waited_too_long(e):
     made = _utc(e['created_at'])
-    if made and made + timedelta(days=TOKEN_DAYS) <= _now():
-        close(e['terminal_id'], 'expired')
-        return None, 'TOKEN_EXPIRED'
-    return e, None
+    return e['state'] == 'waiting' and made is not None and made + timedelta(days=TOKEN_DAYS) <= _now()
 
 
-def polled(terminal_id):
-    db().execute('UPDATE vlab_terminal_enrollments SET last_poll_at = ? WHERE terminal_id = ?', (now(), terminal_id))
+def heartbeat(terminal_id, info, ip):
+    """Keep what the agent said and the last RECENT heartbeats (time, address, signed-in user)."""
+    row = db().query_one('SELECT info, recent FROM vlab_terminal_enrollments WHERE terminal_id = ?', (terminal_id,))
+    if not row:
+        return
+    clean = clean_info(info)
+    try:
+        recent = json.loads(row['recent'] or '[]')
+    except ValueError:
+        recent = []
+    recent = ([{'at': now(), 'ip': ip, 'user': bool(clean.get('user_logged_in'))}] + recent)[:RECENT]
+    db().execute('UPDATE vlab_terminal_enrollments SET last_poll_at = ?, info = ?, recent = ? WHERE terminal_id = ?',
+                 (now(), json.dumps(clean or json.loads(row['info'] or '{}'), ensure_ascii=False),
+                  json.dumps(recent), terminal_id))
 
 
-def close(terminal_id, state):
-    """The key went out (delivered), an admin typed one in by hand (manual) or it ran out
-    (expired): the token stops working either way."""
-    db().execute("""UPDATE vlab_terminal_enrollments SET state = ?, token_hash = '',
+def set_key_state(terminal_id, state):
+    """delivered (the agent has the key), manual (an admin typed one in), waiting (send a new
+    one with the next heartbeat)."""
+    db().execute("""UPDATE vlab_terminal_enrollments SET state = ?,
                     delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END
-                    WHERE terminal_id = ? AND state = 'waiting'""", (state, state, now(), terminal_id))
+                    WHERE terminal_id = ?""", (state, state, now(), terminal_id))
+
+
+def end_token(terminal_id, state='expired'):
+    """The token stops: the PC waited too long, or it was rejected."""
+    db().execute("UPDATE vlab_terminal_enrollments SET token_hash = '', state = ? WHERE terminal_id = ?",
+                 (state, terminal_id))
 
 
 def forget(terminal_id):
     db().execute('DELETE FROM vlab_terminal_enrollments WHERE terminal_id = ?', (terminal_id,))
 
 
+def online(e, at=None):
+    seen = _utc(e.get('last_poll_at')) if e.get('last_poll_at') else None
+    return bool(seen and e.get('token_hash') and seen + timedelta(seconds=3 * HEARTBEAT_SECONDS) > (at or _now()))
+
+
 def annotate(terminals):
-    """Each terminal with how its key goes out: enrollment = {state, code, created_at,
-    last_poll_at, delivered_at} for the ones that came with a code, else None."""
+    """Each terminal with its agent: enrollment = {state (of the kiosk key), code, code_kind,
+    requested_by, created_at, last_heartbeat_at, delivered_at, online, info, recent} for the ones
+    that came in with a code, else None."""
     rows = {r['terminal_id']: dict(r) for r in db().query('SELECT * FROM vlab_terminal_enrollments')}
-    names = {r['id']: r['name'] for r in db().query('SELECT id, name FROM vlab_enroll_codes')}
+    codes = {r['id']: dict(r) for r in db().query('SELECT id, name, kind, created_by FROM vlab_enroll_codes')}
+    at = _now()
     for t in terminals:
         e = rows.get(t['id'])
-        t['enrollment'] = None if not e else {
-            'state': e['state'], 'code_id': e['code_id'], 'code': names.get(e['code_id'], ''),
-            'created_at': e['created_at'], 'last_poll_at': e['last_poll_at'], 'delivered_at': e['delivered_at']}
+        if not e:
+            t['enrollment'] = None
+            continue
+        c = codes.get(e['code_id']) or {}
+        try:
+            info, recent = json.loads(e.get('info') or '{}'), json.loads(e.get('recent') or '[]')
+        except ValueError:
+            info, recent = {}, []
+        t['enrollment'] = {
+            'state': e['state'], 'code_id': e['code_id'], 'code': c.get('name', ''), 'code_kind': c.get('kind', ''),
+            'requested_by': c.get('created_by', ''), 'created_at': e['created_at'], 'last_heartbeat_at': e['last_poll_at'],
+            'last_poll_at': e['last_poll_at'], 'delivered_at': e['delivered_at'], 'online': online(e, at),
+            'heartbeat_seconds': HEARTBEAT_SECONDS, 'info': info, 'recent': recent}
     return terminals
+
+
+def pending_count():
+    return db().query_one("SELECT COUNT(*) AS n FROM vlab_terminals WHERE state = 'pending'")['n']
