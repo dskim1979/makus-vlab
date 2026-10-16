@@ -338,6 +338,8 @@ SYNC_TABLES = (
     'vlab_password_resets', 'vlab_signup_verify', 'vlab_account_expiry', 'vlab_terms_consents',
     # long jobs kept alive: the users' "작업 중", the clean-ups put off, idle card reclaims (pegaprox/vlab/workload.py)
     'vlab_work_holds', 'vlab_deferrals', 'vlab_card_reclaims',
+    # AI · GPU research: GPU quotas, the queue's settings and the web IDE sessions (pegaprox/vlab/research.py)
+    'vlab_gpu_quotas', 'vlab_research_settings', 'vlab_ide_sessions',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -388,6 +390,8 @@ VOLATILE_COLUMNS = {
     'vlab_terminal_enrollments': ('last_poll_at', 'info', 'recent'),
     # a working desktop is asked again every few minutes (pegaprox/vlab/workload.py)
     'vlab_deferrals': ('checked_at', 'reason'),
+    # a web IDE in use is seen once a minute (pegaprox/api/vlab_research.py ide_auth)
+    'vlab_ide_sessions': ('last_seen',),
 }
 
 # Encrypted columns, the same inventory db.rotate_encryption_key walks. A value
@@ -403,6 +407,7 @@ ENCRYPTED_COLUMNS = {
     'vmware_servers': ('pass_encrypted',),
     'auto_install_profiles': ('answer_encrypted',),
     'vlab_pool_storage': ('password_encrypted',),
+    'vlab_ide_sessions': ('token_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 

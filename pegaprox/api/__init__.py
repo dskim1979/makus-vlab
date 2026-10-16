@@ -65,6 +65,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_data import bp as vlab_data_bp  # MOAVI Desk: 연구 데이터 (데이터셋, 파일 전송, 반출 통제)
     from pegaprox.api.vlab_accounts import bp as vlab_accounts_bp  # MOAVI Desk: 비밀번호 찾기·메일 인증·일괄 등록·사용 기한·약관
     from pegaprox.api.vlab_work import bp as vlab_work_bp  # MOAVI Desk: 장시간 작업 보호 · GPU/NPU 사용률 · 유휴 카드 회수
+    from pegaprox.api.vlab_research import bp as vlab_research_bp  # MOAVI Desk: GPU 작업 큐 · 할당량 · GPU-시간 · 웹 IDE
     from pegaprox.api.vlab_next import bp as vlab_next_bp  # MOAVI Desk: 부서·가입 심사·USB·게이트웨이·골든 이미지·보드 LAB·빌드 팜·라이선스 서버
 
     app.register_blueprint(auth_bp)
@@ -126,6 +127,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_data_bp)
     app.register_blueprint(vlab_accounts_bp)
     app.register_blueprint(vlab_work_bp)
+    app.register_blueprint(vlab_research_bp)
 
     # Initialize WebSocket support for realtime blueprint
     from pegaprox.api.realtime import sock

@@ -1260,6 +1260,7 @@ def detach_board(bid):
 @require_auth(perms=['vlab.pool.view'])
 def buildfarm():
     """The build farm pools at a glance: desktops, how many are on and in use, their load."""
+    from pegaprox.vlab import research
     busy = store.open_session_desktops()
     pools = []
     for p in store.list_pools():
@@ -1285,7 +1286,10 @@ def buildfarm():
         in_use = sum(1 for r in rows if r['assigned_user'] or r['in_session'])
         pools.append({'id': p['id'], 'name': p['name'], 'cluster_id': p['cluster_id'], 'total': len(rows), 'running': running,
                       'in_use': in_use, 'free': len(rows) - in_use, 'cpu_pct': round(100 * cpu / cpus, 1) if cpus else 0.0,
-                      'mem_used': mem, 'mem_total': maxmem, 'desktops': rows})
+                      'mem_used': mem, 'mem_total': maxmem, 'desktops': rows,
+                      # GPU jobs (pegaprox/vlab/research.py): GPUs per VM, kind, time limit, container runtime
+                      **{('gpu_kind' if k == 'kind' else k): v for k, v in
+                         research.pool_gpu_jobs(p.get('settings'), core._gpu_policy(p.get('settings'))).items()}})
     return jsonify({'pools': pools})
 
 
@@ -1880,14 +1884,15 @@ def _agent(mgr, node, vmid, path):
     return f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(vmid)}/agent/{path}"
 
 
-def _start_job(job, desk, mgr, node, as_user=None):
+def _start_job(job, desk, mgr, node, as_user=None, argv=None):
     """as_user: a job in the user's scratch folder runs as that user (their files, their uid on
-    the NAS) and makes its own folder first."""
-    wd = shlex.quote(job['workdir']) if job['workdir'] else ''
-    cmd = job['command'] if not wd else (f"mkdir -p {wd} && cd {wd} && {job['command']}" if as_user else f"cd {wd} && {job['command']}")
-    argv = ['/bin/bash', '-lc', cmd]
-    if as_user:
-        argv = ['runuser', '-u', as_user, '--'] + argv
+    the NAS) and makes its own folder first. argv: a GPU job's own (research.job_argv)."""
+    if argv is None:
+        wd = shlex.quote(job['workdir']) if job['workdir'] else ''
+        cmd = job['command'] if not wd else (f"mkdir -p {wd} && cd {wd} && {job['command']}" if as_user else f"cd {wd} && {job['command']}")
+        argv = ['/bin/bash', '-lc', cmd]
+        if as_user:
+            argv = ['runuser', '-u', as_user, '--'] + argv
     resp = mgr._api_post(_agent(mgr, node, desk['vmid'], 'exec'), data={'command': argv})
     if getattr(resp, 'status_code', 0) != 200:
         return None, (getattr(resp, 'text', '') or 'guest agent refused')[:300]
@@ -1898,16 +1903,45 @@ def _start_job(job, desk, mgr, node, as_user=None):
     return pid, (None if pid else 'guest agent returned no pid')
 
 
+def _stop_job(job, desk, mgr, node):
+    """End a running job on its build VM: a GPU job's whole session (it runs under setsid), a
+    plain build its process and the children of it. Error text or None."""
+    from pegaprox.vlab import research
+    pid = int(job['pid'] or 0)
+    if not pid:
+        return 'the job has no process id'
+    if research.is_gpu_job(job):
+        env = research.loads(job.get('env'), {})
+        pool = store.get_pool(job['pool_id']) or {}
+        runtime = research.pool_gpu_jobs(pool.get('settings'), core._gpu_policy(pool.get('settings')))['runtime']
+        argv = research.stop_argv(pid, f"moavi-{job['id']}" if env.get('kind') == 'container' else None, runtime)
+    else:
+        argv = ['/bin/sh', '-c', f'pkill -TERM -P {pid}; kill -TERM {pid}; exit 0']
+    try:
+        resp = mgr._api_post(_agent(mgr, node, desk['vmid'], 'exec'), data={'command': argv})
+    except Exception as e:
+        return str(e)[:300]
+    return None if getattr(resp, 'status_code', 0) == 200 else (getattr(resp, 'text', '') or 'guest agent refused')[:300]
+
+
+def _job_node(desk):
+    return (core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}).get('node') or desk['node']
+
+
 def refresh_jobs(pool_id=None):
-    """Bring the queue up to date: read the running jobs' state from the guest agent, then start
-    queued jobs on free build VMs (running, unassigned, not in a session, no job). Runs when the
-    job lists are read and when a job is sent."""
+    """Bring the queue up to date: read the running jobs' state from the guest agent (a GPU job
+    past its time limit is stopped), tell the owners of the jobs that ended, then start queued
+    jobs on free build VMs (_run_queue). Runs when the job lists are read, when a job is sent
+    and every minute (pegaprox/vlab/loans.py)."""
+    from pegaprox.core import ha
+    from pegaprox.vlab import research
+    ended = []
     for job in catalog.jobs_in('running', pool_id):
         desk = store.get_desktop(job['desktop_id']) if job['desktop_id'] else None
         mgr = cluster_managers.get(desk['cluster_id']) if desk else None
         if not desk or not mgr or not getattr(mgr, 'is_connected', False):
             continue
-        node = (core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}).get('node') or desk['node']
+        node = _job_node(desk)
         try:
             resp = mgr._api_get(_agent(mgr, node, desk['vmid'], 'exec-status'), params={'pid': job['pid']})
             st = (resp.json().get('data') or {}) if getattr(resp, 'status_code', 0) == 200 else {}
@@ -1917,92 +1951,181 @@ def refresh_jobs(pool_id=None):
             code = st.get('exitcode')
             out = (st.get('out-data') or '')[-MAX_OUTPUT:]
             err = (st.get('err-data') or '')[-4000:]
+            if research.is_gpu_job(job) and code not in (0, None):
+                err = (research.job_error(code) or '') + ('\n' if err and research.job_error(code) else '') + err
             catalog.update_build_job(job['id'], status='done' if code in (0, None) else 'failed', exit_code=code,
                                      output=out, error=err, finished_at=store.now())
-    for job in catalog.jobs_in('queued', pool_id):
-        pool = store.get_pool(job['pool_id'])
-        if not pool:
-            catalog.update_build_job(job['id'], status='cancelled', error='pool removed', finished_at=store.now())
-            continue
+            ended.append(job['id'])
+        elif research.is_gpu_job(job) and _past_limit(job):
+            # the guest's own timeout did not end it (no coreutils timeout, a hung container)
+            if not ha.confirm_step(f"vLAB GPU job time limit {job['id']}"):
+                break
+            e = _stop_job(job, desk, mgr, node)
+            catalog.update_build_job(job['id'], status='failed', finished_at=store.now(),
+                                     error='time limit reached: stopped by MOAVI Desk' + (f' ({e})' if e else ''))
+            log_audit('system', 'vlab.gpujob.timeout', f"job '{job['name']}' of {job['username']} on {desk['name']}", '')
+            ended.append(job['id'])
+    if ended and ha.is_active():
+        from pegaprox.api.vlab_research import notify_ended
+        notify_ended(ended)
+    _run_queue()
+
+
+def _past_limit(job, grace_min=10):
+    from pegaprox.vlab import research
+    start = research.parse(job.get('started_at'))
+    minutes = int(job.get('max_minutes') or 0)
+    return bool(start and minutes) and (research.utcnow() - start).total_seconds() > (minutes + grace_min) * 60
+
+
+def _run_queue():
+    """Start what the queue says may start now (research.plan: fair share, quotas, the oldest
+    GPU job keeps its GPUs). A plain build takes a whole free build VM; a GPU job takes free GPUs
+    of a VM of its pool - or of any GPU pool granted to its owner when it names none."""
+    from pegaprox.core import ha
+    from pegaprox.vlab import research
+    from pegaprox.api import vlab_research as rsch
+    queued = catalog.jobs_in('queued')
+    if not queued:
+        return
+    ctx = rsch.queue_context(queued)
+    placed, why, _ = research.plan(ctx['jobs'], ctx['vms'], ctx['usage'], ctx['quotas_of'],
+                                   ctx['settings']['starve_minutes'])
+    why.update(ctx['why'])
+    for job in ctx['all']:
+        reason = why.get(job['id'], '')
+        if job['status'] == 'queued' and job.get('wait_reason', '') != reason and job['id'] not in {j['id'] for j, _, _ in placed}:
+            catalog.update_build_job(job['id'], wait_reason=reason)
+    for job, v, idx in placed:
+        pool = ctx['pools'][v['pool_id']]
+        d = v['desk']
         mgr = cluster_managers.get(pool['cluster_id'])
-        if not mgr or not getattr(mgr, 'is_connected', False):
-            continue
-        live = core._vm_states(pool['cluster_id'])
-        busy = store.open_session_desktops() | {j['desktop_id'] for j in catalog.jobs_in('running', pool['id'])}
-        free = [d for d in store.list_desktops(pool['id'])
-                if not d['assigned_user'] and d['id'] not in busy and d['vm_type'] == 'qemu'
-                and (live.get(int(d['vmid'])) or {}).get('status') == 'running']
-        if not free:
-            continue
-        d = free[0]
-        node = (live.get(int(d['vmid'])) or {}).get('node') or d['node']
+        node = v['node']
+        # the build VM is asked to mount and then to run: steps an automation takes (HA 5.2)
+        if not ha.confirm_step(f"vLAB build job start {job['id']}"):
+            break
         st = storage_on_connect(d, pool, mgr, node, job['username'])
         cfg = storage_config(pool['id']) if st else None
-        on_nas = bool(cfg and job['workdir'].startswith(cfg['linux_path'] + '/'))
+        scratch = _scratch_dir(pool, job['username'])
+        workdir = job['workdir'] or (f"{scratch}/{job['id']}" if scratch and research.is_gpu_job(job) else '')
+        if not workdir and research.is_gpu_job(job):
+            workdir = f"/var/tmp/moavi-jobs/{job['id']}"
+        on_nas = bool(cfg and workdir.startswith(cfg['linux_path'] + '/'))
         if on_nas and st['ok'] is False:
             # the job would start in a folder that is not there; say why instead
-            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], finished_at=store.now(),
+            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], pool_id=pool['id'], finished_at=store.now(),
                                      error=f"shared storage not ready on {d['name']}: {st['code']} {st['detail']}"[:300])
             continue
-        scratch = _scratch_dir(pool, job['username'])
-        mine = bool(on_nas and scratch and job['workdir'].startswith(scratch + '/'))
-        pid, err = _start_job(job, d, mgr, node, as_user=nas.guest_name(job['username']) if mine else None)
+        mine = bool(on_nas and scratch and workdir.startswith(scratch + '/'))
+        as_user = nas.guest_name(job['username']) if mine else None
+        argv = None
+        if research.is_gpu_job(job):
+            conf = research.pool_gpu_jobs(pool.get('settings'), core._gpu_policy(pool.get('settings')))
+            argv = research.job_argv(research.job_script(dict(job), workdir, idx, conf['runtime']), as_user)
+        pid, err = _start_job(dict(job, workdir=workdir), d, mgr, node, as_user=as_user, argv=argv)
         if err:
-            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], error=err, finished_at=store.now())
+            catalog.update_build_job(job['id'], status='failed', desktop_id=d['id'], pool_id=pool['id'], error=err,
+                                     finished_at=store.now())
         else:
-            catalog.update_build_job(job['id'], status='running', desktop_id=d['id'], pid=pid, started_at=store.now())
-            log_audit(job['username'], 'vlab.build.start', f"build '{job['name']}' on {d['name']} (qemu/{d['vmid']})", '')
+            catalog.update_build_job(job['id'], status='running', desktop_id=d['id'], pool_id=pool['id'], pid=pid,
+                                     started_at=store.now(), workdir=workdir, gpu_index=','.join(str(i) for i in idx),
+                                     wait_reason='')
+            gpus = f" GPU {','.join(str(i) for i in idx)}" if idx else ''
+            log_audit(job['username'], 'vlab.build.start', f"build '{job['name']}' on {d['name']} (qemu/{d['vmid']}){gpus}", '')
 
 
 def _job_view(j):
+    from pegaprox.vlab import research
     desk = store.get_desktop(j['desktop_id']) if j.get('desktop_id') else None
-    pool = store.get_pool(j['pool_id'])
-    return dict(j, desktop=desk['name'] if desk else None, pool=pool['name'] if pool else None)
+    pool = store.get_pool(j['pool_id']) if j.get('pool_id') else None
+    return dict(j, desktop=desk['name'] if desk else None, pool=pool['name'] if pool else None,
+                env=research.loads(j.get('env'), {}) or None, notify=research.loads(j.get('notify'), {}),
+                gpu_index=[int(x) for x in str(j.get('gpu_index') or '').split(',') if x.strip().isdigit()],
+                gpu_job=research.is_gpu_job(j))
 
 
-def _add_job(pool, username, name, command, workdir):
-    """A queued job; with no work folder and shared storage on, it gets scratch/<user>/<job id>."""
-    job = catalog.add_build_job(pool['id'], username, name, command, workdir)
-    base = '' if workdir else _scratch_dir(pool, username)
+def _add_job(pool, username, name, command, workdir, extra=None):
+    """A queued job; with no work folder and shared storage on, it gets scratch/<user>/<job id>.
+    pool None: a GPU job the queue places in any GPU pool granted to the user."""
+    extra = dict(extra or {})
+    if extra:
+        extra['department_id'] = catalog.department_of(username) or ''
+    job = catalog.add_build_job(pool['id'] if pool else '', username, name, command, workdir, **extra)
+    base = '' if workdir or not pool else _scratch_dir(pool, username)
     return catalog.update_build_job(job['id'], workdir=f"{base}/{job['id']}") if base else job
 
 
-def _job_body():
+def _job_body(owner=None):
+    """(pool or None, name, command, workdir, GPU fields). A GPU job may leave the pool to the queue."""
+    from pegaprox.vlab import research
     data = _body()
-    pool = store.get_pool(str(data.get('pool_id') or ''))
-    if not pool or pool['type'] != 'buildfarm' or not core._can_reach(pool['cluster_id']):
+    pid = str(data.get('pool_id') or '')
+    pool = store.get_pool(pid) if pid else None
+    if pid and (not pool or pool['type'] != 'buildfarm' or not core._can_reach(pool['cluster_id'])):
+        raise LookupError('Build farm pool not found')
+    if not pool and not data.get('gpus'):
         raise LookupError('Build farm pool not found')
     name = _text(data, 'name', 80, required=True)
     command = _text(data, 'command', 2000, required=True)
     workdir = _text(data, 'workdir', 300)
-    return pool, name, command, workdir
+    conf = research.pool_gpu_jobs(pool.get('settings'), core._gpu_policy(pool.get('settings'))) if pool else None
+    gpu = bool(data.get('gpus') or data.get('env') or data.get('max_minutes'))
+    extra = research.job_extra(data, conf['max_minutes'] if conf else 0,
+                               research.get_settings()['default_max_minutes'] if gpu else 0)
+    if extra.get('gpus'):
+        if conf and (conf['gpus_per_vm'] < extra['gpus'] or not research.kind_matches(extra['gpu_kind'], conf['kind'])):
+            raise ValueError(f"The build VMs of '{pool['name']}' have {conf['gpus_per_vm']} GPU(s)"
+                             + (f" ({conf['kind']})" if conf['kind'] else '') + ' - fewer or of another kind than asked')
+        if not pool and owner:
+            from pegaprox.api.vlab_research import candidate_pools
+            if not candidate_pools(owner, extra['gpus'], extra['gpu_kind']):
+                raise PermissionError('No GPU build pool you may use has that many GPUs of that kind')
+    return pool, name, command, workdir, extra
+
+
+def _submit_error(e):
+    if isinstance(e, LookupError):
+        return _bad(str(e), 404)
+    if isinstance(e, PermissionError):
+        return jsonify({'error': str(e), 'code': 'NO_GPU_POOL'}), 409
+    return _bad(str(e))
 
 
 @bp.route('/api/vlab/me/build-jobs', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
 def my_build_jobs():
+    from pegaprox.vlab import research
     refresh_jobs()
-    pools = [{'id': p['id'], 'name': p['name'], 'workdir': _scratch_dir(p, _user())} for p in store.list_pools()
-             if p['type'] == 'buildfarm' and core._can_reach(p['cluster_id']) and granted(p['id'], _user())]
+    pools = []
+    for p in store.list_pools():
+        if p['type'] == 'buildfarm' and core._can_reach(p['cluster_id']) and granted(p['id'], _user()):
+            conf = research.pool_gpu_jobs(p.get('settings'), core._gpu_policy(p.get('settings')))
+            pools.append({'id': p['id'], 'name': p['name'], 'workdir': _scratch_dir(p, _user()),
+                          'gpus_per_vm': conf['gpus_per_vm'], 'gpu_kind': conf['kind'], 'max_minutes': conf['max_minutes'],
+                          'runtime': conf['runtime']})
     return jsonify({'jobs': [_job_view(j) for j in catalog.list_build_jobs(username=_user(), limit=100)], 'pools': pools})
 
 
 @bp.route('/api/vlab/me/build-jobs', methods=['POST'])
 @require_auth(perms=['vlab.desk'])
 def submit_build_job():
+    from pegaprox.vlab import research
     try:
-        pool, name, command, workdir = _job_body()
-    except LookupError as e:
-        return _bad(str(e), 404)
-    except ValueError as e:
-        return _bad(str(e))
-    if not granted(pool['id'], _user()):
+        pool, name, command, workdir, extra = _job_body(owner=_user())
+    except (LookupError, ValueError, PermissionError) as e:
+        return _submit_error(e)
+    if pool and not granted(pool['id'], _user()):
         return _bad('Build farm pool not found', 404)
-    if len(catalog.jobs_in('queued')) >= 500:
+    queued = catalog.jobs_in('queued')
+    if len(queued) >= 500:
         return _bad('The build queue is full', 429)
-    job = _add_job(pool, _user(), name, command, workdir)
-    log_audit(_user(), 'vlab.build.submit', f"build '{name}' to pool '{pool['name']}'", get_client_ip())
-    refresh_jobs(pool['id'])
+    if sum(1 for j in queued if j['username'] == _user()) >= research.get_settings()['max_queued_per_user']:
+        return _bad('You have as many jobs waiting as one may', 429)
+    job = _add_job(pool, _user(), name, command, workdir, extra)
+    where = f"pool '{pool['name']}'" if pool else 'any GPU pool'
+    log_audit(_user(), 'vlab.build.submit', f"build '{name}' to {where}" + (f" ({extra['gpus']} GPU)" if extra.get('gpus') else ''),
+              get_client_ip())
+    refresh_jobs(pool['id'] if pool else None)
     return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
 
 
@@ -2036,18 +2159,17 @@ def list_build_jobs():
 def admin_submit_build_job():
     """Send a job on someone's behalf (or the admin's own)."""
     from pegaprox.utils.auth import load_users
-    try:
-        pool, name, command, workdir = _job_body()
-    except LookupError as e:
-        return _bad(str(e), 404)
-    except ValueError as e:
-        return _bad(str(e))
     owner = str(_body().get('username') or '').strip() or _user()
     if owner not in load_users():
         return _bad('No such user')
-    job = _add_job(pool, owner, name, command, workdir)
-    log_audit(_user(), 'vlab.build.submit', f"build '{name}' for {owner} to pool '{pool['name']}'", get_client_ip())
-    refresh_jobs(pool['id'])
+    try:
+        pool, name, command, workdir, extra = _job_body(owner=owner)
+    except (LookupError, ValueError, PermissionError) as e:
+        return _submit_error(e)
+    job = _add_job(pool, owner, name, command, workdir, extra)
+    where = f"pool '{pool['name']}'" if pool else 'any GPU pool'
+    log_audit(_user(), 'vlab.build.submit', f"build '{name}' for {owner} to {where}", get_client_ip())
+    refresh_jobs(pool['id'] if pool else None)
     return jsonify({'job': _job_view(catalog.get_build_job(job['id']))}), 201
 
 

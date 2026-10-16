@@ -61,6 +61,9 @@ def _loop():
                 # accounts: the notice before the last day, expiry, deletion N days later
                 from pegaprox.api.vlab_accounts import accounts_tick
                 accounts_tick()
+                # GPU jobs: ended ones read and told, past their time limit stopped, the queue run
+                from pegaprox.api.vlab_research import gpu_tick
+                gpu_tick()
         except Exception as e:
             logging.error(f'[VLAB] loan return / pool policy: {e}')
         time.sleep(INTERVAL)

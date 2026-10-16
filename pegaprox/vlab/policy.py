@@ -17,10 +17,14 @@ takes effect:
                                (pegaprox/api/vlab_work.py) and wait while it is
   busy_gpu_pct, busy_cpu_pct   what counts as working (GPU use, CPU load; 0 = not judged by it)
   defer_max_hours              the longest the step waits; then it runs anyway
+  web_ide                      the portal's 웹 IDE: JupyterLab and/or VS Code (code-server) through
+                               vlab-proxy /ide/<session>/ (pegaprox/api/vlab_research.py)
+  web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
 """
 
 PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
 CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
+WEB_IDE = ('jupyter', 'vscode')
 RESET_TYPES = ('reset', 'classroom')
 
 DEFAULTS = {
@@ -38,12 +42,15 @@ DEFAULTS = {
     'busy_gpu_pct': 10,
     'busy_cpu_pct': 50,
     'defer_max_hours': 12,
+    'web_ide': [],
+    'web_ide_idle_min': 240,
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'start_on_connect', 'reset_on_logout', 'allow_power',
           'defer_when_busy')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
-           'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168)}
+           'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
+           'web_ide_idle_min': (10, 10080)}
 
 
 def effective(settings):
@@ -73,6 +80,10 @@ def validate(data, pool_type):
             if not isinstance(v, list) or not v or any(p not in PROTOCOLS for p in v):
                 return None, 'protocols: a non-empty list of vnc, spice, rdp, guac'
             out[k] = [p for p in PROTOCOLS if p in v]
+        elif k == 'web_ide':
+            if not isinstance(v, list) or any(x not in WEB_IDE for x in v):
+                return None, 'web_ide: a list of jupyter, vscode'
+            out[k] = [x for x in WEB_IDE if x in v]
         elif k == 'clipboard':
             if v not in CLIPBOARD:
                 return None, f"clipboard must be one of {', '.join(CLIPBOARD)}"

@@ -167,6 +167,17 @@ _COLUMNS = (
     ('vlab_license_servers', 'usage_at', 'TEXT'),
     ('vlab_license_servers', 'usage_ok', 'INTEGER'),
     ('vlab_license_servers', 'usage_error', "TEXT NOT NULL DEFAULT ''"),
+    # GPU jobs (pegaprox/vlab/research.py): what a build job asks for, where it got its GPUs, who hears of its end
+    ('vlab_build_jobs', 'gpus', 'INTEGER NOT NULL DEFAULT 0'),
+    ('vlab_build_jobs', 'gpu_kind', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'memory_gb', 'INTEGER NOT NULL DEFAULT 0'),
+    ('vlab_build_jobs', 'max_minutes', 'INTEGER NOT NULL DEFAULT 0'),
+    ('vlab_build_jobs', 'env', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'notify', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'gpu_index', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'wait_reason', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'department_id', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_build_jobs', 'notified_at', 'TEXT'),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -654,10 +665,18 @@ def forget_desktop_version(desktop_id):
 JOB_STATES = ('queued', 'running', 'done', 'failed', 'cancelled')
 
 
-def add_build_job(pool_id, username, name, command, workdir):
+JOB_EXTRA = ('gpus', 'gpu_kind', 'memory_gb', 'max_minutes', 'env', 'notify', 'department_id')
+
+
+def add_build_job(pool_id, username, name, command, workdir, **extra):
+    """extra: the GPU job fields (JOB_EXTRA); pool_id '' lets the queue pick a pool."""
     jid = new_id('job')
     db().execute('INSERT INTO vlab_build_jobs (id, pool_id, username, name, command, workdir, status, created_at) '
                  "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)", (jid, pool_id, username, name, command, workdir, now()))
+    keys = [k for k in JOB_EXTRA if k in extra]
+    if keys:
+        db().execute(f"UPDATE vlab_build_jobs SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
+                     tuple(extra[k] for k in keys) + (jid,))
     return get_build_job(jid)
 
 
@@ -684,7 +703,8 @@ def jobs_in(status, pool_id=None):
 
 
 def update_build_job(jid, **fields):
-    keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at', 'workdir')]
+    keys = [k for k in fields if k in ('status', 'desktop_id', 'pid', 'exit_code', 'output', 'error', 'started_at', 'finished_at',
+                                       'workdir', 'pool_id', 'gpu_index', 'wait_reason', 'notified_at')]
     if keys:
         db().execute(f"UPDATE vlab_build_jobs SET {', '.join(k + ' = ?' for k in keys)} WHERE id = ?",
                      tuple(fields[k] for k in keys) + (jid,))

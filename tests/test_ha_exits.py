@@ -960,6 +960,10 @@ CONFIRM_SITES = [
     ('pegaprox/api/vlab.py', '_lab_phase', ['vm_action', '_reset_one']),
     # a board whose loan ended comes off its desktop
     ('pegaprox/api/vlab_next.py', 'board_tick', ['_detach_board']),
+    # the build and GPU job queue from the minute loop: a GPU job past its time limit is stopped,
+    # a queued job is placed (its build VM mounts the shared folders, then runs it)
+    ('pegaprox/api/vlab_next.py', 'refresh_jobs', ['_stop_job']),
+    ('pegaprox/api/vlab_next.py', '_run_queue', ['storage_on_connect', '_start_job']),
     # a clean-up put off while the desktop was working runs later; an idle loaned card goes back
     ('pegaprox/api/vlab_work.py', 'deferral_tick', ['vm_action', '_reset_one']),
     ('pegaprox/api/vlab_work.py', 'reclaim_tick', ['return_lease']),

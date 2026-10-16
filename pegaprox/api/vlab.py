@@ -329,7 +329,7 @@ def my_desktops():
         v['last_connected'] = last.get(d['id'])
         pol = pool_policy.effective(_settings_of(d))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
-                       'start_on_connect': pol['start_on_connect']}
+                       'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide']}
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:

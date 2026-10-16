@@ -4869,7 +4869,9 @@ class PegaProxDB:
                                 # next ISO fetch answering 500.
                                 ('auto_install_profiles', ('answer_encrypted',)),
                                 # MOAVI Desk: the SMB service account of a pool's shared storage
-                                ('vlab_pool_storage', ('password_encrypted',))):
+                                ('vlab_pool_storage', ('password_encrypted',)),
+                                # MOAVI Desk: the token of a running web IDE (vlab-proxy adds it on the way to the VM)
+                                ('vlab_ide_sessions', ('token_encrypted',))):
                 if not cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                                       (_tbl,)).fetchone():
                     continue    # a MOAVI Desk table is made on first use: nothing sealed in it yet
