@@ -960,6 +960,9 @@ CONFIRM_SITES = [
     ('pegaprox/api/vlab.py', '_lab_phase', ['vm_action', '_reset_one']),
     # a board whose loan ended comes off its desktop
     ('pegaprox/api/vlab_next.py', 'board_tick', ['_detach_board']),
+    # a clean-up put off while the desktop was working runs later; an idle loaned card goes back
+    ('pegaprox/api/vlab_work.py', 'deferral_tick', ['vm_action', '_reset_one']),
+    ('pegaprox/api/vlab_work.py', 'reclaim_tick', ['return_lease']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',
@@ -1151,6 +1154,9 @@ READ_SITES = [
     # MOAVI Desk licence seats: lmstat and the tail of the lmgrd debug log on the licence
     # server's VM through the guest agent (its exec is a POST), every 5 minutes from license_tick
     ('pegaprox/api/vlab_license.py', '_guest_read', {'_agent_run': 2}),
+    # MOAVI Desk: GPU / NPU use and CPU load read through the guest agent (nvidia-smi and the
+    # like) from the minute loop - an agent exec is a POST, the command only queries
+    ('pegaprox/api/vlab_work.py', '_probe', {'_guest_os': 1, '_agent_run': 1}),
 ]
 
 

@@ -318,10 +318,13 @@ def my_desktops():
     last = store.last_connected(_user())
     from pegaprox.api.vlab_next import storage_paths
     from pegaprox.vlab import nas
+    from pegaprox.api.vlab_work import desktop_work
+    work = desktop_work([d['id'] for d in rows])
     pools = {}
     out = []
     for d in rows:
         v = _desktop_view(d, live.get(d['cluster_id'], {}))
+        v['work'] = work.get(d['id'])
         v['pool_type'] = d.get('pool_type', '')
         v['last_connected'] = last.get(d['id'])
         pol = pool_policy.effective(_settings_of(d))
@@ -340,12 +343,15 @@ def my_desktops():
 @bp.route('/api/vlab/me/leases', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
 def my_leases():
+    from pegaprox.api.vlab_work import lease_extras
     out = []
     desks = {(d['cluster_id'], d['vmid']): d for d in store.desktops_of_user(_user())}
-    for l in store.active_leases_of_user(_user()):
+    leases = store.active_leases_of_user(_user())
+    extra = lease_extras(leases)
+    for l in leases:
         d = desks.get((l['cluster_id'], l['vmid']))
         out.append({'id': l['id'], 'kind': l['resource_type'], 'name': l['resource_name'] or l['resource_id'],
-                    'ends_at': l['ends_at'], 'desktop': d['name'] if d else None})
+                    'ends_at': l['ends_at'], 'desktop': d['name'] if d else None, **extra.get(l['id'], {})})
     return jsonify({'leases': out})
 
 
@@ -1663,18 +1669,29 @@ def _ts_utc(iso):
 
 def policy_tick(now=None):
     """Once a minute (pegaprox/vlab/loans.py): close sessions open past max_session_hours,
-    then shut down desktops idle past idle_shutdown_min. Returns what it did."""
+    then shut down desktops idle past idle_shutdown_min. A desktop that is working (a busy
+    GPU / CPU, a build job, the user's "작업 중") is left alone while its pool says so
+    (pegaprox/api/vlab_work.py defer). Returns what it did."""
     from datetime import datetime, timedelta, timezone
+    from pegaprox.api import vlab_work
     now = now or datetime.now(timezone.utc)
     pools = {p['id']: p for p in store.list_pools()}
     policies = {pid: pool_policy.effective(p.get('settings')) for pid, p in pools.items()}
-    done = {'expired': 0, 'shutdown': 0}
+    done = {'expired': 0, 'shutdown': 0, 'deferred': 0}
 
+    states = {}
     for s in store.open_sessions():
         pol = policies.get(s['pool_id'])
         if not pol or not pol['max_session_hours']:
             continue
         if now - _ts_utc(s['started_at']) >= timedelta(hours=pol['max_session_hours']):
+            desk = store.get_desktop(s['desktop_id']) if s['desktop_id'] else None
+            if desk and desk['cluster_id'] not in states:
+                states[desk['cluster_id']] = _vm_states(desk['cluster_id'])
+            if desk and vlab_work.defer(desk, pools.get(s['pool_id']), 'expire', 'session_limit', s['id'],
+                                        vm=states[desk['cluster_id']].get(int(desk['vmid'])), at=now, username=s['username']):
+                done['deferred'] += 1
+                continue
             # a reset-on-logout pool changes the VM: confirm the lease first (HA 5.2)
             if not ha.confirm_step(f"vLAB session limit {s['id']}"):
                 break
@@ -1702,6 +1719,9 @@ def policy_tick(now=None):
             if timedelta(seconds=float(vm.get('uptime') or 0)) < limit:
                 continue
             if last_end.get(d['id']) and now - _ts_utc(last_end[d['id']]) < limit:
+                continue
+            if vlab_work.defer(d, pools.get(d['pool_id']), 'shutdown', 'idle', vm=vm, at=now):
+                done['deferred'] += 1
                 continue
             mgr = cluster_managers.get(d['cluster_id'])
             if not ha.confirm_step(f"vLAB idle shutdown {d['id']}"):
@@ -1781,7 +1801,9 @@ def list_leases():
     rows = [l for l in store.list_leases(active_only=request.args.get('all') != '1') if _can_reach(l['cluster_id'])]
     desks = {(d['cluster_id'], d['vmid']): d for d in store.list_desktops()}
     vms = {cid: _vm_states(cid) for cid in {l['cluster_id'] for l in rows}}
-    return jsonify({'leases': [_lease_view(l, desks, vms) for l in rows]})
+    from pegaprox.api.vlab_work import lease_extras
+    extra = lease_extras([l for l in rows if l['state'] == 'active'])
+    return jsonify({'leases': [dict(_lease_view(l, desks, vms), **extra.get(l['id'], {})) for l in rows]})
 
 
 @bp.route('/api/vlab/admin/leases', methods=['POST'])
@@ -2061,6 +2083,8 @@ def user_access(username):
 def all_desktops():
     pools = {p['id']: p for p in store.list_pools() if _can_reach(p['cluster_id'])}
     live = {cid: _vm_states(cid) for cid in {p['cluster_id'] for p in pools.values()}}
+    from pegaprox.api.vlab_work import desktop_work
+    work = desktop_work([d['id'] for d in store.list_desktops() if d['pool_id'] in pools])
     out = []
     for d in store.list_desktops():
         pool = pools.get(d['pool_id'])
@@ -2069,7 +2093,7 @@ def all_desktops():
         vms = live.get(d['cluster_id'], {})
         v = _desktop_view(dict(d, pool_name=pool['name'], pool_settings=pool.get('settings')), vms)
         v.update({'vmid': d['vmid'], 'node': d['node'], 'cluster_id': d['cluster_id'],
-                  'pool_id': d['pool_id'], 'assigned_user': d['assigned_user']})
+                  'pool_id': d['pool_id'], 'assigned_user': d['assigned_user'], 'work': work.get(d['id'])})
         vm = vms.get(int(d['vmid']))
         if vm is not None:
             # 가상머신 > 데스크톱(VM) 관리 shows what the guest uses right now
@@ -2792,12 +2816,16 @@ def run_lab_schedule(schedule_id):
 
 def _lab_phase(sched, pool, phase, after=None, desks=None):
     """Start the pool's desktops (prepare) or put them back (finish: reset = base and off,
-    off = shut down). Desktops someone is connected to are left alone at the finish.
+    off = shut down). Desktops someone is connected to are left alone at the finish, and so
+    are those still working (pegaprox/api/vlab_work.py defer): their clean-up waits.
     `desks` narrows it to some of them (a booking of N seats or desktops)."""
+    from pegaprox.api import vlab_work
+    source = 'booking' if 'kind' in sched else 'lab'
     done, skipped, failed = [], [], []
     mgr = cluster_managers.get(pool['cluster_id'])
     live = _vm_states(pool['cluster_id'])
     busy = store.open_session_desktops()
+    held = set()
     targets = store.list_desktops(pool['id']) if desks is None else desks
     for d in targets:
         vm = live.get(int(d['vmid']))
@@ -2805,6 +2833,7 @@ def _lab_phase(sched, pool, phase, after=None, desks=None):
             failed.append({'id': d['id'], 'name': d['name'], 'error': 'the VM is not on the cluster'})
             continue
         if phase == 'prepare':
+            vlab_work.drop_on_prepare(d)
             if vm.get('status') == 'running':
                 skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'running'})
                 continue
@@ -2814,6 +2843,12 @@ def _lab_phase(sched, pool, phase, after=None, desks=None):
         else:
             if d['id'] in busy:
                 skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'in_use'})
+                continue
+            act = 'reset' if after == 'reset' and d.get('base_snap') else 'shutdown'
+            if (act == 'reset' or vm.get('status') == 'running') and vlab_work.defer(
+                    d, pool, act, source, sched.get('id', ''), vm=vm, username=d.get('assigned_user') or ''):
+                skipped.append({'id': d['id'], 'name': d['name'], 'reason': 'working'})
+                held.add(d['id'])
                 continue
             if after == 'reset' and d.get('base_snap'):
                 if not ha.confirm_step(f"LAB reset {d['id']}"):
@@ -2834,7 +2869,7 @@ def _lab_phase(sched, pool, phase, after=None, desks=None):
     if phase == 'finish' and pool.get('type') == 'classroom':
         keep = {d['id'] for d in targets}
         for d in store.list_desktops(pool['id']):
-            if d['id'] in keep and d['assigned_user'] and d['id'] not in busy and _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False):
+            if d['id'] in keep and d['assigned_user'] and d['id'] not in busy | held and _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False):
                 store.set_assignment(d['id'], None)
     return {'phase': phase, 'done': done, 'skipped': skipped, 'failed': failed}
 

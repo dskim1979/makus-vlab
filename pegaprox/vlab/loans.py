@@ -50,6 +50,10 @@ def _loop():
                 policy_tick()
                 # and the LAB schedules: desktops ready before a session, put back after it
                 lab_tick()
+                # the clean-ups put off while a desktop was working; GPU / NPU use every few minutes
+                from pegaprox.api.vlab_work import accel_tick, deferral_tick
+                deferral_tick()
+                accel_tick()
                 # boards whose loan ended come off their desktop; licence servers every 5 minutes
                 from pegaprox.api.vlab_next import board_tick, license_tick
                 board_tick()

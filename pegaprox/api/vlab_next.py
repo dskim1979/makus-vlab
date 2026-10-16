@@ -2065,8 +2065,12 @@ def cancel_build_job(jid):
 @bp.route('/api/vlab/admin/reports/cards', methods=['GET'])
 @require_auth(perms=['vlab.report.view'])
 def card_report():
-    """Loans per card over the last N days: how many, hours in the window, users, lent now."""
+    """Loans per card over the last N days: how many, hours in the window, users, lent now, and
+    what the card really did in that time (pegaprox/api/vlab_work.py samples): average use,
+    hours under the reclaim threshold or with the desktop off, hours measured."""
     from datetime import timedelta
+    from pegaprox.api.vlab_work import lease_use, settings as work_settings
+    from pegaprox.vlab.workload import iso as _iso
     try:
         days = max(1, min(366, int(request.args.get('days') or 30)))
     except ValueError:
@@ -2082,22 +2086,38 @@ def card_report():
             continue
         hours = max(0.0, (min(end, now) - max(start, since)).total_seconds() / 3600)
         key = l['resource_name'] or l['resource_id']
-        c = cards.setdefault(key, {'card': key, 'resource_id': l['resource_id'], 'loans': 0, 'hours': 0.0, 'users': set(), 'active': 0})
+        c = cards.setdefault(key, {'card': key, 'resource_id': l['resource_id'], 'loans': 0, 'hours': 0.0, 'users': set(),
+                                   'active': 0, 'lease_ids': []})
+        c['lease_ids'].append(l['id'])
         c['loans'] += 1
         c['hours'] += hours
         c['users'].add(l['username'])
         c['active'] += 1 if l['state'] == 'active' else 0
+    threshold = work_settings()['reclaim']['threshold_pct']
+    use = lease_use({lid for c in cards.values() for lid in c['lease_ids']},
+                    _iso(since.astimezone()), threshold)
+    for c in cards.values():
+        parts = [use[lid] for lid in c.pop('lease_ids') if lid in use]
+        measured = sum(p['measured_hours'] for p in parts)
+        c['measured_hours'] = round(measured, 1)
+        c['idle_hours'] = round(sum(p['idle_hours'] for p in parts), 1)
+        c['unmeasured_hours'] = round(sum(p['unmeasured_hours'] for p in parts), 1)
+        c['util_avg'] = (round(sum(p['util_avg'] * p['measured_hours'] for p in parts if p['util_avg'] is not None) / measured, 1)
+                         if measured else None)
     rows = sorted(({**c, 'hours': round(c['hours'], 1), 'users': sorted(c['users']),
                     'use_pct': round(100 * c['hours'] / (days * 24), 1)} for c in cards.values()),
                   key=lambda r: -r['hours'])
     if request.args.get('format') == 'csv':
         from flask import Response
-        lines = ['card,loans,hours,use_pct,users,lent_now']
+        lines = ['card,loans,hours,use_pct,util_avg,idle_hours,measured_hours,users,lent_now']
         for r in rows:
-            lines.append(','.join([_csv(r['card']), str(r['loans']), str(r['hours']), str(r['use_pct']), _csv(' '.join(r['users'])), str(r['active'])]))
+            lines.append(','.join([_csv(r['card']), str(r['loans']), str(r['hours']), str(r['use_pct']),
+                                   '' if r['util_avg'] is None else str(r['util_avg']), str(r['idle_hours']),
+                                   str(r['measured_hours']), _csv(' '.join(r['users'])), str(r['active'])]))
         return Response('﻿' + '\n'.join(lines) + '\n', mimetype='text/csv; charset=utf-8',
                         headers={'Content-Disposition': f'attachment; filename="card-usage-{days}d.csv"'})
-    return jsonify({'days': days, 'cards': rows, 'total_hours': round(sum(r['hours'] for r in rows), 1)})
+    return jsonify({'days': days, 'cards': rows, 'total_hours': round(sum(r['hours'] for r in rows), 1),
+                    'idle_threshold_pct': threshold})
 
 
 def _csv(v):

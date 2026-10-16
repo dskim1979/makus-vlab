@@ -473,6 +473,17 @@ def execute_scheduled_action(action):
                           f"the schedule says {vm_type}, the guest is {vm.get('type')}")
             return
         
+        # MOAVI Desk: a desktop still working (busy GPU / CPU, a build job, the user's
+        # "작업 중") keeps running; pegaprox/api/vlab_work.py runs the step once it is done
+        if action_type in ('stop', 'shutdown', 'reboot'):
+            try:
+                from pegaprox.api.vlab_work import defer_scheduled
+                if defer_scheduled(cluster_id, vmid, action_type, action.get('id')):
+                    logging.info(f"[SCHEDULER] {action_type} of {vmid} put off: the desktop is working")
+                    return
+            except Exception as e:
+                logging.warning(f"[SCHEDULER] vLAB busy check of {vmid}: {e}")
+
         node = quote(str(vm.get('node') or ''), safe='')
         host, port = mgr.host, mgr.api_port
         

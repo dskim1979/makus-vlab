@@ -12,6 +12,11 @@ takes effect:
   reset_on_logout              session end: back to the base (reset and scheduled pools only)
   allow_power                  the user's power route and buttons
   max_session_hours            background tick: a session open longer is closed
+  defer_when_busy              the idle shutdown, session limit, LAB / booking clean-up and a
+                               scheduled stop first ask whether the desktop is working
+                               (pegaprox/api/vlab_work.py) and wait while it is
+  busy_gpu_pct, busy_cpu_pct   what counts as working (GPU use, CPU load; 0 = not judged by it)
+  defer_max_hours              the longest the step waits; then it runs anyway
 """
 
 PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
@@ -29,10 +34,16 @@ DEFAULTS = {
     'reset_on_logout': False,
     'allow_power': True,
     'max_session_hours': 0,
+    'defer_when_busy': True,
+    'busy_gpu_pct': 10,
+    'busy_cpu_pct': 50,
+    'defer_max_hours': 12,
 }
 
-_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'start_on_connect', 'reset_on_logout', 'allow_power')
-_LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720)}   # a week, a month
+_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'start_on_connect', 'reset_on_logout', 'allow_power',
+          'defer_when_busy')
+_LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
+           'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168)}
 
 
 def effective(settings):

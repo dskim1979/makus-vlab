@@ -184,7 +184,8 @@ def test_active_loans_are_listed_for_their_user_only(env):
         "INSERT INTO vlab_leases (id, resource_type, resource_id, username, starts_at, state) "
         "VALUES ('l2', 'usb', 'jtag-1', 'alice', '2026-10-01T00:00:00+00:00', 'returned')")
     assert alice.get('/api/vlab/me/leases').get_json()['leases'] == [
-        {'id': 'l1', 'kind': 'card', 'name': 'Alveo U250 #2', 'ends_at': '2026-10-31T09:00:00+00:00', 'desktop': None}]
+        {'id': 'l1', 'kind': 'card', 'name': 'Alveo U250 #2', 'ends_at': '2026-10-31T09:00:00+00:00', 'desktop': None,
+         'use': None, 'reclaim': None}]
     assert bob.get('/api/vlab/me/leases').get_json()['leases'] == []
 
 
@@ -433,12 +434,12 @@ def test_policy_tick_expires_long_sessions_and_shuts_idle_desktops(connectable):
     mgr = _mgr()
     mgr.get_vm_resources.return_value = [dict(RES[0], uptime=7200), RES[1]]
     mgr.vm_action.reset_mock()
-    assert policy_tick(now) == {'expired': 0, 'shutdown': 0}             # in use: left alone
-    assert policy_tick(now + timedelta(hours=5)) == {'expired': 1, 'shutdown': 0}   # session closed ...
+    assert policy_tick(now) == {'expired': 0, 'shutdown': 0, 'deferred': 0}             # in use: left alone
+    assert policy_tick(now + timedelta(hours=5)) == {'expired': 1, 'shutdown': 0, 'deferred': 0}   # session closed ...
     row = store.db().query_one('SELECT result FROM vlab_sessions WHERE id = ?', (sid,))
     assert row['result'] == 'expired'
-    assert policy_tick(now + timedelta(hours=5)) == {'expired': 0, 'shutdown': 0}   # ... it just ended
-    assert policy_tick(now + timedelta(hours=6)) == {'expired': 0, 'shutdown': 1}   # 30 min idle: shut down
+    assert policy_tick(now + timedelta(hours=5)) == {'expired': 0, 'shutdown': 0, 'deferred': 0}   # ... it just ended
+    assert policy_tick(now + timedelta(hours=6)) == {'expired': 0, 'shutdown': 1, 'deferred': 0}   # 30 min idle: shut down
     assert mgr.vm_action.call_args[0] == ('pve1', 300, 'qemu', 'shutdown')
 
 

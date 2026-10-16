@@ -336,6 +336,8 @@ SYNC_TABLES = (
     'vlab_datasets', 'vlab_data_policies', 'vlab_data_requests', 'vlab_data_transfers',
     # account extras: reset links, sign-up mail checks, expiry, terms consents (pegaprox/vlab/accounts.py)
     'vlab_password_resets', 'vlab_signup_verify', 'vlab_account_expiry', 'vlab_terms_consents',
+    # long jobs kept alive: the users' "작업 중", the clean-ups put off, idle card reclaims (pegaprox/vlab/workload.py)
+    'vlab_work_holds', 'vlab_deferrals', 'vlab_card_reclaims',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -355,6 +357,8 @@ LOCAL_TABLES = (
     'vlab_license_samples', 'vlab_license_checkouts', 'vlab_license_denials',
     # research data uploads in progress (their part files are on this host or its mount) and file hashes
     'vlab_data_uploads', 'vlab_data_hashes',
+    # MOAVI Desk: GPU / NPU use this instance read from the card desktops every few minutes
+    'vlab_accel_samples',
 )
 
 # server_settings keys that describe this host, not the deployment
@@ -382,6 +386,8 @@ VOLATILE_COLUMNS = {
                      'sent_count', 'error_count'),
     # MOAVI Desk Agent heartbeats every few minutes (pegaprox/vlab/enroll.py)
     'vlab_terminal_enrollments': ('last_poll_at', 'info', 'recent'),
+    # a working desktop is asked again every few minutes (pegaprox/vlab/workload.py)
+    'vlab_deferrals': ('checked_at', 'reason'),
 }
 
 # Encrypted columns, the same inventory db.rotate_encryption_key walks. A value
