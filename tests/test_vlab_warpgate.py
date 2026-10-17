@@ -328,3 +328,53 @@ def test_web_rdp_provider_defaults_to_guac_and_switches(env):
     admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
     assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['web_rdp_provider'] == 'warpgate'
     assert admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'bogus'}).status_code == 400
+
+
+# --- coexistence: the engine decides who serves the portal's browser RDP ------------------
+
+def _guac_connect_env(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    import pegaprox.api.vlab_next as nxt
+    import pegaprox.utils.rbac as rbac
+    _, _, admin, alice, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'protocols': ['rdp', 'guac']})
+    key = '00112233445566778899aabbccddeeff'
+    admin.post('/api/vlab/admin/gateways', json={'name': 'g', 'kind': 'guacamole', 'address': 'guac.example.com', 'secret_key': key})
+    return admin, alice, d
+
+
+def test_browser_rdp_stays_on_guacamole_by_default(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)                                   # Warpgate on, provider left at guac
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    assert r.status_code == 200, r.get_json()
+    assert '/guacamole/?data=' in r.get_json()['url'] and r.get_json().get('via') is None
+    assert not fake_wg.tickets
+
+
+def test_browser_rdp_goes_through_warpgate_once_switched(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)
+    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
+                                                'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    assert body['via'] == 'warpgate' and body['url'].startswith('https://wg.example/?warpgate-target=')
+    assert fake_wg.tickets[-1]['number_of_uses'] == 1 and fake_wg.tickets[-1]['username'] == 'alice'
+
+
+def test_browser_rdp_falls_back_to_guacamole_when_warpgate_fails(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)
+    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
+                                                'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
+    monkeypatch.setattr(wg, '_api', lambda *a, **k: (500, 'down'))
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    assert r.status_code == 200, r.get_json()
+    assert '/guacamole/?data=' in r.get_json()['url']    # never dark: Guacamole still serves it

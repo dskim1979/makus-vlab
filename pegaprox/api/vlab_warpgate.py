@@ -13,6 +13,7 @@ MOAVI Desk - Warpgate 접근 게이트웨이(bastion) API (pegaprox/vlab/warpgat
   POST /api/vlab/me/desktops/<id>/warpgate   {protocol: rdp|ssh|vnc} 티켓 발급 + 접속 좌표     vlab.desk
 """
 
+import logging
 import re
 
 from flask import Blueprint, jsonify, request
@@ -218,6 +219,30 @@ def _desktop_target_options(cfg, proto, ip):
         return wg.vnc_target_options(ip, int(cfg['vnc_port']))
     return wg.rdp_target_options(ip, 3389, cfg.get('rdp_nla_user') or 'moavi-nla',
                                  cfg.get('rdp_nla_password') or '', interactive_logon=True)
+
+
+def browser_rdp_via_warpgate(desk, username, ip):
+    """The portal's "브라우저 RDP로 열기" for a pool desktop: a Warpgate browser link when Warpgate is on
+    AND web_rdp_provider is 'warpgate'; otherwise None and the caller keeps Guacamole. Any Warpgate
+    failure also gives None, so browser RDP falls back to Guacamole rather than going dark."""
+    if not wg.is_enabled():
+        return None
+    cfg = wg.config(secret=True)
+    if cfg.get('web_rdp_provider') != 'warpgate':
+        return None
+    try:
+        role_id = wg.ensure_role(cfg)
+        wg.ensure_user(cfg, username, role_id)
+        _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
+                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
+        _ticket, secret = wg.issue_ticket(cfg, username, target_name)
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate browser RDP for {desk.get('name')} failed, using Guacamole: {str(e)[:200]}")
+        return None
+    if not secret:
+        return None
+    log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate", get_client_ip())
+    return wg.connection_coordinates(cfg, 'rdp', target_name, secret)['browser_url']
 
 
 @bp.route('/api/vlab/me/desktops/<desktop_id>/warpgate', methods=['POST'])

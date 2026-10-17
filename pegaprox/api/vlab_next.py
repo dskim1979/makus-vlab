@@ -1833,6 +1833,12 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     if protocol == 'rdp':
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
         return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
+    # coexistence: the engine picks who serves browser RDP (pegaprox/api/vlab_warpgate.py) - Warpgate
+    # only when switched to it, Guacamole otherwise and whenever Warpgate fails
+    from pegaprox.api.vlab_warpgate import browser_rdp_via_warpgate
+    url = browser_rdp_via_warpgate(desk, username, ip)
+    if url:
+        return {'type': 'guac', 'url': url, 'via': 'warpgate'}, None
     gw = _guac_gateway(pool)
     if not gw:
         return None, (jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409)
