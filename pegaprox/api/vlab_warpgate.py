@@ -226,14 +226,35 @@ def _desktop_target_options(cfg, proto, ip, desk=None, pol=None, ssh_user=None):
     if proto == 'ssh':
         # the pool's file transfer switch also turns the gateway's web-SSH file panel on or off
         return wg.ssh_target_options(ip, 22, ssh_user, None if pol is None else pol.get('ssh_files', 'off') != 'off')
+    # the pool's clipboard policy, enforced by Warpgate for web RDP / VNC and mstsc through it
+    clip = None if pol is None else wg.web_clipboard(pol.get('clipboard'))
     if proto == 'vnc':
-        return wg.vnc_target_options(ip, int(cfg['vnc_port']))
+        return wg.vnc_target_options(ip, int(cfg['vnc_port']), clipboard=clip)
     user, pw = cfg.get('rdp_nla_user') or '', cfg.get('rdp_nla_password') or ''
     if not (user and pw) and desk:
         own = wg.nla_applied_credentials(desk['id'], desk['vmid'])
         if own:
             user, pw = own
-    return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True)
+    return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True, clipboard=clip)
+
+
+def _pool_policy_of(desk):
+    return pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))
+
+
+def resync_clipboard(desks, pol, background=True):
+    """A pool's clipboard policy changed: its desktops' existing RDP / VNC targets follow (built from
+    the stored mapping, no guest call)."""
+    if not wg.is_enabled():
+        return
+    cfg = wg.config(secret=True)
+    jobs = []
+    for d in desks:
+        for proto in ('rdp', 'vnc'):
+            mp = wg.get_mapping(wg.target_ref(d['id'], proto))
+            if mp and mp['address']:
+                jobs.append((d['id'], d['name'], proto, _desktop_target_options(cfg, proto, mp['address'], d, pol)))
+    wg.resync_targets(cfg, jobs, 'clipboard', background)
 
 
 SSH_NO_ACCOUNT_TEXT = "이 데스크톱에 '{}' 계정이 없습니다. 관리자에게 계정이나 도메인 조인을 요청하세요."
@@ -326,7 +347,8 @@ def rotate_desktop_nla(desktop_id):
         if ip and wg.get_mapping(desk['id']):
             try:
                 cfg = wg.config(secret=True)
-                wg.sync_target(cfg, desk['id'], desk['name'], 'rdp', _desktop_target_options(cfg, 'rdp', ip, desk))
+                wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
+                               _desktop_target_options(cfg, 'rdp', ip, desk, _pool_policy_of(desk)))
                 synced = True
             except Exception as e:
                 logging.warning(f"[VLAB] Warpgate target of {desk['name']} not updated after NLA rotation: {str(e)[:200]}")
@@ -416,7 +438,7 @@ def rdp_answer_via_warpgate(desk, username, ip, pol):
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
         _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
-                                            _desktop_target_options(cfg, 'rdp', ip, desk), role_id)
+                                            _desktop_target_options(cfg, 'rdp', ip, desk, pol), role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
         if not secret:
             raise wg.WarpgateError('Warpgate did not return a ticket secret')

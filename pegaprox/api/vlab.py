@@ -1746,7 +1746,8 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
-    was = pool_policy.effective(pool.get('settings')).get('ssh_files', 'off') != 'off'
+    old = pool_policy.effective(pool.get('settings'))
+    was = old.get('ssh_files', 'off') != 'off'
     from pegaprox.vlab import directory
     joined_before = directory.auto_join_on(pool)
     settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
@@ -1759,6 +1760,13 @@ def set_pool_policy(pool_id):
             resync_ssh_file_transfer(store.list_desktops(pool['id']), now_on)
         except Exception as e:
             logging.warning(f"[VLAB] Warpgate SSH file panel for pool '{pool['name']}': {str(e)[:200]}")
+    if old.get('clipboard') != pol.get('clipboard'):
+        # existing Warpgate RDP / VNC targets follow the clipboard policy
+        try:
+            from pegaprox.api.vlab_warpgate import resync_clipboard
+            resync_clipboard(store.list_desktops(pool['id']), pol)
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate clipboard for pool '{pool['name']}': {str(e)[:200]}")
     pool = store.get_pool(pool['id']) or pool
     if not joined_before and directory.auto_join_on(pool):
         directory.queue_pool(pool)          # the switch turned on: the desktops not joined yet
