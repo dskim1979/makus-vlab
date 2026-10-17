@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 MOAVI Desk - the next-phase catalogues: departments, sign-up requests, the USB device
-library, gateways, external desktops, golden images, board lab boards and licence servers.
+library, external desktops, golden images, board lab boards and licence servers.
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).
 
@@ -54,19 +54,6 @@ _SCHEMA = (
         builtin INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         UNIQUE (vid, pid)
-    )''',
-    '''CREATE TABLE IF NOT EXISTS vlab_gateways (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        address TEXT NOT NULL,
-        port INTEGER NOT NULL,
-        notes TEXT NOT NULL DEFAULT '',
-        enabled INTEGER NOT NULL DEFAULT 1,
-        last_check TEXT,
-        last_ok INTEGER,
-        last_detail TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL
     )''',
     '''CREATE TABLE IF NOT EXISTS vlab_external_desktops (
         id TEXT PRIMARY KEY,
@@ -144,13 +131,12 @@ _SCHEMA = (
     )''',
 )
 
-TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
+TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices',
           'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
           'vlab_desktop_versions', 'vlab_build_jobs')
 
 # columns added after a table first shipped: (table, column, definition)
 _COLUMNS = (
-    ('vlab_gateways', 'secret_key', "TEXT NOT NULL DEFAULT ''"),          # Guacamole (guacamole-auth-json)
     ('vlab_boards', 'lease_user', "TEXT NOT NULL DEFAULT ''"),
     # who hears of the department's GPU quota steps (pegaprox/api/vlab_notices.py)
     ('vlab_departments', 'manager', "TEXT NOT NULL DEFAULT ''"),
@@ -380,89 +366,41 @@ def delete_usb_device(uid):
     db().execute('DELETE FROM vlab_usb_devices WHERE id = ?', (uid,))
 
 
-# --- gateways ----------------------------------------------------------------------------
+# --- gateways: gone (보안 게이트웨이 / Warpgate replaced Guacamole and the RD gateways) -----------
 
-GATEWAY_KINDS = {'guacamole': 8080, 'rdpgw': 443, 'msrdgw': 443}
-
-
-def _gateway_row(r, secret=False):
-    if not r:
+def retire_gateways():
+    """Once, at start, on an install that still has the gateway catalog: drop it and every reference
+    to it - external desktops' gateway, pools' rdp_gateway_id / guac_gateway_id, and the pool protocol
+    'guac' (a pool that offered only browser RDP gets 'rdp': with Warpgate on, that opens in the browser
+    too). Returns what it cleaned, or None when there was nothing to do."""
+    import logging
+    from pegaprox.vlab import store
+    d = db()
+    if not d.query_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vlab_gateways'"):
         return None
-    g = dict(r)
-    key = g.pop('secret_key', '')
-    g['has_key'] = bool(key)
-    if secret:
-        g['secret_key'] = key
-    return g
-
-
-def list_gateways(secret=False):
-    return [_gateway_row(r, secret) for r in db().query('SELECT * FROM vlab_gateways ORDER BY name')]
-
-
-def get_gateway(gid, secret=False):
-    return _gateway_row(db().query_one('SELECT * FROM vlab_gateways WHERE id = ?', (gid,)), secret)
-
-
-def save_gateway(gid, name, kind, address, port, notes, enabled, secret_key=None):
-    if gid:
-        db().execute('UPDATE vlab_gateways SET name = ?, kind = ?, address = ?, port = ?, notes = ?, enabled = ? WHERE id = ?',
-                     (name, kind, address, port, notes, int(enabled), gid))
-    else:
-        gid = new_id('gw')
-        db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                     (gid, name, kind, address, port, notes, int(enabled), now()))
-    if secret_key is not None:
-        db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (secret_key, gid))
-    return get_gateway(gid)
-
-
-# The Guacamole bundled with the docker compose install (deploy/docker-compose.yml in
-# makus-vlab-console): served by vlab-proxy at /guacamole/ on the console's own address, its
-# key made on first start in a file both containers mount. VLAB_GUAC_BUILTIN=0 turns it off.
-BUILTIN_GUAC_ID = 'gw_builtin_guac'
-
-
-def sync_builtin_guacamole():
-    """Create or refresh the bundled Guacamole gateway from the environment, at start.
-    The key file wins over whatever is stored (the file is what Guacamole itself reads)."""
-    on = os.environ.get('VLAB_GUAC_BUILTIN', '').strip() not in ('', '0', 'false', 'no')
-    row = get_gateway(BUILTIN_GUAC_ID)
-    key = ''
-    path = os.environ.get('VLAB_GUAC_KEY_FILE', '/etc/vlab/guac/json-secret-key')
-    if on:
-        try:
-            with open(path, encoding='ascii') as f:
-                key = f.read().strip().lower()
-        except OSError:
-            key = ''
-        if not re.match(r'^[0-9a-f]{32}$', key):
-            on = False
-    if not on:
-        # the bundled Guacamole is not part of this install (any more): its gateway goes, so it is
-        # not listed in 접속 설정; external desktops that used it lose the gateway (delete_gateway)
-        if row:
-            delete_gateway(BUILTIN_GUAC_ID)
-        return None
-    if not row:
-        port = os.environ.get('VLAB_HTTPS_PORT', '443')
-        db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
-                     (BUILTIN_GUAC_ID, 'MOAVI Desk 내장 Guacamole', 'guacamole', os.environ.get('VLAB_HOSTNAME') or 'vlab.local',
-                      int(port) if port.isdigit() else 443, '설치 묶음에 함께 들어 있는 브라우저 RDP (/guacamole/, 콘솔과 같은 주소)', now()))
-    elif not row['enabled']:
-        db().execute('UPDATE vlab_gateways SET enabled = 1 WHERE id = ?', (BUILTIN_GUAC_ID,))
-    db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (key, BUILTIN_GUAC_ID))
-    return get_gateway(BUILTIN_GUAC_ID)
-
-
-def mark_gateway(gid, ok, detail):
-    db().execute('UPDATE vlab_gateways SET last_check = ?, last_ok = ?, last_detail = ? WHERE id = ?', (now(), int(ok), detail[:300], gid))
-    return get_gateway(gid)
-
-
-def delete_gateway(gid):
-    db().execute('UPDATE vlab_external_desktops SET gateway_id = NULL WHERE gateway_id = ?', (gid,))
-    db().execute('DELETE FROM vlab_gateways WHERE id = ?', (gid,))
+    gateways = (d.query_one('SELECT COUNT(*) AS n FROM vlab_gateways') or {'n': 0})['n']
+    ext = (d.query_one('SELECT COUNT(*) AS n FROM vlab_external_desktops WHERE gateway_id IS NOT NULL') or {'n': 0})['n']
+    d.execute('UPDATE vlab_external_desktops SET gateway_id = NULL WHERE gateway_id IS NOT NULL')
+    pools = 0
+    for pool in store.list_pools():
+        s = dict(pool.get('settings') or {})
+        before = repr(s)
+        s.pop('rdp_gateway_id', None)
+        s.pop('guac_gateway_id', None)
+        for holder in (s, s.get('policy') if isinstance(s.get('policy'), dict) else None):
+            protos = holder.get('protocols') if holder else None
+            if isinstance(protos, list) and 'guac' in protos:
+                left = [p for p in protos if p != 'guac']
+                if 'rdp' not in left:
+                    left.append('rdp')
+                holder['protocols'] = left
+        if repr(s) != before:
+            store.set_pool_settings(pool['id'], s)
+            pools += 1
+    d.execute('DROP TABLE vlab_gateways')
+    logging.warning(f'[VLAB] gateway catalog retired (보안 게이트웨이 replaces it): {gateways} gateway(s) removed, '
+                    f'{ext} external desktop(s) now direct / Warpgate, {pools} pool(s) cleaned')
+    return {'gateways': gateways, 'external': ext, 'pools': pools}
 
 
 # --- external desktops (physical PCs reached over RDP) -----------------------------------
@@ -477,14 +415,15 @@ def get_external(eid):
     return _one('SELECT * FROM vlab_external_desktops WHERE id = ?', (eid,))
 
 
-def save_external(eid, name, address, port, assigned_user, gateway_id, notes):
+def save_external(eid, name, address, port, assigned_user, notes):
+    # (gateway_id stays in the table, unused: the gateway catalog is gone)
     if eid:
-        db().execute('UPDATE vlab_external_desktops SET name = ?, address = ?, port = ?, assigned_user = ?, gateway_id = ?, notes = ? WHERE id = ?',
-                     (name, address, port, assigned_user, gateway_id, notes, eid))
+        db().execute('UPDATE vlab_external_desktops SET name = ?, address = ?, port = ?, assigned_user = ?, notes = ? WHERE id = ?',
+                     (name, address, port, assigned_user, notes, eid))
     else:
         eid = new_id('ext')
-        db().execute('INSERT INTO vlab_external_desktops (id, name, address, port, assigned_user, gateway_id, notes, created_at) '
-                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (eid, name, address, port, assigned_user, gateway_id, notes, now()))
+        db().execute('INSERT INTO vlab_external_desktops (id, name, address, port, assigned_user, notes, created_at) '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?)', (eid, name, address, port, assigned_user, notes, now()))
     return get_external(eid)
 
 

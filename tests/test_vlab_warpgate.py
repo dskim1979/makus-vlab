@@ -308,7 +308,7 @@ def test_connect_ssh_uses_warpgate_public_key(env, fake_wg, monkeypatch):
 
 def test_portal_status_reflects_enabled(env):
     _, _, admin, alice, _ = env
-    assert alice.get('/api/vlab/me/warpgate').get_json() == {'enabled': False, 'protocols': ['rdp', 'ssh', 'vnc'], 'web_rdp_provider': 'guac'}
+    assert alice.get('/api/vlab/me/warpgate').get_json() == {'enabled': False, 'protocols': ['rdp', 'ssh', 'vnc']}
     _configure(admin)
     assert alice.get('/api/vlab/me/warpgate').get_json()['enabled'] is True
 
@@ -417,19 +417,18 @@ def test_policy_has_researcher_ssh_toggle():
     assert pool_policy.validate({'researcher_ssh': 'yes'}, 'dedicated')[1]
 
 
-def test_web_rdp_provider_defaults_to_guac_and_switches(env):
+def test_web_rdp_provider_is_gone_with_guacamole(env):
+    """Browser RDP is 보안 게이트웨이's alone now: no provider to pick; an old console's field is ignored."""
     _, _, admin, alice, _ = env
     _configure(admin)
-    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['web_rdp_provider'] == 'guac'
-    assert alice.get('/api/vlab/me/warpgate').get_json()['web_rdp_provider'] == 'guac'
-    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
-    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['web_rdp_provider'] == 'warpgate'
-    assert admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'bogus'}).status_code == 400
+    assert 'web_rdp_provider' not in admin.get('/api/vlab/admin/warpgate').get_json()['config']
+    assert 'web_rdp_provider' not in alice.get('/api/vlab/me/warpgate').get_json()
+    r = admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
+                                                    'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'guac'})
+    assert r.status_code == 200
 
 
-# --- coexistence: the engine decides who serves the portal's browser RDP ------------------
-
-def _guac_connect_env(env, monkeypatch):
+def _connect_env(env, monkeypatch):
     import pegaprox.api.vlab as core
     import pegaprox.api.vlab_next as nxt
     import pegaprox.utils.rbac as rbac
@@ -439,57 +438,79 @@ def _guac_connect_env(env, monkeypatch):
     monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
     monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
     pool, d = _assign()
-    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'protocols': ['rdp', 'guac']})
-    key = '00112233445566778899aabbccddeeff'
-    admin.post('/api/vlab/admin/gateways', json={'name': 'g', 'kind': 'guacamole', 'address': 'guac.example.com', 'secret_key': key})
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'protocols': ['rdp']})
     return admin, alice, d
 
 
-def test_browser_rdp_stays_on_guacamole_by_default(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
-    _configure(admin)                                   # Warpgate on, provider left at guac
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
-    assert r.status_code == 200, r.get_json()
-    assert '/guacamole/?data=' in r.get_json()['url'] and r.get_json().get('via') is None
-    assert not fake_wg.tickets
+# --- external desktops (physical PCs) through 보안 게이트웨이, or direct -------------------------
+
+def _external(admin, user='alice'):
+    from pegaprox.vlab import catalog
+    return catalog.save_external(None, '측정실 PC', '10.30.5.21', 3389, user, '')
 
 
-def test_browser_rdp_goes_through_warpgate_once_switched(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+def test_external_rdp_goes_through_warpgate_when_its_switch_is_on(env, fake_wg):
+    _, _, admin, alice, _ = env
     _configure(admin)
-    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
-                                                'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
+    ext = _external(admin)
+    # switch off: the direct file
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/rdp").get_json()
+    assert 'full address:s:10.30.5.21:3389' in r['rdp'] and 'via' not in r and not fake_wg.tickets
+    _rdp_on(admin)
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/rdp")
     assert r.status_code == 200, r.get_json()
     body = r.get_json()
-    assert body['via'] == 'warpgate'
-    assert body['url'] == f"https://wg.example/@warpgate#/web-desktop/start/{wg.get_mapping(d['id'])['target_uuid']}"
-    assert not fake_wg.tickets                           # no ticket for the browser path
-    assert wg.get_mapping(d['id'])['proto'] == 'rdp'     # the desktop is in the user's Warpgate list
+    lines = _lines(body['rdp'])
+    assert body['via'] == 'warpgate' and body['filename'].endswith('.rdp')
+    assert 'full address:s:wg.example:3389' in lines and 'username:s:ticket-TKT-SECRET-123' in lines
+    assert '10.30.5.21' not in body['rdp'] and not any(x.startswith('gateway') for x in lines)
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert tgt['options']['host'] == '10.30.5.21' and tgt['options']['kind'] == 'Rdp' and tgt['description'] == '측정실 PC (RDP)'
+    assert fake_wg.tickets[-1]['username'] == 'moavi-alice'
 
 
-def test_browser_rdp_fails_closed_when_warpgate_is_down(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+def test_external_rdp_fails_closed_when_warpgate_is_down(env, fake_wg, monkeypatch):
+    _, _, admin, alice, _ = env
     _configure(admin)
-    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
-                                                'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
+    _rdp_on(admin)
+    ext = _external(admin)
     monkeypatch.setattr(wg, '_api', lambda *a, **k: (500, 'down'))
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
-    # switched to Warpgate and Warpgate is down: refused, not quietly around the bastion
-    assert r.status_code == 503 and r.get_json()['code'] == 'WG_DOWN', r.get_json()
-    assert 'guacamole' not in str(r.get_json())
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/rdp")
+    assert r.status_code == 503 and r.get_json()['code'] == 'WG_DOWN'
 
 
-def test_browser_rdp_uses_guacamole_only_when_the_admin_allowed_the_fallback(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+def test_external_browser_rdp_is_warpgates_web_ui(env, fake_wg, monkeypatch):
+    _, _, admin, alice, bob = env
     _configure(admin)
-    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
-                                                'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate',
-                                                'allow_direct_fallback': True})
-    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['allow_direct_fallback'] is True
+    ext = _external(admin)
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/web")
+    assert r.status_code == 200, r.get_json()
+    uid = wg.get_mapping(ext['id'])['target_uuid']
+    assert r.get_json() == {'url': f'https://wg.example/@warpgate#/web-desktop/start/{uid}', 'via': 'warpgate'}
+    assert not fake_wg.tickets                                   # the browser path signs in to Warpgate itself
+    assert bob.get(f"/api/vlab/me/external/{ext['id']}/web").status_code == 404
     monkeypatch.setattr(wg, '_api', lambda *a, **k: (500, 'down'))
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
-    assert r.status_code == 200 and '/guacamole/?data=' in r.get_json()['url'], r.get_json()
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/web")
+    assert r.status_code == 503 and r.get_json()['code'] == 'WG_DOWN'
+
+
+def test_an_external_desktop_given_away_or_deleted_loses_its_warpgate_target(env, fake_wg, monkeypatch):
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    real = wg.forget_desktop
+    monkeypatch.setattr(wg, 'forget_desktop', lambda did, background=True: real(did, background=False))
+    ext = _external(admin)
+    assert alice.get(f"/api/vlab/me/external/{ext['id']}/web").status_code == 200
+    uid = wg.get_mapping(ext['id'])['target_uuid']
+    body = {'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'bob'}
+    assert admin.put(f"/api/vlab/admin/external-desktops/{ext['id']}", json=body).status_code == 200
+    assert uid not in fake_wg.targets.values() and wg.get_mapping(ext['id']) is None
+    assert alice.get(f"/api/vlab/me/external/{ext['id']}/web").status_code == 404
+    admin.put(f"/api/vlab/admin/external-desktops/{ext['id']}", json=dict(body, assigned_user='alice'))
+    assert alice.get(f"/api/vlab/me/external/{ext['id']}/web").status_code == 200
+    uid = wg.get_mapping(ext['id'])['target_uuid']
+    assert admin.delete(f"/api/vlab/admin/external-desktops/{ext['id']}").status_code == 200
+    assert uid not in fake_wg.targets.values() and wg.get_mapping(ext['id']) is None
 
 
 def test_remove_target_deletes_it_and_forgets_the_mapping(env, fake_wg):
@@ -532,7 +553,7 @@ def _lines(rdp):
 
 
 def test_rdp_file_stays_direct_while_the_switch_is_off(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    admin, alice, d = _connect_env(env, monkeypatch)
     _configure(admin)                                     # Warpgate on, "RDP through Warpgate" off
     body = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).get_json()
     assert body.get('via') is None and 'full address:s:10.0.0.31:3389' in _lines(body['rdp'])
@@ -540,7 +561,7 @@ def test_rdp_file_stays_direct_while_the_switch_is_off(env, fake_wg, monkeypatch
 
 
 def test_rdp_file_points_at_warpgate_with_a_single_use_ticket(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    admin, alice, d = _connect_env(env, monkeypatch)
     _configure(admin)
     _rdp_on(admin)
     assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['rdp_via_warpgate'] is True
@@ -563,7 +584,7 @@ def test_rdp_file_points_at_warpgate_with_a_single_use_ticket(env, fake_wg, monk
 
 
 def test_rdp_file_fails_closed_when_warpgate_is_down(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    admin, alice, d = _connect_env(env, monkeypatch)
     _configure(admin)
     _rdp_on(admin)
     assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['allow_direct_fallback'] is False   # default
@@ -575,7 +596,7 @@ def test_rdp_file_fails_closed_when_warpgate_is_down(env, fake_wg, monkeypatch):
 
 
 def test_rdp_file_goes_direct_only_when_the_admin_allowed_the_fallback(env, fake_wg, monkeypatch):
-    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    admin, alice, d = _connect_env(env, monkeypatch)
     _configure(admin)
     _rdp_on(admin)
     admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
@@ -869,7 +890,7 @@ def test_auto_connect_at_first_start(env, fake_wg, wg_env, caplog):
     cfg = wg.config()
     assert cfg['base_url'] == 'https://wg.example' and cfg['enabled'] and cfg['has_token']
     assert (cfg['ssh_port'], cfg['rdp_port'], cfg['vnc_port']) == (2222, 13389, 5900)
-    assert cfg['web_rdp_provider'] == 'guac' and cfg['last_ok'] is True
+    assert 'web_rdp_provider' not in cfg and cfg['last_ok'] is True
     s = FakeSession.instances[0]
     assert s.verify is False
     assert s.posts[0] == ('https://wg.example/@warpgate/api/auth/login', {'username': 'admin', 'password': 'wg-admin-pw'})

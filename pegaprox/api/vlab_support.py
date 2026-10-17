@@ -10,7 +10,7 @@ the period is at most MAX_DAYS long and defaults to the last 24 hours. Options (
   sessions=1    vLAB sessions, card loans, build jobs, alerts in the period, shared storage checks (last per desktop and user),
                 research data transfers that failed in the period
   tasks=1       Proxmox tasks that started in the period
-  config=1      pools, desktops, gateways, licence servers ... as they are now
+  config=1      pools, desktops, licence servers ... as they are now
   mask_ips=1    192.168.10.21 -> 192.x.x.x everywhere in the bundle
   mask_users=0  user names replaced by user-1, user-2 ... (one mapping for the whole bundle)
 
@@ -196,7 +196,6 @@ def _config():
         'labs.json': store.list_labs(),
         'terminals.json': [{k: v for k, v in t.items() if k not in ('key_hash',)} for t in store.list_terminals()],
         'lab_schedules.json': store.list_lab_schedules(),
-        'gateways.json': catalog.list_gateways(secret=False),
         'external_desktops.json': catalog.list_external(),
         'golden_images.json': catalog.list_golden(),
         'boards.json': catalog.list_boards(),

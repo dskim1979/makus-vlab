@@ -46,7 +46,7 @@ _SCHEMA = (
         verify_tls INTEGER NOT NULL DEFAULT 0,
         rdp_nla_user TEXT NOT NULL DEFAULT '',
         rdp_nla_password_encrypted TEXT NOT NULL DEFAULT '',
-        web_rdp_provider TEXT NOT NULL DEFAULT 'guac',
+        web_rdp_provider TEXT NOT NULL DEFAULT 'guac',   -- unused since Guacamole went (browser RDP = Warpgate)
         rdp_via_warpgate INTEGER NOT NULL DEFAULT 0,
         allow_direct_fallback INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 0,
@@ -127,13 +127,12 @@ def config(secret=False):
     if not r:
         return {'base_url': '', 'ssh_port': DEFAULT_PORTS['ssh'], 'rdp_port': DEFAULT_PORTS['rdp'],
                 'vnc_port': DEFAULT_PORTS['vnc'], 'verify_tls': False, 'enabled': False,
-                'rdp_nla_user': '', 'has_nla_password': False, 'web_rdp_provider': 'guac',
+                'rdp_nla_user': '', 'has_nla_password': False,
                 'rdp_via_warpgate': False, 'allow_direct_fallback': False,
                 'has_token': False, 'last_check': None, 'last_ok': None, 'last_detail': ''}
     out = {'base_url': r['base_url'], 'ssh_port': r['ssh_port'], 'rdp_port': r['rdp_port'],
            'vnc_port': r['vnc_port'], 'verify_tls': bool(r['verify_tls']), 'enabled': bool(r['enabled']),
            'rdp_nla_user': r['rdp_nla_user'], 'has_nla_password': bool(r['rdp_nla_password_encrypted']),
-           'web_rdp_provider': r['web_rdp_provider'] or 'guac',
            'rdp_via_warpgate': bool(r['rdp_via_warpgate']),
            'allow_direct_fallback': bool(r['allow_direct_fallback']),
            'has_token': bool(r['admin_token_encrypted']), 'last_check': r['last_check'],
@@ -155,10 +154,9 @@ def _unseal(sealed):
 
 
 def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
-                admin_token=None, rdp_nla_user=None, rdp_nla_password=None, web_rdp_provider=None,
+                admin_token=None, rdp_nla_user=None, rdp_nla_password=None,
                 rdp_via_warpgate=None, allow_direct_fallback=None):
     """설정 저장. admin_token / rdp_nla_password: None이면 기존값 유지, ''이면 지움, 값이면 봉인해 저장.
-    web_rdp_provider: 'guac'(기본, 항상 작동) 또는 'warpgate'(실클러스터 검증 후 전환).
     rdp_via_warpgate: 전용 앱·mstsc용 .rdp를 Warpgate로 향하게 할지(None이면 기존값 유지).
     allow_direct_fallback: Warpgate 장애 때 직접/Guacamole 경로로 열어 줄지(기본 꺼짐 = 접속 거부. 켜면 보안 약화)."""
     base_url = (base_url or '').strip().rstrip('/')
@@ -166,7 +164,7 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
     sealed = r['admin_token_encrypted'] if r else ''
     nla_sealed = r['rdp_nla_password_encrypted'] if r else ''
     nla_user = r['rdp_nla_user'] if r else ''
-    provider = (r['web_rdp_provider'] if r else 'guac') or 'guac'
+    provider = (r['web_rdp_provider'] if r else 'guac') or 'guac'   # kept as stored
     via = bool(r['rdp_via_warpgate']) if r else False
     if rdp_via_warpgate is not None:
         via = bool(rdp_via_warpgate)
@@ -182,8 +180,6 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
             nla_sealed = gdb._encrypt(rdp_nla_password) if rdp_nla_password else ''
     if rdp_nla_user is not None:
         nla_user = (rdp_nla_user or '').strip()
-    if web_rdp_provider in ('guac', 'warpgate'):
-        provider = web_rdp_provider
     db().execute(
         '''INSERT OR REPLACE INTO vlab_warpgate
            (id, base_url, admin_token_encrypted, ssh_port, rdp_port, vnc_port, verify_tls,
@@ -839,7 +835,7 @@ def auto_connect():
         save_config(base_url, _env_port('VLAB_WARPGATE_SSH_PORT', DEFAULT_PORTS['ssh']),
                     _env_port('VLAB_WARPGATE_RDP_PORT', DEFAULT_PORTS['rdp']),
                     _env_port('VLAB_WARPGATE_VNC_PORT', DEFAULT_PORTS['vnc']),
-                    verify, True, admin_token=token, web_rdp_provider='guac')
+                    verify, True, admin_token=token)
     ok, detail = test_connection(config(secret=True))
     mark_check(ok, detail)
     logging.info(f'[VLAB] Warpgate connected at first start: {base_url} ({"ok" if ok else "check failed"})')

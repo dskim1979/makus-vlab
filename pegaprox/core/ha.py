@@ -323,7 +323,7 @@ SYNC_TABLES = (
     'vlab_labs', 'vlab_terminals', 'vlab_lab_schedules',
     # and their bookings with the booking rules (pegaprox/vlab/reservations.py)
     'vlab_reservations', 'vlab_reservation_settings',
-    'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
+    'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices',
     'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
     'vlab_desktop_versions', 'vlab_build_jobs',
     # the environment of each golden image: components, cards, history (pegaprox/vlab/envcat.py)

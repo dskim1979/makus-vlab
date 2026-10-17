@@ -30,7 +30,8 @@ takes effect:
   web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
 """
 
-PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
+# browser RDP is no protocol of its own: with 보안 게이트웨이 (Warpgate) on, an 'rdp' pool opens in the browser too
+PROTOCOLS = ('vnc', 'spice', 'rdp')
 CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
 WEB_IDE = ('jupyter', 'vscode')
 SSH_FILES = ('off', 'down', 'up', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
@@ -58,7 +59,7 @@ DEFAULTS = {
     'defer_max_hours': 12,
     'web_ide': [],
     'web_ide_idle_min': 240,
-    'browser_ssh': False,       # the portal's browser terminal (Guacamole SSH) for Linux desktops
+    'browser_ssh': False,       # SSH for Linux desktops through 보안 게이트웨이 (Warpgate)
     'ssh_files': 'off',         # that terminal's file transfer (SFTP)
     'researcher_ssh': False,    # researchers' own SSH tools (PuTTY/scp/WinSCP/VS Code) through Warpgate
 }
@@ -80,6 +81,8 @@ def effective(settings):
     stored = settings.get('policy')
     if isinstance(stored, dict):
         out.update({k: v for k, v in stored.items() if k in DEFAULTS})
+    # a policy saved before Guacamole went may still name 'guac' (retire_gateways cleans it at start)
+    out['protocols'] = [p for p in out['protocols'] if p in PROTOCOLS] or ['rdp']
     return out
 
 
@@ -95,7 +98,7 @@ def validate(data, pool_type):
     for k, v in data.items():
         if k == 'protocols':
             if not isinstance(v, list) or not v or any(p not in PROTOCOLS for p in v):
-                return None, 'protocols: a non-empty list of vnc, spice, rdp, guac'
+                return None, 'protocols: a non-empty list of vnc, spice, rdp'
             out[k] = [p for p in PROTOCOLS if p in v]
         elif k == 'web_ide':
             if not isinstance(v, list) or any(x not in WEB_IDE for x in v):

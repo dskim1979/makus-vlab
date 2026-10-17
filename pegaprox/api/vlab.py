@@ -442,7 +442,7 @@ def connect_desktop(desktop_id):
         return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
     node, vmid, vm_type = vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type']
 
-    if protocol in ('rdp', 'guac'):
+    if protocol == 'rdp':
         from pegaprox.api.vlab_next import desktop_rdp_answer
         answer, err = desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool)
         if err:
@@ -567,7 +567,7 @@ def desktop_ws_tag(desk):
 
 
 # protocols whose connection the engine does not carry: ending the session only closes the record
-UNREACHED_PROTOCOLS = ('spice', 'rdp', 'guac')
+UNREACHED_PROTOCOLS = ('spice', 'rdp')
 
 
 def _end_admin_session(s):
@@ -2204,15 +2204,13 @@ def _pool_or_error(pool_id):
 
 
 # settings the pool form changes; the policy, GPU, grants and templates have routes of their own
-GATEWAY_SETTINGS = {'rdp_gateway_id': ('rdpgw', 'msrdgw'), 'guac_gateway_id': ('guacamole',)}
 
 
 def _pool_settings_change(pool, data):
     """(new settings, [changed keys]) from the request's `settings`, or raises ValueError."""
-    from pegaprox.vlab import catalog
     if not isinstance(data, dict):
         raise ValueError('settings must be an object')
-    unknown = set(data) - set(GATEWAY_SETTINGS) - {'max_sessions'}
+    unknown = set(data) - {'max_sessions'}
     if unknown:
         raise ValueError(f"settings: unknown {', '.join(sorted(unknown))}")
     settings = dict(pool.get('settings') or {})
@@ -2229,21 +2227,6 @@ def _pool_settings_change(pool, data):
         if ((settings.get('shared') or {}).get('max_sessions')) != ms:
             settings['shared'] = dict(settings.get('shared') or {}, max_sessions=ms)
             changed.append('max_sessions')
-    for key, kinds in GATEWAY_SETTINGS.items():
-        if key not in data:
-            continue
-        gid = str(data[key] or '').strip()
-        if gid:
-            g = catalog.get_gateway(gid)
-            if not g or g['kind'] not in kinds:
-                raise ValueError(f"{key}: no {' / '.join(kinds)} gateway {gid}")
-        if (settings.get(key) or '') == gid:
-            continue
-        if gid:
-            settings[key] = gid
-        else:
-            settings.pop(key, None)
-        changed.append(key)
     return settings, changed
 
 
@@ -2251,7 +2234,7 @@ def _pool_settings_change(pool, data):
 @require_auth(perms=['vlab.pool.manage'])
 def update_pool(pool_id):
     """Rename a pool, change its description, switch it on or off, or its connection settings
-    (max_sessions of a shared pool, the RDP / Guacamole gateway). Its cluster and type stay:
+    (max_sessions of a shared pool). Its cluster and type stay:
     the desktops, grants and schedules were made for them - make a new pool instead.
     A switched-off pool hands out and connects no desktop; open sessions run on."""
     pool, err = _pool_or_error(pool_id)

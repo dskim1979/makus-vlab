@@ -285,6 +285,17 @@ MOAVI Desk Warpgate 빌드(포크 moavi4)는 웹 SSH에 파일 패널(SFTP)이 �
 켜고 끄기만 있음 — 내려받기만/올리기만 구분은 아직 없음). 정책의 켜짐/꺼짐이 바뀌면 그 풀 데스크톱의 기존 SSH 대상도
 다시 맞춘다(백그라운드). 이 옵션을 모르는 Warpgate가 400으로 거부하면 옵션을 빼고 대상을 만든다.
 
+## 4-10. 게이트웨이 카탈로그 삭제 (Guacamole · RD 게이트웨이 → 보안 게이트웨이)
+
+사용자 결정("완전삭제"): 게이트웨이 관리(`/api/vlab/admin/gateways`, `vlab_gateways`)와 그 종류 rdpgw · msrdgw ·
+guacamole, .rdp의 gateway 줄, 풀의 `rdp_gateway_id` / `guac_gateway_id`, 풀 프로토콜 `guac`, 내장 Guacamole을 지웠다.
+- 브라우저 RDP는 보안 게이트웨이(Warpgate 웹)뿐이다. `web_rdp_provider` 설정도 없앴다(DB 열은 남김, 쓰지 않음).
+- 외부 데스크톱(실물 PC): RDP 파일은 "RDP를 보안 게이트웨이로"가 켜져 있으면 Warpgate 티켓 .rdp, 꺼져 있으면 직접.
+  브라우저는 `GET /api/vlab/me/external/<id>/web`(Warpgate 웹 링크, 꺼져 있으면 WG_OFF). PC에는 게스트 에이전트가
+  없으므로 NLA는 콘솔의 전역 NLA 계정(없으면 PC가 NLA 없이 RDP를 받아야 함). 배정이 바뀌거나 지우면 대상도 지운다.
+- 시작할 때 한 번(`retire_gateways`): 게이트웨이 행을 지우고 테이블을 없애며, 외부 데스크톱의 게이트웨이와 풀의 두 설정을
+  비우고, `guac`만 있던 풀은 `rdp`로 바꾼다(보안 게이트웨이가 켜져 있으면 브라우저로도 열림). 경고 로그 한 줄.
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.

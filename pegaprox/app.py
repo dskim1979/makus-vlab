@@ -1670,12 +1670,12 @@ def main(debug_mode=False):
     from pegaprox.vlab.loans import start_loan_thread
     start_loan_thread()
 
-    # MOAVI Desk - the Guacamole bundled with the compose install becomes a gateway by itself
+    # MOAVI Desk - the gateway catalog (Guacamole, RD gateways) is gone: drop it once (pegaprox/vlab/catalog.py)
     try:
-        from pegaprox.vlab.catalog import sync_builtin_guacamole
-        sync_builtin_guacamole()
+        from pegaprox.vlab.catalog import retire_gateways
+        retire_gateways()
     except Exception as e:
-        print(f"Built-in Guacamole gateway not set up: {e}")
+        print(f"Gateway catalog not retired: {e}")
 
     # MOAVI Desk - the bundled Warpgate connects itself at first start (VLAB_WARPGATE=1, nothing configured yet)
     try:

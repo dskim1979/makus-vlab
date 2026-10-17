@@ -1,5 +1,5 @@
 """MOAVI Desk next-phase screens (pegaprox/api/vlab_next.py): departments, sign-up review,
-the USB device library, gateways, external desktops, golden images, the board lab, the
+the USB device library, external desktops, golden images, the board lab, the
 build farm and licence servers. docs/vlab-design.md 4-2, 7-3, 10-2..10-4.
 """
 import pytest
@@ -235,35 +235,27 @@ def test_usb_library_starts_with_jtag_cables_and_checks_ids(env):
     assert admin.delete(f"/api/vlab/admin/usb-devices/{key['id']}").status_code == 200
 
 
-# --- gateways and external desktops ------------------------------------------------------
+# --- external desktops ------------------------------------------------------------------
 
-def test_gateway_check_and_external_desktop_rdp(env, monkeypatch):
-    import pegaprox.api.vlab_next as nxt
+def test_external_desktop_rdp_goes_direct_without_the_gateway_catalog(env):
     _, _, admin, alice, bob, _ = env
-    assert admin.post('/api/vlab/admin/gateways', json={'name': 'gw', 'kind': 'ssh', 'address': 'x'}).status_code == 400
-    assert admin.post('/api/vlab/admin/gateways', json={'name': 'gw', 'kind': 'rdpgw', 'address': 'bad host!'}).status_code == 400
-    gw = admin.post('/api/vlab/admin/gateways', json={'name': '외부망 RDP', 'kind': 'rdpgw', 'address': 'rdgw.example.com'}).get_json()['gateway']
-    assert gw['port'] == 443
-    monkeypatch.setattr(nxt, '_tcp_probe', lambda h, p, timeout=2.0: (True, 12, ''))
-    r = admin.post(f"/api/vlab/admin/gateways/{gw['id']}/check").get_json()
-    assert r['ok'] and r['gateway']['last_ok'] == 1 and r['gateway']['last_detail'] == '12 ms'
-
+    # the gateway catalog is gone (보안 게이트웨이 replaced Guacamole and the RD gateways)
+    assert admin.get('/api/vlab/admin/gateways').status_code == 404
     assert admin.post('/api/vlab/admin/external-desktops', json={'name': 'PC', 'address': '10.0.0.5', 'assigned_user': 'ghost'}).status_code == 400
     ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '연구실 PC 3', 'address': '10.0.0.5', 'assigned_user': 'alice',
-                                                                 'gateway_id': gw['id']}).get_json()['desktop']
+                                                                 'gateway_id': 'gw_old'}).get_json()['desktop']
+    assert ext['gateway_id'] is None                              # an old client's gateway_id is ignored
     mine = alice.get('/api/vlab/me/external').get_json()['desktops']
     assert [m['name'] for m in mine] == ['연구실 PC 3'] and bob.get('/api/vlab/me/external').get_json()['desktops'] == []
     rdp = alice.get(f"/api/vlab/me/external/{ext['id']}/rdp").get_json()
-    assert rdp['filename'].endswith('.rdp')
+    assert rdp['filename'].endswith('.rdp') and 'via' not in rdp
     assert 'full address:s:10.0.0.5:3389' in rdp['rdp'] and 'username:s:alice' in rdp['rdp']
-    assert 'gatewayhostname:s:rdgw.example.com:443' in rdp['rdp']
+    assert 'gateway' not in rdp['rdp']
     assert bob.get(f"/api/vlab/me/external/{ext['id']}/rdp").status_code == 404
-
-    assert admin.get('/api/vlab/admin/gateways').get_json()['gateways'][0]['external'] == 1
-    admin.delete(f"/api/vlab/admin/gateways/{gw['id']}")
-    assert catalog.get_external(ext['id'])['gateway_id'] is None
-    assert 'gateway' not in alice.get(f"/api/vlab/me/external/{ext['id']}/rdp").get_json()['rdp']
-
+    # no browser path without 보안 게이트웨이
+    r = alice.get(f"/api/vlab/me/external/{ext['id']}/web")
+    assert r.status_code == 409 and r.get_json()['code'] == 'WG_OFF'
+    assert alice.get(f"/api/vlab/me/external/{ext['id']}/guac").status_code == 404
 
 # --- golden images -----------------------------------------------------------------------
 
@@ -432,21 +424,6 @@ def test_shared_pool_routes_to_the_least_busy_desktop_and_connects(env, monkeypa
     assert r.status_code == 409 and r.get_json()['code'] == 'FULL'
 
 
-def _decrypt_guac(url, key_hex):
-    import base64, hashlib, hmac, json
-    from urllib.parse import unquote
-    from cryptography.hazmat.primitives import padding
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    key = bytes.fromhex(key_hex)
-    raw = base64.b64decode(unquote(url.split('?data=')[1]))
-    dec = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).decryptor()
-    unpad = padding.PKCS7(128).unpadder()
-    plain = unpad.update(dec.update(raw) + dec.finalize()) + unpad.finalize()
-    sig, payload = plain[:32], plain[32:]
-    assert hmac.compare_digest(sig, hmac.new(key, payload, hashlib.sha256).digest())
-    return json.loads(payload)
-
-
 def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     import pegaprox.api.vlab as core
     import pegaprox.utils.rbac as rbac
@@ -454,7 +431,7 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     monkeypatch.setattr(core, '_acl_set', lambda *a: True)
     monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
     pool = store.create_pool('윈도우 실습', 'dedicated', CID)
-    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp', 'guac']})
+    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp']})
     d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'win-01')
     store.set_assignment(d['id'], 'alice')
     mgr._fetch_qemu_ips.return_value = []
@@ -466,30 +443,12 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     assert r.status_code == 200 and 'full address:s:10.0.0.9:3389' in rdp
     # the pool policy: clipboard both, the PC's printers on, its drives off (the defaults)
     assert 'redirectclipboard:i:1' in rdp and 'redirectprinters:i:1' in rdp and 'drivestoredirect:s:\r\n' in rdp
-    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp', 'guac'],
+    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp'],
                                          'policy': {'clipboard': 'to_desktop', 'client_drives': True, 'client_printers': False}})
     rdp = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).get_json()['rdp']
     assert 'redirectclipboard:i:0' in rdp and 'redirectprinters:i:0' in rdp and 'drivestoredirect:s:*' in rdp
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
-    assert r.status_code == 409 and r.get_json()['code'] == 'NO_GATEWAY'
-    key = '00112233445566778899aabbccddeeff'
-    assert admin.post('/api/vlab/admin/gateways', json={'name': 'g', 'kind': 'rdpgw', 'address': 'x', 'secret_key': key}).status_code == 400
-    gw = admin.post('/api/vlab/admin/gateways', json={'name': '브라우저 RDP', 'kind': 'guacamole', 'address': 'guac.example.com',
-                                                       'secret_key': key}).get_json()['gateway']
-    assert gw['has_key'] is True and 'secret_key' not in gw
-    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
-    assert r.status_code == 200, r.get_json()
-    url = r.get_json()['url']
-    assert url.startswith('http://guac.example.com:8080/guacamole/?data=')
-    data = _decrypt_guac(url, key)
-    conn = data['connections']['win-01']
-    assert data['username'] == 'alice' and conn['protocol'] == 'rdp' and conn['parameters']['hostname'] == '10.0.0.9'
-    assert (conn['parameters']['disable-copy'], conn['parameters']['disable-paste'], conn['parameters']['enable-printing']) == ('true', 'false', 'false')
-
-    ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'alice'}).get_json()['desktop']
-    r = alice.get(f"/api/vlab/me/external/{ext['id']}/guac")
-    assert r.status_code == 200 and _decrypt_guac(r.get_json()['url'], key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
-
+    # browser RDP is 보안 게이트웨이's (its own route): the old Guacamole 'guac' is no protocol any more
+    assert alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'}).status_code == 400
 
 
 def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monkeypatch):
@@ -524,29 +483,36 @@ def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monk
     assert len(ran) == 1
 
 
-def test_bundled_guacamole_registers_itself_and_links_to_the_console_address(env, monkeypatch, tmp_path):
+def test_the_gateway_catalog_is_retired_once_at_start(env):
+    """An install from before 보안 게이트웨이: its gateways (Guacamole, RD gateways) and every reference go."""
     _, _, admin, _, _, _ = env
-    key = 'ffeeddccbbaa99887766554433221100'
-    keyfile = tmp_path / 'json-secret-key'
-    keyfile.write_text(key + '\n')
-    monkeypatch.setenv('VLAB_GUAC_KEY_FILE', str(keyfile))
-    monkeypatch.setenv('VLAB_HOSTNAME', 'desk.lab.example')
-    monkeypatch.delenv('VLAB_GUAC_BUILTIN', raising=False)
-    assert catalog.sync_builtin_guacamole() is None              # off unless the install turns it on
-    monkeypatch.setenv('VLAB_GUAC_BUILTIN', '1')
-    gw = catalog.sync_builtin_guacamole()
-    assert gw['enabled'] and gw['has_key'] and (gw['address'], gw['port'], gw['kind']) == ('desk.lab.example', 443, 'guacamole')
-    ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'root'}).get_json()['desktop']
-    r = admin.get(f"/api/vlab/me/external/{ext['id']}/guac")
-    url = r.get_json()['url']
-    assert url.startswith('https://localhost/guacamole/?data=')   # the address the user came in by, not VLAB_HOSTNAME
-    assert _decrypt_guac(url, key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
-    # turned off (Guacamole removed from the install): the gateway is gone, not just disabled, and the
-    # external desktop that used it is left without one
-    monkeypatch.setenv('VLAB_GUAC_BUILTIN', '0')
-    assert catalog.sync_builtin_guacamole() is None and catalog.get_gateway(catalog.BUILTIN_GUAC_ID) is None
-    assert all(g['id'] != catalog.BUILTIN_GUAC_ID for g in admin.get('/api/vlab/admin/gateways').get_json()['gateways'])
+    d = catalog.db()
+    d.execute("""CREATE TABLE IF NOT EXISTS vlab_gateways (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                 address TEXT NOT NULL, port INTEGER NOT NULL, notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+                 last_check TEXT, last_ok INTEGER, last_detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                 secret_key TEXT NOT NULL DEFAULT '')""")
+    d.execute("INSERT INTO vlab_gateways (id, name, kind, address, port, created_at) VALUES ('gw_builtin_guac', 'g', 'guacamole', 'x', 443, 'now')")
+    d.execute("INSERT INTO vlab_gateways (id, name, kind, address, port, created_at) VALUES ('gw_rd', 'rd', 'msrdgw', 'y', 443, 'now')")
+    ext = catalog.save_external(None, '측정실 PC', '10.30.5.21', 3389, 'alice', '')
+    d.execute("UPDATE vlab_external_desktops SET gateway_id = 'gw_rd' WHERE id = ?", (ext['id'],))
+    only_guac = store.create_pool('브라우저 실습', 'dedicated', CID)
+    store.set_pool_settings(only_guac['id'], {'protocols': ['guac'], 'guac_gateway_id': 'gw_builtin_guac',
+                                              'policy': {'protocols': ['guac'], 'clipboard': 'off'}})
+    mixed = store.create_pool('혼합', 'dedicated', CID)
+    store.set_pool_settings(mixed['id'], {'protocols': ['vnc', 'rdp', 'guac'], 'rdp_gateway_id': 'gw_rd'})
+    plain = store.create_pool('그대로', 'dedicated', CID)
+    store.set_pool_settings(plain['id'], {'protocols': ['vnc']})
+    assert catalog.retire_gateways() == {'gateways': 2, 'external': 1, 'pools': 2}
+    assert catalog.retire_gateways() is None                      # once
+    assert not d.query_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vlab_gateways'")
     assert catalog.get_external(ext['id'])['gateway_id'] is None
+    s = store.get_pool(only_guac['id'])['settings']
+    assert s == {'protocols': ['rdp'], 'policy': {'protocols': ['rdp'], 'clipboard': 'off'}}   # browser-only RDP -> rdp
+    s = store.get_pool(mixed['id'])['settings']
+    assert s == {'protocols': ['vnc', 'rdp']}
+    assert store.get_pool(plain['id'])['settings'] == {'protocols': ['vnc']}
+    assert admin.get(f"/api/vlab/admin/pools/{only_guac['id']}/policy").get_json()['policy']['protocols'] == ['rdp']
+
 
 def test_golden_rollout_moves_users_to_the_new_version(env, monkeypatch):
     import pegaprox.api.vlab as core
@@ -807,20 +773,16 @@ def test_pool_edit_changes_name_state_and_settings_but_not_cluster_or_type(env, 
     assert r.status_code == 409 and r.get_json()['code'] == 'POOL_DISABLED'
 
 
-def test_pool_edit_sets_shared_seats_and_gateways(env):
+def test_pool_edit_sets_shared_seats_and_no_gateways(env):
     _, _, admin, _, _, _ = env
     shared = store.create_pool('공유', 'shared', CID)
     url = f"/api/vlab/admin/pools/{shared['id']}"
-    rdp = catalog.save_gateway(None, 'rdgw', 'msrdgw', 'gw.lab', 443, '', True)
-    guac = catalog.save_gateway(None, 'guac', 'guacamole', 'guac.lab', 8080, '', True)
-    r = admin.put(url, json={'settings': {'max_sessions': 4, 'rdp_gateway_id': rdp['id'], 'guac_gateway_id': guac['id']}})
+    r = admin.put(url, json={'settings': {'max_sessions': 4}})
     assert r.status_code == 200, r.get_json()
-    s = store.get_pool(shared['id'])['settings']
-    assert s['shared']['max_sessions'] == 4 and s['rdp_gateway_id'] == rdp['id'] and s['guac_gateway_id'] == guac['id']
-    assert admin.put(url, json={'settings': {'rdp_gateway_id': guac['id']}}).status_code == 400   # wrong kind
+    assert store.get_pool(shared['id'])['settings']['shared']['max_sessions'] == 4
     assert admin.put(url, json={'settings': {'max_sessions': 0}}).status_code == 400
-    r = admin.put(url, json={'settings': {'rdp_gateway_id': None}})
-    assert r.get_json()['changed'] == ['rdp_gateway_id'] and 'rdp_gateway_id' not in store.get_pool(shared['id'])['settings']
+    for gone in ('rdp_gateway_id', 'guac_gateway_id'):           # the RD / Guacamole gateway settings are gone
+        assert admin.put(url, json={'settings': {gone: 'gw_x'}}).status_code == 400
     assert store.get_pool(shared['id'])['settings']['shared']['max_sessions'] == 4
 
 

@@ -32,10 +32,10 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   terms: pegaprox/api/vlab_accounts.py)
 
   GET/POST /api/vlab/admin/usb-devices, PUT/DELETE .../<id>   the USB device library       vlab.pool.view / manage
-  GET/POST /api/vlab/admin/gateways, PUT/DELETE .../<id>, POST .../<id>/check   gateways    vlab.pool.view / manage
   GET/POST /api/vlab/admin/external-desktops, PUT/DELETE .../<id>   physical PCs over RDP   vlab.pool.view / manage
   GET    /api/vlab/me/external                           the caller's external desktops       vlab.desk
-  GET    /api/vlab/me/external/<id>/rdp                  an .rdp file for it                  vlab.desk
+  GET    /api/vlab/me/external/<id>/rdp                  an .rdp file for it (via 보안 게이트웨이 when its RDP switch is on)  vlab.desk
+  GET    /api/vlab/me/external/<id>/web                  browser RDP through 보안 게이트웨이 (Warpgate web UI link)  vlab.desk
 
   GET    /api/vlab/admin/golden-images                   with their versions (snapshots)      vlab.pool.view
   POST   /api/vlab/admin/golden-images                   {cluster_id, vmid, name?, notes?}    vlab.pool.manage
@@ -55,7 +55,6 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
 
   GET/PUT /api/vlab/admin/pools/<id>/grants          who may claim / use a pool (user, department, group)  vlab.pool.view / manage
   GET    /api/vlab/me/pools, POST .../<id>/claim, POST .../<id>/route   claim a desktop, route into a shared pool  vlab.desk
-  GET    /api/vlab/me/external/<id>/guac              browser RDP link (Guacamole) for an external desktop  vlab.desk
   POST   /api/vlab/admin/golden-images/<id>/rollout   desktops of an older version replaced by the current one  vlab.pool.manage
   GET/POST /api/vlab/me/build-jobs, POST .../<id>/cancel     the caller's build jobs                vlab.desk
   GET/POST /api/vlab/admin/build-jobs, POST .../<id>/cancel  every build job                        vlab.pool.view / manage
@@ -114,9 +113,6 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   (applied on connect, on a shared pool's routing and before a build job starts)
 """
 
-import base64
-import hashlib
-import hmac
 import json as _json
 import logging
 import re
@@ -124,9 +120,8 @@ import shlex
 import socket
 import time
 from datetime import datetime
-from urllib.parse import quote as _quote
 
-from flask import Blueprint, has_request_context, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from pegaprox.api import vlab as core
 from pegaprox.api import vlab_accounts as acct
@@ -777,86 +772,6 @@ def delete_usb_device(uid):
     return jsonify({'success': True})
 
 
-# --- gateways ----------------------------------------------------------------------------
-
-def _gateway_body():
-    data = _body()
-    kind = str(data.get('kind') or '')
-    if kind not in catalog.GATEWAY_KINDS:
-        raise ValueError('kind must be ' + ', '.join(catalog.GATEWAY_KINDS))
-    key = data.get('secret_key')
-    if key not in (None, ''):
-        key = str(key).strip().lower()
-        if kind != 'guacamole' or not re.match(r'^[0-9a-f]{32}$', key):
-            raise ValueError('secret_key: 32 hex digits (the 128-bit key of guacamole-auth-json), Guacamole only')
-    else:
-        key = None
-    return (_text(data, 'name', 80, required=True), kind, _host(data, 'address'),
-            _int(data, 'port', 1, 65535, catalog.GATEWAY_KINDS[kind]), _text(data, 'notes', 300), data.get('enabled', True) is not False, key)
-
-
-@bp.route('/api/vlab/admin/gateways', methods=['GET'])
-@require_auth(perms=['vlab.pool.view'])
-def list_gateways():
-    used = {}
-    for e in catalog.list_external():
-        if e['gateway_id']:
-            used[e['gateway_id']] = used.get(e['gateway_id'], 0) + 1
-    return jsonify({'gateways': [dict(g, external=used.get(g['id'], 0)) for g in catalog.list_gateways()],
-                    'kinds': catalog.GATEWAY_KINDS})
-
-
-@bp.route('/api/vlab/admin/gateways', methods=['POST'])
-@require_auth(perms=['vlab.pool.manage'])
-def create_gateway():
-    try:
-        args = _gateway_body()
-    except ValueError as e:
-        return _bad(str(e))
-    gw = catalog.save_gateway(None, *args)
-    log_audit(_user(), 'vlab.gateway.create', f"gateway '{gw['name']}' {gw['kind']} {gw['address']}:{gw['port']}", get_client_ip())
-    return jsonify({'gateway': gw}), 201
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>', methods=['PUT'])
-@require_auth(perms=['vlab.pool.manage'])
-def update_gateway(gid):
-    if not catalog.get_gateway(gid):
-        return _bad('Gateway not found', 404)
-    try:
-        args = _gateway_body()
-    except ValueError as e:
-        return _bad(str(e))
-    gw = catalog.save_gateway(gid, *args)
-    log_audit(_user(), 'vlab.gateway.update', f"gateway '{gw['name']}'", get_client_ip())
-    return jsonify({'gateway': gw})
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>', methods=['DELETE'])
-@require_auth(perms=['vlab.pool.manage'])
-def delete_gateway(gid):
-    gw = catalog.get_gateway(gid)
-    if not gw:
-        return _bad('Gateway not found', 404)
-    catalog.delete_gateway(gid)
-    log_audit(_user(), 'vlab.gateway.delete', f"gateway '{gw['name']}' (external desktops on it go direct)", get_client_ip())
-    return jsonify({'success': True})
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>/check', methods=['POST'])
-@require_auth(perms=['vlab.pool.manage'])
-def check_gateway(gid):
-    gw = catalog.get_gateway(gid)
-    if not gw:
-        return _bad('Gateway not found', 404)
-    if gid == catalog.BUILTIN_GUAC_ID:      # the bundled one: the engine reaches it inside compose
-        ok, ms, err = _tcp_probe('guacamole', 8080)
-    else:
-        ok, ms, err = _tcp_probe(gw['address'], gw['port'])
-    gw = catalog.mark_gateway(gid, ok, f'{ms} ms' if ok else err)
-    return jsonify({'gateway': gw, 'ok': ok, 'ms': ms, 'error': err})
-
-
 # --- external desktops -------------------------------------------------------------------
 
 def _external_body():
@@ -865,11 +780,8 @@ def _external_body():
     user = str(data.get('assigned_user') or '').strip() or None
     if user and user not in load_users():
         raise ValueError('assigned_user: no such user')
-    gw = str(data.get('gateway_id') or '').strip() or None
-    if gw and not catalog.get_gateway(gw):
-        raise ValueError('gateway_id: no such gateway')
     return (_text(data, 'name', 80, required=True), _host(data, 'address'), _int(data, 'port', 1, 65535, 3389),
-            user, gw, _text(data, 'notes', 300))
+            user, _text(data, 'notes', 300))
 
 
 @bp.route('/api/vlab/admin/external-desktops', methods=['GET'])
@@ -893,13 +805,16 @@ def create_external():
 @bp.route('/api/vlab/admin/external-desktops/<eid>', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def update_external(eid):
-    if not catalog.get_external(eid):
+    old = catalog.get_external(eid)
+    if not old:
         return _bad('External desktop not found', 404)
     try:
         args = _external_body()
     except ValueError as e:
         return _bad(str(e))
     ext = catalog.save_external(eid, *args)
+    if old and old['assigned_user'] != ext['assigned_user']:
+        _forget_warpgate(eid)
     log_audit(_user(), 'vlab.external.update', f"external desktop '{ext['name']}' -> {ext['assigned_user'] or '-'}", get_client_ip())
     return jsonify({'desktop': ext})
 
@@ -911,8 +826,18 @@ def delete_external(eid):
     if not ext:
         return _bad('External desktop not found', 404)
     catalog.delete_external(eid)
+    _forget_warpgate(eid)
     log_audit(_user(), 'vlab.external.delete', f"external desktop '{ext['name']}'", get_client_ip())
     return jsonify({'success': True})
+
+
+def _forget_warpgate(eid):
+    """The external desktop's 보안 게이트웨이 target goes (best effort, pegaprox/vlab/warpgate.py)."""
+    try:
+        from pegaprox.vlab.warpgate import forget_desktop
+        forget_desktop(eid)
+    except Exception as e:
+        logging.warning(f'[VLAB] Warpgate cleanup for {eid} skipped: {str(e)[:200]}')
 
 
 @bp.route('/api/vlab/me/external', methods=['GET'])
@@ -942,10 +867,6 @@ def rdp_file(ext, username, pol=None):
              'screen mode id:i:2', 'use multimon:i:1', *rdp_redirects(pol), 'audiomode:i:0', 'authentication level:i:2']
     if pol is not None:
         lines += RDP_NETWORK
-    gw = catalog.get_gateway(ext['gateway_id']) if ext.get('gateway_id') else None
-    if gw and gw['enabled'] and gw['kind'] in ('rdpgw', 'msrdgw'):
-        lines += [f"gatewayhostname:s:{gw['address']}:{gw['port']}", 'gatewayusagemethod:i:1', 'gatewaycredentialssource:i:4',
-                  'gatewayprofileusagemethod:i:1']
     return '\r\n'.join(lines) + '\r\n'
 
 
@@ -955,8 +876,16 @@ def my_external_rdp(eid):
     ext = catalog.get_external(eid)
     if not ext or ext['assigned_user'] != _user():
         return _bad('External desktop not found', 404)
-    log_audit(_user(), 'vlab.external.connect', f"RDP file for '{ext['name']}'", get_client_ip())
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', ext['name']).strip('-') or 'desktop'
+    # 보안 게이트웨이 with its RDP switch on: the .rdp goes through Warpgate (a single-use ticket);
+    # off: straight to the PC as before (pegaprox/api/vlab_warpgate.py)
+    from pegaprox.api.vlab_warpgate import external_rdp_via_warpgate
+    answer, err = external_rdp_via_warpgate(ext, _user())
+    if err:
+        return err
+    if answer:
+        return jsonify(dict(answer, filename=f'{safe}.rdp'))
+    log_audit(_user(), 'vlab.external.connect', f"RDP file for '{ext['name']}'", get_client_ip())
     return jsonify({'filename': f'{safe}.rdp', 'rdp': rdp_file(ext, _user())})
 
 
@@ -1463,7 +1392,6 @@ def check_license_server(lid):
 #   GET    /api/vlab/me/pools                           pools granted to the caller (claim / shared)    vlab.desk
 #   POST   /api/vlab/me/pools/<id>/claim                a free desktop of the pool, assigned to the caller
 #   POST   /api/vlab/me/pools/<id>/route                shared pool: the desktop to connect to now
-#   GET    /api/vlab/me/external/<id>/guac              browser RDP (Guacamole) link for an external desktop
 #   POST   /api/vlab/admin/golden-images/<id>/rollout   {pool_id, delete_old?} desktops of an older version -> current
 #   GET    /api/vlab/admin/build-jobs, POST .../<id>/cancel; GET/POST /api/vlab/me/build-jobs
 #   GET    /api/vlab/admin/reports/cards                ?days=30&format=csv card loans per card
@@ -1678,7 +1606,7 @@ def route_shared(pool_id):
     return jsonify(out)
 
 
-# --- RDP files and Guacamole -------------------------------------------------------------
+# --- RDP files ---------------------------------------------------------------------------
 
 def _guest_ipv4(mgr, node, vmid):
     try:
@@ -1690,51 +1618,6 @@ def _guest_ipv4(mgr, node, vmid):
         if re.match(r'^\d+\.\d+\.\d+\.\d+$', ip) and not ip.startswith(('127.', '169.254.')):
             return ip
     return None
-
-
-def _guac_gateway(pool=None):
-    gid = ((pool or {}).get('settings') or {}).get('guac_gateway_id')
-    for g in catalog.list_gateways(secret=True):
-        if g['kind'] == 'guacamole' and g['enabled'] and g['secret_key'] and (not gid or g['id'] == gid):
-            return g
-    return None
-
-
-def guac_params(pol):
-    """Browser RDP parameters a pool policy sets: the clipboard each way and printing (to a PDF
-    the browser downloads). No drive: Guacamole's drive is a folder on the gateway."""
-    if pol is None:
-        return {}
-    return {'disable-copy': 'false' if pol['clipboard'] in ('both', 'from_desktop') else 'true',
-            'disable-paste': 'false' if pol['clipboard'] in ('both', 'to_desktop') else 'true',
-            'enable-printing': 'true' if pol['client_printers'] else 'false'}
-
-
-def guac_link(gw, username, name, host, port, minutes=5, pol=None):
-    """A guacamole-auth-json link for one RDP connection (browser RDP)."""
-    return _guac_link(gw, username, {name: {'protocol': 'rdp', 'parameters': {
-        'hostname': host, 'port': str(port), 'username': username,
-        'ignore-cert': 'true', 'security': 'any', 'resize-method': 'display-update', **guac_params(pol)}}}, minutes)
-
-
-def _guac_link(gw, username, connections, minutes=5):
-    """A guacamole-auth-json login link: the connections signed with HMAC-SHA256 and encrypted
-    with AES-128-CBC (zero IV) under the gateway's 128-bit key, base64 in ?data=."""
-    from cryptography.hazmat.primitives import padding
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    key = bytes.fromhex(gw['secret_key'])
-    payload = _json.dumps({'username': username, 'expires': int((time.time() + minutes * 60) * 1000),
-                           'connections': connections}, separators=(',', ':')).encode()
-    signed = hmac.new(key, payload, hashlib.sha256).digest() + payload
-    padder = padding.PKCS7(128).padder()
-    enc = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).encryptor()
-    data = enc.update(padder.update(signed) + padder.finalize()) + enc.finalize()
-    q = _quote(base64.b64encode(data).decode())
-    if gw['id'] == catalog.BUILTIN_GUAC_ID and has_request_context():
-        # the bundled one sits behind the console's own address: use the name the user came in by
-        return f"https://{request.host}/guacamole/?data={q}"
-    scheme = 'http' if gw['port'] in (80, 8080) else 'https'
-    return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={q}"
 
 
 # Windows, as SYSTEM through the guest agent: RDP on (and its firewall rules, by their fixed
@@ -1799,7 +1682,7 @@ def rdp_listening(ip, port=3389, timeout=1.5):
 
 
 def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
-    """The connect route's answer for rdp (an .rdp file) and guac (a browser RDP link).
+    """The connect route's answer for rdp: an .rdp file (through 보안 게이트웨이 when its RDP switch is on).
     Returns (answer, None) or (None, error response). Windows: made ready on the way (rdp_tune);
     Linux: only when something listens on 3389, else NO_RDP - the client then opens SPICE / VNC."""
     if desk['vm_type'] != 'qemu':
@@ -1823,48 +1706,30 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     if protocol == 'rdp':
         # "RDP through Warpgate" on: an .rdp aimed at Warpgate with a single-use ticket
         # (pegaprox/api/vlab_warpgate.py). Warpgate down: refused (WG_DOWN) unless the admin allowed
-        # the direct fallback. Switch off: the direct / RD Gateway file as before
+        # the direct fallback. Switch off: the direct file as before
         from pegaprox.api.vlab_warpgate import rdp_answer_via_warpgate
         answer, err = rdp_answer_via_warpgate(desk, username, ip, pol)
         if err:
             return None, err
         if answer:
             return answer, None
-        ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
-        return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
-    # coexistence: the engine picks who serves browser RDP (pegaprox/api/vlab_warpgate.py) - Warpgate
-    # when switched to it (Warpgate down: refused, WG_DOWN, unless the admin allowed the fallback),
-    # Guacamole otherwise
-    from pegaprox.api.vlab_warpgate import browser_rdp_via_warpgate
-    url, err = browser_rdp_via_warpgate(desk, username, ip)
-    if err:
-        return None, err
-    if url:
-        return {'type': 'guac', 'url': url, 'via': 'warpgate'}, None
-    gw = _guac_gateway(pool)
-    if not gw:
-        return None, (jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409)
-    return {'type': 'guac', 'url': guac_link(gw, username, desk['name'], ip, port, pol=pol)}, None
+        return {'type': 'rdp', 'rdp': rdp_file({'address': ip, 'port': port}, username, pol), 'filename': f"{desk['name']}.rdp"}, None
+    return None, _bad('protocol must be rdp')
 
 
-@bp.route('/api/vlab/me/external/<eid>/guac', methods=['GET'])
+@bp.route('/api/vlab/me/external/<eid>/web', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
-def my_external_guac(eid):
+def my_external_web(eid):
+    """Browser RDP to an external desktop: through 보안 게이트웨이 (its web UI opens the PC). There is no
+    other browser path: with Warpgate off, WG_OFF."""
     ext = catalog.get_external(eid)
     if not ext or ext['assigned_user'] != _user():
         return _bad('External desktop not found', 404)
-    gw = None
-    if ext.get('gateway_id'):
-        g = catalog.get_gateway(ext['gateway_id'], secret=True)
-        if g and g['kind'] == 'guacamole' and g['enabled'] and g['secret_key']:
-            gw = g
-    gw = gw or _guac_gateway()
-    if not gw:
-        return jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409
-    log_audit(_user(), 'vlab.external.connect', f"browser RDP to '{ext['name']}'", get_client_ip())
-    return jsonify({'url': guac_link(gw, _user(), ext['name'], ext['address'], ext['port'])})
-
-
+    from pegaprox.api.vlab_warpgate import external_web_via_warpgate
+    url, err = external_web_via_warpgate(ext, _user())
+    if err:
+        return err
+    return jsonify({'url': url, 'via': 'warpgate'})
 
 
 # --- golden image rollout ----------------------------------------------------------------

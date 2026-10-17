@@ -77,9 +77,6 @@ def put_warpgate():
     token = data['admin_token'] if 'admin_token' in data else None
     nla_pw = data['rdp_nla_password'] if 'rdp_nla_password' in data else None
     nla_user = data['rdp_nla_user'] if 'rdp_nla_user' in data else None
-    provider = data.get('web_rdp_provider')
-    if provider is not None and provider not in ('guac', 'warpgate'):
-        return _bad('web_rdp_provider must be guac or warpgate')
     via = data.get('rdp_via_warpgate')
     if via is not None and not isinstance(via, bool):
         return _bad('rdp_via_warpgate must be true or false')
@@ -88,7 +85,7 @@ def put_warpgate():
         return _bad('allow_direct_fallback must be true or false')
     cfg = wg.save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
                          admin_token=token, rdp_nla_user=nla_user, rdp_nla_password=nla_pw,
-                         web_rdp_provider=provider, rdp_via_warpgate=via, allow_direct_fallback=fallback)
+                         rdp_via_warpgate=via, allow_direct_fallback=fallback)
     log_audit(_user(), 'vlab.warpgate.config', f"Warpgate {base_url or '-'} enabled={enabled}", get_client_ip())
     return jsonify({'config': cfg})
 
@@ -118,11 +115,8 @@ def warpgate_sessions():
 @bp.route('/api/vlab/me/warpgate', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
 def my_warpgate_status():
-    """포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음).
-    web_rdp_provider: 브라우저 RDP를 누가 서비스하는지(guac 기본 / warpgate 검증 후)."""
-    cfg = wg.config()
-    return jsonify({'enabled': wg.is_enabled(), 'protocols': list(wg.TARGET_KINDS),
-                    'web_rdp_provider': cfg['web_rdp_provider']})
+    """포털이 보안 게이트웨이 연결 항목을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음)."""
+    return jsonify({'enabled': wg.is_enabled(), 'protocols': list(wg.TARGET_KINDS)})
 
 
 # --- researcher native SSH: the user's own keys and ssh config ---------------------------
@@ -242,12 +236,8 @@ def _desktop_target_options(cfg, proto, ip, desk=None, pol=None):
 
 
 def warpgate_serves_rdp(protocol):
-    """Will this connect go through Warpgate: the .rdp (rdp_via_warpgate) or browser RDP
-    (web_rdp_provider=warpgate)?"""
-    if not wg.is_enabled():
-        return False
-    cfg = wg.config()
-    return bool(cfg['rdp_via_warpgate']) if protocol == 'rdp' else cfg['web_rdp_provider'] == 'warpgate'
+    """Will this connect go through Warpgate: the .rdp with "RDP through 보안 게이트웨이" on?"""
+    return protocol == 'rdp' and wg.is_enabled() and bool(wg.config()['rdp_via_warpgate'])
 
 
 def prepare_windows_nla(desk, mgr, node, wait=25):
@@ -320,7 +310,7 @@ def _wg_down(cfg, what, desk, e):
     """Warpgate failed on a path the admin switched to Warpgate. Fail closed (code WG_DOWN): a silent
     fall back would go around the bastion - and fails anyway where direct access is blocked. Only
     with the admin's explicit allow_direct_fallback (security weakened) does the caller go on with the
-    direct / Guacamole path. Returns (None, error response), or (None, None) to go on."""
+    direct path. Returns (None, error response), or (None, None) to go on."""
     if cfg.get('allow_direct_fallback'):
         logging.warning(f"[VLAB] Warpgate {what} for {desk.get('name')} failed, direct path allowed by setting: {str(e)[:200]}")
         log_audit('system', 'vlab.warpgate.fallback', f"{what} to '{desk.get('name')}' without Warpgate (allow_direct_fallback)", '')
@@ -329,28 +319,51 @@ def _wg_down(cfg, what, desk, e):
     return None, (jsonify({'error': WG_DOWN_TEXT, 'code': 'WG_DOWN'}), 503)
 
 
-def browser_rdp_via_warpgate(desk, username, ip):
-    """The portal's "브라우저 RDP로 열기" for a pool desktop. (url, None): Warpgate's web UI, when Warpgate
-    is on AND web_rdp_provider is 'warpgate'. (None, None): not switched to Warpgate, the caller keeps
-    Guacamole. Warpgate fails: (None, WG_DOWN error) - fail closed - unless the admin allowed the
-    direct fallback, then (None, None) and Guacamole serves it.
+def _external_rdp_options(cfg, ext):
+    """An external desktop (a physical PC) has no guest agent: its NLA account is the console's
+    global one, if set (otherwise the PC must allow RDP without NLA)."""
+    return wg.rdp_target_options(ext['address'], int(ext.get('port') or 3389),
+                                 cfg.get('rdp_nla_user') or wg.NLA_USER, cfg.get('rdp_nla_password') or '',
+                                 interactive_logon=True)
 
-    Warpgate opens no web session from a ticket for an RDP/SSH target (checked against a live
-    Warpgate), so no ticket here: the user, role and target are synced so the desktop is in the
-    user's Warpgate list, and the user signs in to Warpgate (SSO/LDAP) and opens it there."""
+
+def external_rdp_via_warpgate(ext, username):
+    """The .rdp for an external desktop when "RDP through 보안 게이트웨이" is on: aimed at Warpgate with a
+    single-use ticket, like a pool desktop. (None, None): switch off - the caller writes the direct
+    file. Warpgate fails: WG_DOWN unless the admin allowed the direct fallback."""
     if not wg.is_enabled():
         return None, None
     cfg = wg.config(secret=True)
-    if cfg.get('web_rdp_provider') != 'warpgate':
+    if not cfg.get('rdp_via_warpgate'):
         return None, None
+    from pegaprox.api.vlab_next import rdp_redirects
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        target_uuid, _name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
-                                            _desktop_target_options(cfg, 'rdp', ip, desk), role_id)
+        _uuid, target_name = wg.sync_target(cfg, ext['id'], ext['name'], 'rdp', _external_rdp_options(cfg, ext), role_id)
+        _ticket, secret = wg.issue_ticket(cfg, username, target_name)
+        if not secret:
+            raise wg.WarpgateError('Warpgate did not return a ticket secret')
     except Exception as e:
-        return _wg_down(cfg, 'browser RDP', desk, e)
-    log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate (web UI)", get_client_ip())
+        return _wg_down(cfg, 'RDP file', ext, e)
+    log_audit(username, 'vlab.external.connect', f"RDP file for '{ext['name']}' via 보안 게이트웨이", get_client_ip())
+    return {'type': 'rdp', 'via': 'warpgate', 'rdp': wg.rdp_file_text(cfg, secret, rdp_redirects(None), ())}, None
+
+
+def external_web_via_warpgate(ext, username):
+    """Browser RDP to an external desktop: 보안 게이트웨이's web UI opened on its target. (url, None), or
+    (None, error) - WG_OFF when Warpgate is off, WG_DOWN when it fails (there is no other browser path)."""
+    if not wg.is_enabled():
+        return None, (jsonify({'error': '보안 게이트웨이가 꺼져 있습니다', 'code': 'WG_OFF'}), 409)
+    cfg = wg.config(secret=True)
+    try:
+        role_id = wg.ensure_role(cfg)
+        wg.ensure_user(cfg, username, role_id)
+        target_uuid, _name = wg.sync_target(cfg, ext['id'], ext['name'], 'rdp', _external_rdp_options(cfg, ext), role_id)
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate browser RDP for {ext.get('name')} failed: {str(e)[:200]}")
+        return None, (jsonify({'error': WG_DOWN_TEXT, 'code': 'WG_DOWN'}), 503)
+    log_audit(username, 'vlab.external.connect', f"browser RDP to '{ext['name']}' via 보안 게이트웨이", get_client_ip())
     return wg.web_ui_url(cfg, 'rdp', target_uuid), None
 
 
