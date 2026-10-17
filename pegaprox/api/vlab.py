@@ -14,6 +14,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   POST   /api/vlab/desktops/<desktop_id>/connect      {protocol: vnc|spice} -> how to connect  vlab.desk
   POST   /api/vlab/sessions/<session_id>/end          close the caller's own session        vlab.desk
   POST   /api/vlab/desktops/<desktop_id>/power        {action: start|shutdown|reboot|stop}  vlab.desk
+  GET    /api/vlab/desktops/<desktop_id>/screenshot   PNG of the running desktop's screen, 204 when none  assigned user / vlab.pool.view
   GET    /api/vlab/admin/audit                        audit log (?q=&user=&date_from=&date_to=&vlab_only=&offset=&limit=)  admin role
   GET    /api/vlab/admin/summary                      counts for the dashboard / system summary  vlab.pool.view
   GET    /api/vlab/admin/sessions                     session log (?username=&pool_id=&limit=)  vlab.report.view
@@ -115,9 +116,10 @@ able to reach that cluster (tenant scope) to see or change it. docs/vlab-design.
 import json
 from datetime import datetime
 import re
+import time
 import logging
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from pegaprox.api.helpers import acting_user, check_cluster_access
 from pegaprox.core import ha
@@ -329,7 +331,8 @@ def my_desktops():
         v['last_connected'] = last.get(d['id'])
         pol = pool_policy.effective(_settings_of(d))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
-                       'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide']}
+                       'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide'],
+                       'screen_thumbnail': pol['screen_thumbnail']}
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:
@@ -337,6 +340,9 @@ def my_desktops():
             v['storage'] = dict(paths, ok=got['ok'] if got else None, code=got['code'] if got else '',
                                 warnings=got['warnings'] if got else [])
         out.append(v)
+    from pegaprox.api.ha import standby_console_refusal
+    if standby_console_refusal() is None:
+        warm_screens(rows, live)
     return jsonify({'desktops': out})
 
 
@@ -535,6 +541,79 @@ def power_desktop(desktop_id):
     log_audit(username, f'vm.{action}', f"vLAB: {action} desktop '{desk['name']}' ({desk['vm_type']}/{desk['vmid']})",
               get_client_ip())
     return jsonify({'success': True, 'action': action, 'task': result.get('data') or result.get('upid')})
+
+
+@bp.route('/api/vlab/desktops/<desktop_id>/screenshot', methods=['GET'])
+@require_auth()
+def desktop_screenshot(desktop_id):
+    """The portal card's picture of a running desktop: the console tile's grab (screendump, one
+    shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache.
+    The assigned user (vlab.desk) or an admin with vlab.pool.view. 204 when there is no picture
+    (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo;
+    with X-Screen: off the display is there but black and the card says so.
+    It is the VM's console, so a Windows desktop used over RDP shows its lock screen."""
+    from pegaprox.api.ha import standby_console_refusal
+    from pegaprox.api.vms import cached_vm_frame
+    from pegaprox.utils.auth import resolve_authz_user
+    from pegaprox.utils.rbac import has_permission
+
+    user = resolve_authz_user(request.session)
+    desk = store.get_desktop(desktop_id)
+    if not user or not desk or not _can_reach(desk['cluster_id']):
+        return _bad('Desktop not found', 404)
+    mine = desk['assigned_user'] == _user() and has_permission(user, 'vlab.desk')
+    if not mine and not has_permission(user, 'vlab.pool.view'):
+        return _bad('Desktop not found', 404)
+    none = ('', 204)
+    if desk['vm_type'] != 'qemu' or standby_console_refusal():
+        return none
+    if not pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))['screen_thumbnail']:
+        return none
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False) or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return none
+    vm = _vm_states(desk['cluster_id']).get(int(desk['vmid']))
+    if not vm or vm.get('status') != 'running':
+        return none
+    started = time.monotonic()
+    png, state = cached_vm_frame(mgr, desk['cluster_id'], vm.get('node') or desk['node'], 'qemu', int(desk['vmid']),
+                                 **SHOT_OPTS)
+    timing = f"grab;desc={state};dur={int((time.monotonic() - started) * 1000)}"
+    if png is None:
+        # the display is there but black: the card says 화면 꺼짐 instead of drawing the OS
+        return '', 204, ({'X-Screen': 'off', 'Server-Timing': timing} if state == 'off' else {'Server-Timing': timing})
+    resp = current_app.response_class(png, mimetype='image/png')
+    resp.headers['Cache-Control'] = f"private, max-age={int(SHOT_OPTS['ttl'])}"
+    resp.headers['X-Screenshot-Cache'] = state
+    resp.headers['Server-Timing'] = timing
+    return resp
+
+
+# The portal card's grab (api/vms.py cached_vm_frame): a picture is fresh for 20 s, a failure
+# is retried after 15 s (a desktop that just started shows up within one card refresh), an
+# older picture is answered at once while a new one is taken, and the two grabs get short
+# timeouts - a card that waits half a minute is worse than one that keeps its drawing.
+SHOT_OPTS = {'ttl': 20.0, 'fail_ttl': 15.0, 'stale': True, 'timeouts': (8, 6)}
+
+
+def warm_screens(desks, live):
+    """Start the grabs of the caller's running desktops in the background while the portal
+    lists them, so the cards' first look finds a picture (or the grab already under way)."""
+    from pegaprox.api.vms import cached_vm_frame
+    for d in desks:
+        if d.get('vm_type') != 'qemu':
+            continue
+        vm = (live.get(d['cluster_id']) or {}).get(int(d['vmid'])) or {}
+        mgr = cluster_managers.get(d['cluster_id'])
+        if (vm.get('status') != 'running' or not mgr or not getattr(mgr, 'is_connected', False)
+                or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox'
+                or not pool_policy.effective(_settings_of(d))['screen_thumbnail']):
+            continue
+        try:
+            cached_vm_frame(mgr, d['cluster_id'], vm.get('node') or d['node'], 'qemu', int(d['vmid']),
+                            wait=False, **SHOT_OPTS)
+        except Exception as e:
+            logging.debug(f"[vLAB] screen warm-up {d['id']}: {e}")
 
 
 # --- admin: session log ------------------------------------------------------------

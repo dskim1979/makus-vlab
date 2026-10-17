@@ -48454,6 +48454,45 @@
         ]
       }
     },
+    "/api/vlab/desktops/{desktop_id}/screenshot": {
+      "get": {
+        "operationId": "vlab.desktop_screenshot_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "The portal card's picture of a running desktop: the console tile's grab (screendump, one shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache. The assigned user (vlab.desk) or an admin with vlab.pool.view. 204 when there is no picture (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo; with X-Screen: off the display is there but black and the card says so. It is the VM's console, so a Windows desktop used over RDP shows its lock screen.",
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/vlab/admin/sessions": {
       "get": {
         "operationId": "vlab.session_log_get",
@@ -55326,6 +55365,51 @@
         "parameters": [
           {
             "name": "eid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/desktops/{desktop_id}/ssh": {
+      "get": {
+        "operationId": "vlab_next.my_desktop_ssh_get",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A browser SSH terminal (Guacamole) for the user's own Linux desktop, when the pool allows it and the desktop answers on port 22. The user types their account password in the terminal; file transfer (SFTP) follows the pool policy.",
+        "parameters": [
+          {
+            "name": "desktop_id",
             "in": "path",
             "required": true,
             "schema": {
