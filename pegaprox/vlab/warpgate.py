@@ -458,7 +458,8 @@ def resync_ssh_file_transfer(desks, on, background=True):
     if not is_enabled():
         return
     todo = [(d, get_mapping(target_ref(d['id'], 'ssh'))) for d in desks]
-    todo = [(d, mp) for d, mp in todo if mp and mp['address']]
+    # the target signs in as the desktop's user (ssh_login_name); one without a user waits for its next connect
+    todo = [(d, mp) for d, mp in todo if mp and mp['address'] and ssh_login_name(d.get('assigned_user'))]
     if not todo:
         return
     cfg = config(secret=True)
@@ -467,7 +468,8 @@ def resync_ssh_file_transfer(desks, on, background=True):
         for d, mp in todo:
             try:
                 sync_target(cfg, d['id'], d['name'], 'ssh',
-                            ssh_target_options(mp['address'], mp['port'] or 22, 'moavi', on))
+                            ssh_target_options(mp['address'], mp['port'] or 22,
+                                               ssh_login_name(d['assigned_user']), on))
             except Exception as e:
                 logging.warning(f"[VLAB] Warpgate SSH target of {d['name']}: file panel not updated: {str(e)[:200]}")
 
@@ -546,6 +548,48 @@ def _rename_target(cfg, mapping, new_name):
         body['description'] = t['description']
     _call(cfg, 'PUT', f"/targets/{mapping['target_uuid']}", body)
     db().execute('UPDATE vlab_warpgate_targets SET target_name = ? WHERE ref = ?', (new_name, mapping['ref']))
+
+
+# --- SSH as the user's own account ------------------------------------------------------------
+# A Warpgate SSH target signs in with one user name and Warpgate's own key. The engine sets that name
+# to the person connecting (their Linux / directory account on the desktop) on every connect and puts
+# Warpgate's public key into that account's authorized_keys through the guest agent - no password.
+
+_LOGIN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9._-]{0,63}$')
+OWN_KEY_COMMENT = 'moavi-desk-gateway'
+
+
+def ssh_login_name(username):
+    """The desktop account a portal user's SSH lands on: the same name (local, LDAP or the bundled
+    directory, whose SSSD has use_fully_qualified_names = False). None when it cannot be a Linux name."""
+    name = str(username or '').strip()
+    return name if _LOGIN_RE.match(name) else None
+
+
+def own_public_keys(cfg):
+    """Warpgate's own SSH client keys as authorized_keys lines (GET /ssh/own-keys)."""
+    out = []
+    for k in _call(cfg, 'GET', '/ssh/own-keys') or []:
+        if isinstance(k, dict) and k.get('kind') and k.get('public_key_base64'):
+            out.append(f"{k['kind']} {k['public_key_base64']} {OWN_KEY_COMMENT}")
+    return out
+
+
+def ssh_authorized_key_script():
+    """Bash run as root by the guest agent. stdin: the account on line 1, then the key lines. Makes the
+    home (mkhomedir_helper when there, as at a first directory login) and adds each key once.
+    Prints ssh-user=ok, or ssh-user=missing (exit 3) when the desktop has no such account."""
+    return r'''read -r U; KEYS=$(cat)
+getent passwd "$U" >/dev/null || { echo ssh-user=missing; exit 3; }
+H=$(getent passwd "$U" | cut -d: -f6); G=$(id -g "$U") || exit 4
+if [ ! -d "$H" ]; then mkhomedir_helper "$U" 0077 2>/dev/null || install -d -m 700 -o "$U" -g "$G" "$H" || exit 5; fi
+install -d -m 700 -o "$U" -g "$G" "$H/.ssh" || exit 5
+F="$H/.ssh/authorized_keys"; touch "$F" || exit 5
+printf '%s\n' "$KEYS" | while IFS= read -r k; do [ -n "$k" ] && { grep -qxF "$k" "$F" || printf '%s\n' "$k" >> "$F"; }; done
+chown "$U:$G" "$F" && chmod 600 "$F" || exit 5
+command -v restorecon >/dev/null && restorecon -R "$H/.ssh" 2>/dev/null
+echo ssh-user=ok
+'''
 
 
 # --- SSH host keys (Warpgate trusts a target's key only once it is in its known hosts) -------

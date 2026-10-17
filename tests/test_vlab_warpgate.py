@@ -131,6 +131,8 @@ class FakeWarpgate:
             self.kinds[uid] = body['options']['kind']
             self.targets = {(body['name'] if v == uid else k): v for k, v in self.targets.items()}
             return 200, {}
+        if path == '/ssh/own-keys' and method == 'GET':
+            return 200, [{'kind': 'ssh-ed25519', 'public_key_base64': 'AAAAWarpgateOwnKey'}]
         if path == '/ssh/known-hosts' and method == 'GET':
             return 200, list(self.known_hosts)
         if path == '/ssh/known-hosts' and method == 'POST':
@@ -197,6 +199,25 @@ def no_keyscan(monkeypatch):
         return [HOST_KEY]
     monkeypatch.setattr(wg, 'scan_host_keys', scan)
     return scans
+
+
+@pytest.fixture(autouse=True)
+def guest_agent(monkeypatch):
+    """The desktop's guest agent: SSH key setup succeeds unless a test says otherwise."""
+    import pegaprox.api.vlab_next as nxt
+    runs = []
+    result = {'code': 0, 'out': 'ssh-user=ok\n'}
+
+    def run(mgr, node, vmid, command, stdin=None, wait=None):
+        runs.append({'vmid': vmid, 'command': command, 'stdin': stdin})
+        return result['code'], result['out'], '', ''
+    monkeypatch.setattr(nxt, '_agent_run', run)
+    return namespace_of(runs=runs, result=result)
+
+
+def namespace_of(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
 
 
 @pytest.fixture
@@ -304,6 +325,49 @@ def test_connect_ssh_uses_warpgate_public_key(env, fake_wg, monkeypatch):
     assert r.get_json()['connection']['ssh'] == 'ssh ticket-TKT-SECRET-123@wg.example -p 2222'
     tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
     assert tgt['options']['kind'] == 'Ssh' and tgt['options']['auth'] == {'kind': 'PublicKey'}
+
+
+def test_ssh_signs_in_as_the_connecting_users_own_account(env, fake_wg, monkeypatch, guest_agent):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 200, r.get_json()
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert tgt['options']['username'] == 'alice'            # not a shared account
+    # Warpgate's own key went into alice's authorized_keys through the guest agent, as root
+    run = guest_agent.runs[-1]
+    assert run['command'][0] == '/bin/bash' and 'authorized_keys' in run['command'][-1]
+    assert run['stdin'] == 'alice\nssh-ed25519 AAAAWarpgateOwnKey moavi-desk-gateway\n'
+
+
+def test_ssh_refused_when_the_desktop_has_no_such_account(env, fake_wg, monkeypatch, guest_agent):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    guest_agent.result.update(code=3, out='ssh-user=missing\n')
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'SSH_NO_ACCOUNT'
+    assert "'alice'" in r.get_json()['error']
+    assert not fake_wg.tickets                               # no ticket, no target as someone else
+    guest_agent.result.update(code=None, out='')            # guest agent not answering
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 502 and r.get_json()['code'] == 'SSH_KEY_FAILED'
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'SSH_LINUX_ONLY'
+
+
+def test_ssh_login_name_is_a_linux_name():
+    assert wg.ssh_login_name('alice') == 'alice' and wg.ssh_login_name('kim.dh-2') == 'kim.dh-2'
+    for bad in ('', 'a b', 'root;rm', '-x', 'MOAVI\\alice', 'a' * 65, None):
+        assert wg.ssh_login_name(bad) is None
 
 
 def test_portal_status_reflects_enabled(env):
@@ -640,7 +704,7 @@ def test_one_desktop_gets_an_rdp_and_an_ssh_target(env, fake_wg, monkeypatch):
     pool, d = _assign()
     admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
     monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
-    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'linux')
     monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
     assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'}).status_code == 200
     r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
@@ -1394,7 +1458,7 @@ def test_targets_carry_the_portal_desktop_name_as_their_description(env, fake_wg
     pool, d = _assign()
     admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
     monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
-    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'linux')
     monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
     alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
     alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
