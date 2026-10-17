@@ -45,8 +45,15 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   /api/vlab/admin/golden-images/<id>/deploy       {pool_id, count, name_prefix, start_vmid?} full clones of the current version  vlab.pool.manage
 
   GET/POST /api/vlab/admin/boards, PUT/DELETE .../<id>   the board lab (JTAG cables)          vlab.pool.view / vlab.accel.manage
-  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough, slot usb4  vlab.accel.manage
+  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough (slot usb4), or a network
+                                                       board's grant (hw_server/XVC/jtagd: no VM change)  vlab.accel.manage
   POST   /api/vlab/admin/boards/<id>/detach                                                    vlab.accel.manage
+  GET    /api/vlab/me/boards                             boards lent to the caller, network ones with host:port  vlab.desk
+  POST   /api/vlab/admin/boards/<id>/power               {action on|off|cycle} remote power hook (501 without a driver)  vlab.accel.manage
+  GET/POST /api/vlab/admin/jtag-gateways, PUT/DELETE .../<id>   JTAG gateway VMs (hw_server / XVC / jtagd)  vlab.pool.view / vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/passthrough, DELETE .../passthrough/<slot>   a cable (USB) or a PCIe USB controller on the gateway VM  vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/discover   the cables the gateway sees (guest agent)  vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/check      health now (VM running, ports answering)  vlab.accel.manage
 
   GET    /api/vlab/admin/buildfarm                       build farm pools: size, in use, load  vlab.pool.view
 
@@ -1169,30 +1176,159 @@ def deploy_golden(gid):
 
 BOARD_SLOT = 'usb4'     # the slot MOAVI Desk owns on a desktop VM (usb0-3 stay the admin's)
 _USB_ID = re.compile(r'^([0-9a-f]{4}:[0-9a-f]{4}|\d+-\d+(\.\d+)*)$')
+_HOSTRE = re.compile(r'^[A-Za-z0-9._-]+$')     # hostname or IPv4; the cable host reached over TCP
+# network JTAG servers the researcher's tool dials: Xilinx hw_server (3121) / Xilinx Virtual Cable,
+# Intel Quartus jtagd (1309). The port the board is shared on is whatever the server listens on.
+BOARD_PROTOCOLS = {'hw_server': 3121, 'xvc': 2542, 'quartus': 1309}
+_SERIAL = re.compile(r'^[A-Za-z0-9._-]{1,64}$')     # a JTAG cable serial (Digilent 210251A08870, ...)
 
 
-def _board_body():
+def _port_of(data, key, default=None, required=False):
+    v = data.get(key)
+    if v in (None, ''):
+        if required:
+            raise ValueError(f'{key}: 1-65535')
+        return default
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        raise ValueError(f'{key}: 1-65535')
+    if not (1 <= v <= 65535):
+        raise ValueError(f'{key}: 1-65535')
+    return v
+
+
+def _board_body(bid=None):
+    """(name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, gateway_id,
+    cable_serial, uart_port, power) in catalog.save_board's order."""
     data = _body()
     cluster_id = str(data.get('cluster_id') or '')
     if not core._can_reach(cluster_id):
         raise LookupError('Cluster not found')
-    usb = str(data.get('usb') or '').strip().lower()
-    if not _USB_ID.match(usb):
-        raise ValueError('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
-    node = _text(data, 'node', 64, required=True)
-    return _text(data, 'name', 80, required=True), cluster_id, node, usb, _text(data, 'kind', 80), _text(data, 'notes', 300)
+    target = str(data.get('target') or 'usb').strip().lower()
+    if target not in ('usb', 'network'):
+        raise ValueError("target: 'usb' or 'network'")
+    name = _text(data, 'name', 80, required=True)
+    kind, notes = _text(data, 'kind', 80), _text(data, 'notes', 300)
+    power = data.get('power') or ''
+    if power:
+        if not isinstance(power, dict) or not str(power.get('driver') or '').strip() or len(_json.dumps(power)) > 1000:
+            raise ValueError('power: {"driver": "<name>", ...} (the remote power hook, see pegaprox/vlab/jtag_gw.py)')
+        power = _json.dumps(power, ensure_ascii=False)
+    if target == 'usb':
+        usb = str(data.get('usb') or '').strip().lower()
+        if not _USB_ID.match(usb):
+            raise ValueError('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
+        node = _text(data, 'node', 64, required=True)
+        return name, cluster_id, node, usb, kind, notes, 'usb', '', None, '', '', '', '', None, power
+    protocol = str(data.get('protocol') or 'hw_server').strip().lower()
+    if protocol not in BOARD_PROTOCOLS:
+        raise ValueError('protocol: hw_server, xvc or quartus')
+    label = _text(data, 'label', 80)
+    uart_port = _port_of(data, 'uart_port')
+    gateway_id = str(data.get('gateway_id') or '').strip()
+    serial = str(data.get('cable_serial') or '').strip()
+    if serial and not _SERIAL.match(serial):
+        raise ValueError('cable_serial: the cable serial number (letters, digits, - _ .)')
+    if gateway_id:
+        # on a JTAG gateway VM: hw_server / jtagd ports are the gateway's; an XVC board has its own
+        # XVC server port on the gateway. hw_server boards are told apart by the cable serial.
+        gw = catalog.get_jtag_gateway(gateway_id)
+        if not gw or gw['cluster_id'] != cluster_id:
+            raise LookupError('JTAG gateway not found on that cluster')
+        if protocol == 'hw_server' and not serial:
+            raise ValueError('cable_serial: hw_server serves every cable of the gateway - say which one is this board')
+        port = _port_of(data, 'port', BOARD_PROTOCOLS['xvc']) if protocol == 'xvc' else None
+        for o in catalog.boards_on_gateway(gateway_id):
+            if o['id'] == bid:
+                continue
+            if serial and (o.get('cable_serial') or '') == serial:
+                raise ValueError(f"cable_serial: cable {serial} is board '{o['name']}' already - one cable, one board")
+            if port and o.get('protocol') == 'xvc' and o.get('port') == port:
+                raise ValueError(f"port: XVC port {port} of this gateway is board '{o['name']}' already")
+            if uart_port and o.get('uart_port') == uart_port:
+                raise ValueError(f"uart_port: {uart_port} of this gateway is board '{o['name']}' already")
+        return name, cluster_id, '', '', kind, notes, 'network', '', port, protocol, label, gateway_id, serial, uart_port, power
+    host = str(data.get('host') or '').strip()
+    if not host or not _HOSTRE.match(host) or len(host) > 255:
+        raise ValueError('host: the cable host MOAVI Desk VMs reach over the network (or pick a JTAG gateway)')
+    port = _port_of(data, 'port', BOARD_PROTOCOLS[protocol])
+    # a network board has no usb id and no node (it is reached by host, not plugged into one)
+    return name, cluster_id, '', '', kind, notes, 'network', host, port, protocol, label, '', serial, uart_port, power
+
+
+def _board_addr(b, gw=None):
+    """(host, port) a network board is dialled at: the gateway's for a gateway board."""
+    proto = b.get('protocol') or 'hw_server'
+    if b.get('gateway_id'):
+        gw = gw or catalog.get_jtag_gateway(b['gateway_id']) or {}
+        port = b.get('port') if proto == 'xvc' else gw.get('jtagd_port') if proto == 'quartus' else gw.get('hw_port')
+        return gw.get('host') or '', port
+    return b.get('host') or '', b.get('port')
+
+
+def _board_conn(b, gw=None):
+    """Connection info a researcher's tool dials for a network board: host:port, the cable serial,
+    the board's UART and a short how-to per protocol. None for a USB board (that one goes through
+    the desktop VM)."""
+    if (b.get('target') or 'usb') != 'network':
+        return None
+    proto = b.get('protocol') or 'hw_server'
+    host, port = _board_addr(b, gw)
+    serial = b.get('cable_serial') or ''
+    endpoint = f"{host}:{port}" if port else host
+    pick = f" Then open the cable {serial} (target */xilinx_tcf/*/{serial})." if serial else ''
+    how = {
+        'hw_server': 'Vivado Hardware Manager > Open Target > Open New Target > Remote server: '
+                     f'{endpoint} (hw_server).{pick} Or: connect_hw_server -url {endpoint}',
+        'xvc': f'Vivado Hardware Manager > Open New Target > Add Xilinx Virtual Cable (XVC): {endpoint}. '
+               f'Or: open_hw_target -xvc_url {endpoint}',
+        'quartus': f'Quartus Programmer > Hardware Setup > JTAG Settings > Add Server: {host} (jtagd {endpoint}).'
+                   + (f' Then pick the cable {serial}.' if serial else '')
+                   + f' Or: jtagconfig --addserver {host} <password>  (the cable host ran jtagconfig --enableremote).',
+    }
+    tcl = {'hw_server': [f'connect_hw_server -url {endpoint}']
+                        + ([f'open_hw_target [lindex [get_hw_targets */{serial}] 0]'] if serial else ['open_hw_target']),
+           'xvc': ['connect_hw_server', f'open_hw_target -xvc_url {endpoint}'],
+           'quartus': [f'jtagconfig --addserver {host} <password>', 'jtagconfig']}
+    return {'target': 'network', 'protocol': proto, 'host': host, 'port': port, 'endpoint': endpoint,
+            'label': b.get('label') or '', 'cable_serial': serial, 'gateway_id': b.get('gateway_id') or '',
+            'uart': f"{host}:{b['uart_port']}" if b.get('uart_port') and host else '',
+            'tcl': tcl.get(proto, []), 'howto': how.get(proto, '')}
+
+
+def _jtag_gateway_state(gw):
+    """'up' | 'down' | 'unknown' (never checked) for a gateway row."""
+    if not gw:
+        return 'unknown'
+    return 'unknown' if gw.get('last_ok') is None else ('up' if gw['last_ok'] else 'down')
+
+
+def _board_view(b, gws=None):
+    """A board for the lists: its desktop, connection, gateway and whether it can be lent now."""
+    gw = (gws or {}).get(b.get('gateway_id')) if gws is not None else catalog.get_jtag_gateway(b.get('gateway_id'))
+    desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
+    state = _jtag_gateway_state(gw) if b.get('gateway_id') else None
+    return dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None),
+                connection=_board_conn(b, gw),
+                gateway=({'id': gw['id'], 'name': gw['name'], 'state': state} if gw else None),
+                available=state != 'down')
 
 
 @bp.route('/api/vlab/admin/boards', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
 def list_boards():
-    out = []
-    for b in catalog.list_boards():
-        if not core._can_reach(b['cluster_id']):
-            continue
-        desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-        out.append(dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None)))
-    return jsonify({'boards': out, 'slot': BOARD_SLOT})
+    gws = {g['id']: g for g in catalog.list_jtag_gateways()}
+    out = [_board_view(b, gws) for b in catalog.list_boards() if core._can_reach(b['cluster_id'])]
+    return jsonify({'boards': out, 'slot': BOARD_SLOT, 'protocols': BOARD_PROTOCOLS})
+
+
+def _board_where(b):
+    """'usb 03fd:0008' or 'network hw_server host:3121 cable X' for audit lines"""
+    if (b.get('target') or 'usb') == 'network':
+        host, port = _board_addr(b)
+        return f"network {b.get('protocol')} {host}:{port}" + (f" cable {b['cable_serial']}" if b.get('cable_serial') else '')
+    return f"usb {b['usb']}"
 
 
 @bp.route('/api/vlab/admin/boards', methods=['POST'])
@@ -1205,7 +1341,7 @@ def create_board():
     except ValueError as e:
         return _bad(str(e))
     b = catalog.save_board(None, *args)
-    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node']} usb {b['usb']}", get_client_ip())
+    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node'] or '-'} {_board_where(b)}", get_client_ip())
     return jsonify({'board': b}), 201
 
 
@@ -1218,7 +1354,7 @@ def update_board(bid):
     if old['attached_desktop']:
         return _bad('Detach the board before changing it', 409)
     try:
-        args = _board_body()
+        args = _board_body(bid)
     except LookupError as e:
         return _bad(str(e), 404)
     except ValueError as e:
@@ -1267,19 +1403,43 @@ def attach_board(bid):
     out, err = lend_board(b, desk, _user(), lease_user, lease_until)
     if err:
         return _bad(err[0], err[1])
-    return jsonify({'board': out})
+    return jsonify({'board': out, 'connection': _board_conn(out)})
 
 
 def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     """Attach board b to the desktop (it must run on the board's node), lent to lease_user until
-    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status))."""
+    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status)).
+
+    A network board (hw_server / XVC / jtagd) changes nothing on the VM: the grant is recorded
+    and the researcher's tool dials host:port from inside the desktop, over any display protocol.
+    The desktop must be able to reach the cable host's port (deploy firewall; see the README)."""
+    if (b.get('target') or 'usb') == 'network':
+        if b.get('gateway_id'):
+            gw = catalog.get_jtag_gateway(b['gateway_id'])
+            if not gw:
+                return None, ("The board's JTAG gateway is gone - register it again", 409)
+            if _jtag_gateway_state(gw) == 'down':
+                return None, (f"The JTAG gateway {gw['name']} is down (VM stopped or hw_server not answering) - the board cannot be lent now", 409)
+        # one cable, one person: the same cable may be registered once, but say no here as well
+        if b.get('cable_serial') and any(o['id'] != b['id'] and o.get('attached_desktop') and o.get('cable_serial') == b['cable_serial']
+                                         and (o.get('gateway_id') or o.get('host')) == (b.get('gateway_id') or b.get('host'))
+                                         for o in catalog.list_boards()):
+            return None, (f"Cable {b['cable_serial']} is lent already", 409)
+        b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
+        log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} ({desk['vm_type']}/{desk['vmid']})"
+                  + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
+        from pegaprox.api.vlab_notices import board_lent
+        board_lent(b, desk['name'], lease_user, lease_until)
+        return b, None
     if desk['vm_type'] != 'qemu':
         return None, ('USB passthrough needs a virtual machine (QEMU)', 400)
     live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
     node = live.get('node') or desk['node']
     if node != b['node']:
         return None, (f"The desktop runs on {node}, the board is on {b['node']} - move the desktop first", 409)
-    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id'] for o in catalog.list_boards()):
+    # only USB boards take the slot; network boards held by the same desktop do not count
+    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id']
+           and (o.get('target') or 'usb') == 'usb' for o in catalog.list_boards()):
         return None, ('Another board is attached to this desktop', 409)
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
@@ -1288,7 +1448,7 @@ def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     if not isinstance(r, dict) or not r.get('success'):
         return None, (f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
     b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
-    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
+    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} (qemu/{desk['vmid']})"
               + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
     from pegaprox.api.vlab_notices import board_lent
     board_lent(b, desk['name'], lease_user, lease_until)
@@ -1304,7 +1464,7 @@ def detach_board(bid):
     if not b['attached_desktop']:
         return _bad('The board is not attached', 409)
     desk = store.get_desktop(b['attached_desktop'])
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board left the VM config alone
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return _bad('Cluster not connected', 503)
@@ -1320,6 +1480,330 @@ def detach_board(bid):
         board_returned(b, lent_to, by=_user())
     return jsonify({'board': b})
 
+
+@bp.route('/api/vlab/me/boards', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_boards():
+    """Boards lent to the caller. A network board carries its connection (host:port, protocol and
+    a how-to): the researcher opens Vivado / Quartus inside the desktop and dials it, so it works
+    over RDP, Warpgate or SPICE alike. A USB board is on the desktop already (connection None)."""
+    me = _user()
+    out = []
+    for b in catalog.list_boards():
+        if not b.get('attached_desktop') or not core._can_reach(b['cluster_id']):
+            continue
+        desk = store.get_desktop(b['attached_desktop'])
+        if (b.get('lease_user') or (desk or {}).get('assigned_user')) != me:
+            continue
+        v = _board_view(b)
+        out.append({'id': b['id'], 'name': b['name'], 'kind': b.get('kind') or '', 'target': b.get('target') or 'usb',
+                    'desktop': ({'id': desk['id'], 'name': desk['name']} if desk else None),
+                    'lease_until': b.get('lease_until'), 'connection': v['connection'], 'available': v['available'],
+                    'gateway': ({'name': v['gateway']['name'], 'state': v['gateway']['state']} if v['gateway'] else None)})
+    return jsonify({'boards': out})
+
+
+@bp.route('/api/vlab/admin/boards/<bid>/power', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def board_power(bid):
+    """Remote power for a board (smart PDU / relay): {action: on|off|cycle}. An extension point -
+    answers 501 until a driver is registered (pegaprox/vlab/jtag_gw.py register_power_driver)."""
+    from pegaprox.vlab import jtag_gw
+    b = catalog.get_board(bid)
+    if not b or not core._can_reach(b['cluster_id']):
+        return _bad('Board not found', 404)
+    action = str(_body().get('action') or '')
+    if action not in jtag_gw.POWER_ACTIONS:
+        return _bad('action: on, off or cycle')
+    try:
+        cfg = _json.loads(b.get('power') or '{}') or {}
+    except ValueError:
+        cfg = {}
+    ok, why = jtag_gw.power(b, action, cfg)
+    if why == 'NO_DRIVER':
+        return _bad('No remote power driver for this board (see docs/board-lab-network-jtag.md)', 501)
+    if not ok:
+        return _bad(f'Power {action} failed: {why}', 502)
+    log_audit(_user(), 'vlab.board.power', f"board '{b['name']}' power {action}", get_client_ip())
+    return jsonify({'success': True})
+
+
+# --- JTAG gateway VMs (board lab, network target) -----------------------------------------
+#
+# A gateway VM holds many JTAG cables (USB devices or a whole PCIe USB controller passed through)
+# and runs hw_server / XVC / jtagd. It relays programming and debug traffic only - it does not
+# build. Researchers' desktops reach it over the network and pick their cable by serial number.
+
+GATEWAY_EVERY = 120          # seconds between health checks of the gateways (the minute loop)
+_gateway_last = [0.0]
+
+
+def _jtag_gateway_body():
+    data = _body()
+    cluster_id = str(data.get('cluster_id') or '')
+    if not core._can_reach(cluster_id):
+        raise LookupError('Cluster not found')
+    host = str(data.get('host') or '').strip()
+    if not host or not _HOSTRE.match(host) or len(host) > 255:
+        raise ValueError('host: the address desktops dial the gateway at (name or IP)')
+    vmid = data.get('vmid')
+    try:
+        vmid = int(vmid) if vmid not in (None, '') else None
+    except (TypeError, ValueError):
+        raise ValueError('vmid: the gateway VM id')
+    if vmid is not None and not (100 <= vmid <= 999999999):
+        raise ValueError('vmid: the gateway VM id')
+    return (_text(data, 'name', 80, required=True), cluster_id, vmid, host,
+            _port_of(data, 'hw_port', BOARD_PROTOCOLS['hw_server']), _port_of(data, 'jtagd_port', BOARD_PROTOCOLS['quartus']),
+            _text(data, 'notes', 300))
+
+
+def _jtag_gateway_view(g, states=None):
+    states = states if states is not None else core._vm_states(g['cluster_id'])
+    live = states.get(int(g['vmid'])) if g.get('vmid') else None
+    boards = catalog.boards_on_gateway(g['id'])
+    mapped = {b.get('cable_serial'): b['name'] for b in boards if b.get('cable_serial')}
+    return dict(g, state=_jtag_gateway_state(g), vm=({'status': live.get('status'), 'node': live.get('node')} if live else None),
+                boards=[{'id': b['id'], 'name': b['name'], 'cable_serial': b.get('cable_serial') or '', 'protocol': b.get('protocol'),
+                         'lent': bool(b.get('attached_desktop'))} for b in boards],
+                cables=[dict(c, board=mapped.get(c.get('serial'))) for c in g.get('cables') or []])
+
+
+def _jtag_gateway_or_404(gid):
+    g = catalog.get_jtag_gateway(gid)
+    return g if g and core._can_reach(g['cluster_id']) else None
+
+
+@bp.route('/api/vlab/admin/jtag-gateways', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_jtag_gateways():
+    out, states = [], {}
+    for g in catalog.list_jtag_gateways():
+        if not core._can_reach(g['cluster_id']):
+            continue
+        if g['cluster_id'] not in states:
+            states[g['cluster_id']] = core._vm_states(g['cluster_id'])
+        out.append(_jtag_gateway_view(g, states[g['cluster_id']]))
+    return jsonify({'gateways': out, 'every': GATEWAY_EVERY})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def create_jtag_gateway():
+    try:
+        args = _jtag_gateway_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    g = catalog.save_jtag_gateway(None, *args)
+    log_audit(_user(), 'vlab.jtag_gateway.create', f"JTAG gateway '{g['name']}' {g['host']} (vm {g['vmid'] or '-'})", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)}), 201
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>', methods=['PUT'])
+@require_auth(perms=['vlab.accel.manage'])
+def update_jtag_gateway(gid):
+    old = _jtag_gateway_or_404(gid)
+    if not old:
+        return _bad('JTAG gateway not found', 404)
+    try:
+        args = _jtag_gateway_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    if args[1] != old['cluster_id'] and catalog.boards_on_gateway(gid):
+        return _bad('Boards use this gateway - it stays on its cluster', 409)
+    if any(b.get('attached_desktop') for b in catalog.boards_on_gateway(gid)) and (args[3], args[4], args[5]) != (old['host'], old['hw_port'], old['jtagd_port']):
+        return _bad('Boards of this gateway are lent - change its address after they come back', 409)
+    g = catalog.save_jtag_gateway(gid, *args)
+    log_audit(_user(), 'vlab.jtag_gateway.update', f"JTAG gateway '{g['name']}'", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>', methods=['DELETE'])
+@require_auth(perms=['vlab.accel.manage'])
+def delete_jtag_gateway(gid):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    if catalog.boards_on_gateway(gid):
+        return _bad('Boards use this gateway - move or delete them first', 409)
+    catalog.delete_jtag_gateway(gid)
+    log_audit(_user(), 'vlab.jtag_gateway.delete', f"JTAG gateway '{g['name']}' (the VM and its passthrough are left as they are)", get_client_ip())
+    return jsonify({'success': True})
+
+
+def _jtag_err(e):
+    """(message, status, code) -> the JSON answer: {error, code}; the console maps the code to its text."""
+    return jsonify({'error': e[0], 'code': e[2]}), e[1]
+
+
+def _jtag_gateway_vm(g, running=False):
+    """(mgr, node, raw config) of the gateway VM, or (None, None, (message, status, code)).
+    running: the VM must be running too (the guest agent answers only then)."""
+    if not g.get('vmid'):
+        return None, None, ('The gateway has no VM id - say which VM it is first', 400, 'NO_VMID')
+    mgr = cluster_managers.get(g['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return None, None, ('Cluster not connected', 503, 'CLUSTER')
+    live = core._vm_states(g['cluster_id']).get(int(g['vmid'])) or {}
+    if not live:
+        return None, None, (f"VM {g['vmid']} not found on the cluster", 404, 'VM_MISSING')
+    if (live.get('type') or 'qemu') != 'qemu':
+        return None, None, ('The gateway must be a virtual machine (QEMU) to take USB / PCIe devices', 400, 'NOT_QEMU')
+    if running and live.get('status') != 'running':
+        return None, None, (f"The gateway VM {g['vmid']} is {live.get('status') or 'not running'} - start it to read its cables", 409, 'VM_STOPPED')
+    node = live.get('node')
+    r = mgr.get_vm_config(node, int(g['vmid']), 'qemu')
+    if not isinstance(r, dict) or not r.get('success'):
+        return None, None, (f"Could not read the VM config: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502, 'CONFIG')
+    return mgr, node, ((r.get('config') or {}).get('raw') or {})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/passthrough', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def add_gateway_passthrough(gid):
+    """Pass a JTAG cable {kind: 'usb', usb: '03fd:0008' | '1-4.2'} or a whole PCIe USB controller
+    {kind: 'pci', pci: '0000:05:00.0'} through to the gateway VM, on the first free usbN / hostpciN.
+    USB goes on while the VM runs; a PCIe controller needs a VM restart (needs_restart)."""
+    from pegaprox.vlab import jtag_gw
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    data = _body()
+    kind = str(data.get('kind') or 'usb')
+    if kind == 'usb':
+        value = str(data.get('usb') or '').strip().lower()
+        if not _USB_ID.match(value):
+            return _bad('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
+    elif kind == 'pci':
+        value = str(data.get('pci') or '').strip().lower()
+        if not jtag_gw.valid_pci(value):
+            return _bad('pci: the USB controller address, e.g. 0000:05:00.0')
+    else:
+        return _bad("kind: 'usb' or 'pci'")
+    if any(p['kind'] == kind and p['value'] == value for p in g['passthrough']):
+        return _bad(f'{value} is passed through to this gateway already', 409)
+    mgr, node, raw = _jtag_gateway_vm(g)
+    if not mgr:
+        return _jtag_err(raw)
+    slot = jtag_gw.free_slot(raw, kind)
+    if not slot:
+        return _bad('No free slot left on the VM - pass a whole PCIe USB controller, or split the cables over another gateway', 409)
+    conf = f'host={value}' if kind == 'usb' else jtag_gw.pci_value(value, raw)
+    r = mgr.update_vm_config(node, int(g['vmid']), 'qemu', {slot: conf})
+    if not isinstance(r, dict) or not r.get('success'):
+        return _bad(f"Could not pass it through: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    g = catalog.set_jtag_gateway_passthrough(gid, g['passthrough'] + [{'slot': slot, 'kind': kind, 'value': value}])
+    log_audit(_user(), 'vlab.jtag_gateway.passthrough', f"JTAG gateway '{g['name']}' {slot} = {conf}", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g), 'slot': slot, 'needs_restart': kind == 'pci'})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/passthrough/<slot>', methods=['DELETE'])
+@require_auth(perms=['vlab.accel.manage'])
+def remove_gateway_passthrough(gid, slot):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    item = next((p for p in g['passthrough'] if p['slot'] == slot), None)
+    if not item:
+        return _bad('MOAVI Desk did not put that slot on the gateway', 404)
+    mgr, node, raw = _jtag_gateway_vm(g)
+    if not mgr:
+        return _jtag_err(raw)
+    if slot in raw:
+        r = mgr.update_vm_config(node, int(g['vmid']), 'qemu', {'delete': slot})
+        if not isinstance(r, dict) or not r.get('success'):
+            return _bad(f"Could not take it off: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    g = catalog.set_jtag_gateway_passthrough(gid, [p for p in g['passthrough'] if p['slot'] != slot])
+    log_audit(_user(), 'vlab.jtag_gateway.passthrough', f"JTAG gateway '{g['name']}' {slot} removed ({item['value']})", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/discover', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def discover_gateway_cables(gid):
+    """Read the USB devices the gateway sees (guest agent, sysfs) - JTAG cables with their serial
+    numbers, to map each cable to a board. Changes nothing on the gateway."""
+    from pegaprox.vlab import jtag_gw
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    mgr, node, raw = _jtag_gateway_vm(g, running=True)
+    if not mgr:
+        catalog.set_jtag_gateway_cables_error(gid, raw[2], raw[0])
+        return _jtag_err(raw)
+    code, out, err, why = _agent_run(mgr, node, int(g['vmid']), jtag_gw.LIST_CABLES, wait=15)
+    if why or code is None:
+        e = (f"The gateway's guest agent did not answer ({why or 'timed out'}) - install qemu-guest-agent in it and set agent: 1", 502, 'AGENT')
+    elif code != 0:
+        e = (f'Reading the cables failed: {(err or out)[:200]}', 502, 'READ_FAILED')
+    else:
+        g = catalog.set_jtag_gateway_cables(gid, jtag_gw.parse_cables(out))
+        return jsonify({'gateway': _jtag_gateway_view(g)})
+    catalog.set_jtag_gateway_cables_error(gid, e[2], e[0])
+    return _jtag_err(e)
+
+
+def _check_jtag_gateway(g, states):
+    """(ok, detail) of one gateway: the VM runs and hw_server (and jtagd when a Quartus board uses
+    it, and every XVC board's port) answers."""
+    detail = {'vm': None, 'ports': []}
+    if g.get('vmid'):
+        live = states.get(int(g['vmid'])) or {}
+        detail['vm'] = live.get('status') or 'missing'
+    protos = {b.get('protocol') for b in catalog.boards_on_gateway(g['id'])}
+    ports = [g['hw_port']] if (not protos or 'hw_server' in protos) else []
+    if 'quartus' in protos:
+        ports.append(g['jtagd_port'])
+    ports += sorted({b['port'] for b in catalog.boards_on_gateway(g['id']) if b.get('protocol') == 'xvc' and b.get('port')})
+    for port in ports:
+        ok, ms, err = _tcp_probe(g['host'], port)
+        detail['ports'].append({'port': port, 'ok': ok, 'ms': ms, 'error': err})
+    ok = (detail['vm'] in (None, 'running')) and all(p['ok'] for p in detail['ports'])
+    return ok, detail
+
+
+def gateway_tick(force=False):
+    """Check every JTAG gateway (every 2 minutes): VM running, hw_server / jtagd / XVC answering.
+    A down gateway's boards cannot be lent; alert once when one goes down and when it is back."""
+    if not force and time.time() - _gateway_last[0] < GATEWAY_EVERY:
+        return 0
+    _gateway_last[0] = time.time()
+    n, states = 0, {}
+    for g in catalog.list_jtag_gateways():
+        if g['cluster_id'] not in states:
+            states[g['cluster_id']] = core._vm_states(g['cluster_id'])
+        ok, detail = _check_jtag_gateway(g, states[g['cluster_id']])
+        catalog.mark_jtag_gateway(g['id'], ok, detail)
+        n += 1
+        if not ok and not g.get('alerted_at'):
+            why = ', '.join([f"VM {detail['vm']}"] if detail['vm'] not in (None, 'running') else []
+                            + [f"port {p['port']}" for p in detail['ports'] if not p['ok']])
+            _alert(f"JTAG 게이트웨이 응답 없음: {g['name']}", f"{g['name']} ({g['host']}): {why}. 이 게이트웨이의 보드는 대여할 수 없습니다.",
+                   {'kind': 'jtag_gateway_down', 'gateway': g['name'], 'host': g['host']})
+            catalog.mark_jtag_gateway_alerted(g['id'], store.now())
+            log_audit('system', 'vlab.jtag_gateway.down', f"JTAG gateway '{g['name']}' down: {why}", '')
+        elif ok and g.get('alerted_at'):
+            _alert(f"JTAG 게이트웨이 복구: {g['name']}", f"{g['name']} ({g['host']}) 가 다시 응답합니다.",
+                   {'kind': 'jtag_gateway_up', 'gateway': g['name'], 'host': g['host'], 'severity': 'info'})
+            catalog.mark_jtag_gateway_alerted(g['id'], None)
+            log_audit('system', 'vlab.jtag_gateway.up', f"JTAG gateway '{g['name']}' answers again", '')
+    return n
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/check', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def check_jtag_gateway(gid):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    states = core._vm_states(g['cluster_id'])
+    ok, detail = _check_jtag_gateway(g, states)
+    g = catalog.mark_jtag_gateway(gid, ok, detail)
+    return jsonify({'gateway': _jtag_gateway_view(g, states)})
 
 # --- build farm --------------------------------------------------------------------------
 
@@ -1898,7 +2382,7 @@ def rollout_golden(gid):
 def _detach_board(b):
     """Take the board off its desktop. Returns an error text or None."""
     desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board: only the grant ends
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return 'cluster not connected'

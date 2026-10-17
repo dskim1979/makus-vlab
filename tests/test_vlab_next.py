@@ -315,6 +315,50 @@ def test_board_attaches_to_a_desktop_on_its_node(env):
     assert catalog.get_board(b['id'])['attached_desktop'] is None
 
 
+def test_network_board_is_lent_without_touching_the_vm(env, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    from pegaprox.core import ha
+    _, mgr, admin, alice, bob, _ = env
+    pool = store.create_pool('보드 실습', 'dedicated', CID)
+    desk = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
+    store.set_assignment(desk['id'], 'alice')
+    usb = admin.post('/api/vlab/admin/boards', json={'name': 'ZCU102 USB', 'cluster_id': CID, 'node': 'pve1', 'usb': '03fd:0008'}).get_json()['board']
+    assert usb['target'] == 'usb'
+    bad = {'name': 'VCK190', 'cluster_id': CID, 'target': 'network'}
+    assert admin.post('/api/vlab/admin/boards', json=bad).status_code == 400                                   # no host
+    assert admin.post('/api/vlab/admin/boards', json=dict(bad, host='cab le')).status_code == 400
+    assert admin.post('/api/vlab/admin/boards', json=dict(bad, host='jtag01', protocol='openocd')).status_code == 400
+    assert admin.post('/api/vlab/admin/boards', json=dict(bad, host='jtag01', port=70000)).status_code == 400
+    assert admin.post('/api/vlab/admin/boards', json=dict(bad, target='serial', host='jtag01')).status_code == 400
+    b = admin.post('/api/vlab/admin/boards', json=dict(bad, host='jtag01.lab.local', label='랙 B-2')).get_json()['board']
+    assert (b['target'], b['host'], b['port'], b['protocol'], b['usb'], b['node']) == ('network', 'jtag01.lab.local', 3121, 'hw_server', '', '')
+    x = admin.post('/api/vlab/admin/boards', json=dict(bad, name='KV260', host='10.0.5.7', protocol='xvc')).get_json()['board']
+    assert x['port'] == 2542
+    calls = mgr.update_vm_config.call_count
+    r = admin.post(f"/api/vlab/admin/boards/{b['id']}/attach", json={'desktop_id': desk['id'], 'lease_until': '2099-01-01T09:00'})
+    assert r.status_code == 200, r.get_json()
+    conn = r.get_json()['connection']
+    assert conn['endpoint'] == 'jtag01.lab.local:3121' and 'Open New Target' in conn['howto']
+    assert mgr.update_vm_config.call_count == calls                     # nothing on the VM
+    # the USB board still fits the same desktop: the network board does not take slot usb4
+    assert admin.post(f"/api/vlab/admin/boards/{usb['id']}/attach", json={'desktop_id': desk['id']}).status_code == 200
+    mine = alice.get('/api/vlab/me/boards').get_json()['boards']
+    by = {m['name']: m for m in mine}
+    assert by['VCK190']['connection']['endpoint'] == 'jtag01.lab.local:3121' and by['ZCU102 USB']['connection'] is None
+    assert bob.get('/api/vlab/me/boards').get_json()['boards'] == []
+    assert admin.put(f"/api/vlab/admin/boards/{b['id']}", json=dict(bad, host='jtag02')).status_code == 409   # lent
+    monkeypatch.setattr(ha, 'confirm_step', lambda *a, **k: True)
+    calls = mgr.update_vm_config.call_count
+    assert nxt.board_tick('2099-01-01T09:00:01') == (1, 0)             # the loan ends; still no VM change
+    assert mgr.update_vm_config.call_count == calls
+    assert catalog.get_board(b['id'])['attached_desktop'] is None
+    assert admin.post(f"/api/vlab/admin/boards/{x['id']}/attach", json={'desktop_id': desk['id']}).status_code == 200
+    assert admin.post(f"/api/vlab/admin/boards/{x['id']}/detach").status_code == 200
+    assert mgr.update_vm_config.call_count == calls
+    listed = {l['name']: l for l in admin.get('/api/vlab/admin/boards').get_json()['boards']}
+    assert listed['KV260']['connection']['protocol'] == 'xvc' and listed['ZCU102 USB']['connection'] is None
+
+
 # --- build farm and licence servers ------------------------------------------------------
 
 def test_buildfarm_summary(env):

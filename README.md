@@ -66,7 +66,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | 접속 | RDP 우선(새 풀 기본: RDP · SPICE · 브라우저, `.rdp`는 H.264 · UDP를 mstsc가 고름, Windows는 첫 RDP 접속 때 원격 데스크톱 · 방화벽 · AVC444 · UDP를 게스트 에이전트로 설정, Linux는 xrdp가 3389에 있을 때만 — 없으면 NO_RDP로 SPICE · VNC), 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
 | 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
-| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
+| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결, 또는 네트워크 JTAG — Xilinx hw_server · XVC · Intel Quartus jtagd를 host:port로 공유해 VM 설정 변경 없이 대여, RDP · Warpgate · SPICE 어느 화면 프로토콜에서나 사용([docs/board-lab-network-jtag.md](docs/board-lab-network-jtag.md)) · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
 | 빌드 결과물 · CI | 작업이 끝나면 비트스트림 · 리포트 · 로그를 NAS `artifacts/<사용자>/<작업>`에 보관 · 내려받기(반출 규칙 적용), GitLab CI · Jenkins 연결(토큰 · `POST /api/vlab/ci/jobs` · 상태 · 결과물) |
 | 카드 · 보드 예약 | 포털에서 GPU · NPU · FPGA 카드나 JTAG 보드를 내 데스크톱에 쓸 시간 예약(수량 · 대여 중 · 데스크톱 겹침 검사, 승인, 시작 때 자동 대여 · 끝에 반납) |
 | 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림, 기능별 라이선스 사용 · 대기 · 거절 |
