@@ -66,6 +66,7 @@ jobs:
           pw="$(openssl rand -hex 24)"
           echo "::add-mask::$pw"
           echo "WG_ADMIN_PASSWORD=$pw" >> "$GITHUB_ENV"
+          mkdir -p "$WG_DIR/data"   # unattended-setup does not create the data path itself
           WARPGATE_ADMIN_PASSWORD="$pw" "$WG_DIR/warpgate" --config "$WG_DIR/warpgate.yaml" unattended-setup \
             --data-path "$WG_DIR/data" --http-port "$WG_HTTP_PORT" --ssh-port "$WG_SSH_PORT" --rdp-port "$WG_RDP_PORT" \
             --record-sessions --host-key-verification auto-accept --external-host 127.0.0.1
