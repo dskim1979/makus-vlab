@@ -315,7 +315,7 @@ def _api(method, path, token, base_url, verify_tls, body=None, timeout=15):
 
 def _call(cfg, method, path, body=None):
     if not cfg.get('base_url') or not cfg.get('admin_token'):
-        raise WarpgateError('Warpgate가 설정되지 않았습니다')
+        raise WarpgateError('보안 게이트웨이가 설정되지 않았습니다')
     code, data = _api(method, path, cfg['admin_token'], cfg['base_url'], cfg.get('verify_tls'), body)
     if code >= 400:
         raise WarpgateError(f'Warpgate API {method} {path} -> {code}: {str(data)[:200]}', code)

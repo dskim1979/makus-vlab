@@ -106,7 +106,7 @@ def test_warpgate():
 def warpgate_sessions():
     cfg = wg.config()
     if not cfg['base_url']:
-        return _bad('Warpgate가 설정되지 않았습니다', 409)
+        return _bad('보안 게이트웨이가 설정되지 않았습니다', 409)
     return jsonify({'url': wg.recording_url(cfg, request.args.get('session_id'))})
 
 
@@ -157,15 +157,15 @@ def my_ssh_keys():
 def add_my_ssh_key():
     """내 공개키를 Warpgate에 등록(엔진은 저장하지 않음). 개인키·잘못된 형식은 거부한다."""
     if not wg.is_enabled():
-        return jsonify({'error': 'Warpgate 게이트웨이가 켜져 있지 않습니다', 'code': 'WG_OFF'}), 409
+        return jsonify({'error': '보안 게이트웨이가 꺼져 있습니다', 'code': 'WG_OFF'}), 409
     data = _body()
     key = str(data.get('openssh_public_key') or '').strip()
     label = str(data.get('label') or '').strip() or 'MOAVI Desk'
     # codes for the screens to word (PRIVATE_KEY / BAD_PUBLIC_KEY); the key itself is never echoed
     if wg.looks_like_private_key(key):
-        return jsonify({'error': '개인키는 올릴 수 없습니다. .pub 파일(공개키) 한 줄만 넣으세요.', 'code': 'PRIVATE_KEY'}), 400
+        return jsonify({'error': '공개키만 올리세요.', 'code': 'PRIVATE_KEY'}), 400
     if not wg.is_public_key(key):
-        return jsonify({'error': 'OpenSSH 공개키 한 줄(ssh-ed25519 ...)을 넣으세요.', 'code': 'BAD_PUBLIC_KEY'}), 400
+        return jsonify({'error': '공개키 형식이 아닙니다.', 'code': 'BAD_PUBLIC_KEY'}), 400
     cfg = wg.config(secret=True)
     try:
         wg.add_user_key(cfg, _user(), label, key)
@@ -181,7 +181,7 @@ def add_my_ssh_key():
 @require_auth(perms=['vlab.desk'])
 def delete_my_ssh_key(key_id):
     if not wg.is_enabled():
-        return jsonify({'error': 'Warpgate 게이트웨이가 켜져 있지 않습니다', 'code': 'WG_OFF'}), 409
+        return jsonify({'error': '보안 게이트웨이가 꺼져 있습니다', 'code': 'WG_OFF'}), 409
     cfg = wg.config(secret=True)
     try:
         wg.delete_user_key(cfg, _user(), key_id)
@@ -230,7 +230,7 @@ def _desktop_target_options(cfg, proto, ip):
                                  cfg.get('rdp_nla_password') or '', interactive_logon=True)
 
 
-WG_DOWN_TEXT = 'Warpgate에 연결할 수 없습니다. 잠시 뒤 다시 시도하거나 관리자에게 문의하세요.'
+WG_DOWN_TEXT = '보안 게이트웨이에 연결할 수 없습니다. 잠시 뒤 다시 시도하세요.'
 
 
 def _wg_down(cfg, what, desk, e):
@@ -305,7 +305,7 @@ def my_desktop_warpgate(desktop_id):
     from pegaprox.api.vlab_next import _guest_ipv4, rdp_listening, rdp_prepare, _guest_os, shared_member
 
     if not wg.is_enabled():
-        return jsonify({'error': 'Warpgate 게이트웨이가 켜져 있지 않습니다', 'code': 'WG_OFF'}), 409
+        return jsonify({'error': '보안 게이트웨이가 꺼져 있습니다', 'code': 'WG_OFF'}), 409
     proto = (_body().get('protocol') or 'rdp').lower()
     if proto not in wg.TARGET_KINDS:
         return _bad('protocol must be one of ' + ', '.join(wg.TARGET_KINDS))
@@ -355,7 +355,7 @@ def my_desktop_warpgate(desktop_id):
     except Exception as e:  # 네트워크/TLS
         return jsonify({'error': str(e)[:200], 'code': 'WG_UNREACHABLE'}), 502
     if not secret:
-        return jsonify({'error': 'Warpgate did not return a ticket secret', 'code': 'WG_API'}), 502
+        return jsonify({'error': '보안 게이트웨이 응답 오류', 'code': 'WG_API'}), 502
 
     log_audit(username, 'vlab.warpgate.connect', f"{proto.upper()} to '{desk['name']}' via Warpgate", get_client_ip())
     return jsonify({'type': 'warpgate', 'connection': wg.connection_coordinates(cfg, proto, target_name, secret)})

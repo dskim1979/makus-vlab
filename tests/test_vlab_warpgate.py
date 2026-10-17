@@ -489,7 +489,7 @@ def test_rdp_file_fails_closed_when_warpgate_is_down(env, fake_wg, monkeypatch):
     monkeypatch.setattr(wg, '_api', lambda *a, **k: (502, 'down'))
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
     body = r.get_json()
-    assert r.status_code == 503 and body['code'] == 'WG_DOWN' and 'Warpgate' in body['error']
+    assert r.status_code == 503 and body['code'] == 'WG_DOWN' and '보안 게이트웨이' in body['error']
     assert 'rdp' not in body and '10.0.0.31' not in str(body)      # no direct .rdp around the bastion
 
 

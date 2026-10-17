@@ -136,8 +136,8 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
   Guacamole가 서비스한다.
 - **Warpgate로 전환한 경로는 장애 시 닫힌다(fail closed)**: `web_rdp_provider=warpgate` 이거나
   `rdp_via_warpgate` 가 켜진 상태에서 Warpgate가 응답하지 않으면, 엔진은 직접 `.rdp`나 Guacamole로 몰래
-  돌리지 않고 `503 WG_DOWN`("Warpgate에 연결할 수 없습니다. 잠시 뒤 다시 시도하거나 관리자에게
-  문의하세요.")을 돌려준다. 몰래 돌리면 bastion을 우회하고, 직접 접속을 막은 현장에서는 어차피 실패한다.
+  돌리지 않고 `503 WG_DOWN`("보안 게이트웨이에 연결할 수 없습니다. 잠시 뒤 다시 시도하세요.")을 돌려준다
+  (사용자 화면에는 Warpgate 대신 "보안 게이트웨이"로 표시). 몰래 돌리면 bastion을 우회하고, 직접 접속을 막은 현장에서는 어차피 실패한다.
   관리자가 **"Warpgate 장애 시 직접 접속 허용"**(`allow_direct_fallback`, 기본 꺼짐, 보안 약화)을 켠
   경우에만 그 접속을 직접 `.rdp`/Guacamole로 열고 감사 기록(`vlab.warpgate.fallback`)을 남긴다.
 - `GET /api/vlab/me/warpgate` 가 `enabled`·`web_rdp_provider`를 주어 포털이 무엇을 보일지 정한다.
