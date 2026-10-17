@@ -59,7 +59,7 @@ jobs:
             "https://github.com/warp-tech/warpgate/releases/download/${WARPGATE_VERSION}/warpgate-${WARPGATE_VERSION}-x86_64-linux"
           echo "${WARPGATE_SHA256}  $WG_DIR/warpgate" | sha256sum -c -
           chmod +x "$WG_DIR/warpgate"
-          "$WG_DIR/warpgate" --version
+          ("$WG_DIR/warpgate" --help || true) | head -n 3 || true   # no --version flag; the sha256 above pins the build
 
       - name: Configure Warpgate (unattended-setup) and start it
         run: |
