@@ -187,6 +187,13 @@ def _where(desk):
     return mgr, live.get('node') or desk['node'], None
 
 
+def _exec_blocked(error_text):
+    """The guest agent refuses guest-exec by its own config (RHEL / Rocky / Alma default): the
+    template must allow it (/etc/sysconfig/qemu-ga); asking again does not help."""
+    t = str(error_text or '').lower()
+    return 'guest-exec' in t and ('disabled' in t or 'not allowed' in t)
+
+
 def join_desktop(desk, restart=False, check_only=False):
     """Join (or only ask) one desktop. Returns the stored join row."""
     from pegaprox.api import vlab_next as nx
@@ -218,7 +225,8 @@ def join_desktop(desk, restart=False, check_only=False):
     secret = None
     if code is None:
         if e:
-            return directory.record_join(desk['id'], 'failed', 'AGENT_ERROR', e, os_kind=os_kind)
+            code_txt = 'AGENT_EXEC_DISABLED' if _exec_blocked(e) else 'AGENT_ERROR'
+            return directory.record_join(desk['id'], 'failed', code_txt, e, os_kind=os_kind)
         return directory.record_join(desk['id'], 'pending', 'PENDING', 'still running on the guest', os_kind=os_kind)
     got = nas.parse_output(out)
     computer, domain = got.get('computer', ''), got.get('domain', '')
