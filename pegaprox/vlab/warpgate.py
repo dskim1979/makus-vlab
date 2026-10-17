@@ -229,6 +229,12 @@ def delete_mapping(ref):
 
 # --- pure payload / coordinate helpers (네트워크 없이 테스트 가능) -----------------------------
 
+def target_description(label, proto):
+    """What people read: the portal desktop name and the protocol, e.g. "lab-pc-01 (SSH)" - the browser
+    tab of a web session and Warpgate's own target list show it instead of the internal target name."""
+    return f"{str(label or '').strip() or 'desktop'} ({proto.upper()})"
+
+
 def target_name_for(ref, label):
     """Warpgate 대상 이름: MOAVI Desk ref를 넣어 충돌 없이 되찾을 수 있게 한다."""
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', str(label or '')).strip('-').lower() or 'desktop'
@@ -482,7 +488,8 @@ def _sync_target(cfg, ref, label, proto, options, role_id=None):
     ref = target_ref(ref, proto)
     name = target_name_for(ref, label)
     mp = get_mapping(ref)
-    body = {'name': name, 'options': options, 'ticket_requests_disabled': False,
+    body = {'name': name, 'description': target_description(label, proto), 'options': options,
+            'ticket_requests_disabled': False,
             'ticket_require_approval': False, 'require_approval': False}
     uuid_val = ''
     if mp and mp['target_uuid']:
@@ -534,7 +541,11 @@ def _mapping_of_target(target_uuid):
 def _rename_target(cfg, mapping, new_name):
     """Rename a mapped Warpgate target, keeping its options as Warpgate has them."""
     t = _call(cfg, 'GET', f"/targets/{mapping['target_uuid']}") or {}
-    body = {'name': new_name, 'options': t.get('options')}
+    # TargetDataRequest needs the approval flags too (found reviewing against the API schema)
+    body = {'name': new_name, 'options': t.get('options'),
+            'ticket_requests_disabled': bool(t.get('ticket_requests_disabled', False)),
+            'ticket_require_approval': bool(t.get('ticket_require_approval', False)),
+            'require_approval': bool(t.get('require_approval', False))}
     if t.get('description'):
         body['description'] = t['description']
     _call(cfg, 'PUT', f"/targets/{mapping['target_uuid']}", body)

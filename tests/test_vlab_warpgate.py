@@ -1363,3 +1363,33 @@ def test_an_image_without_the_file_panel_still_gets_the_target(env, fake_wg, mon
     _ssh_connect(env, monkeypatch, 'both')
     tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
     assert 'web_file_transfer' not in tgt['options']
+
+
+def test_targets_carry_the_portal_desktop_name_as_their_description(env, fake_wg, monkeypatch):
+    """The browser tab of a web session (Warpgate fork) shows the description, not moavi-...-desk_x-ssh."""
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    sent = [(m, b['description']) for (m, p, b) in fake_wg.calls if p.startswith('/targets') and isinstance(b, dict) and 'options' in b]
+    assert ('POST', 'win-01 (SSH)') in sent and ('POST', 'win-01 (RDP)') in sent and ('PUT', 'win-01 (RDP)') in sent
+
+
+def test_renaming_an_old_target_sends_a_full_target_request(env, fake_wg):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    wg.save_mapping('dsk_old-ssh', 'desktop', 'tgt-old', 'moavi-old-dsk_old', 'ssh', '10.0.0.4', 22)
+    fake_wg.targets['moavi-old-dsk_old'] = 'tgt-old'
+    fake_wg.kinds['tgt-old'] = 'Ssh'
+    wg.sync_target(cfg, 'dsk_old', 'old', 'rdp', wg.rdp_target_options('10.0.0.4', 3389, 'svc', 'pw'))
+    put = [b for (m, p, b) in fake_wg.calls if m == 'PUT' and p == '/targets/tgt-old'][-1]
+    assert put['name'] == 'moavi-old-dsk_old-ssh'
+    assert {'ticket_requests_disabled', 'ticket_require_approval', 'require_approval'} <= set(put)
