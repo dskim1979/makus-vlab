@@ -263,6 +263,21 @@ Warpgate 관리자 권한이 됐다. 지금은:
   provider `moavi-desk` + `<그 이름>@moavi-desk.invalid` SSO 자격, `moavi-desk` 역할. 그 사용자들에 등록했던 공개키는
   남지만 역할이 없어 어떤 대상에도 못 붙는다. 연구자는 포털에서 공개키를 다시 등록한다(`moavi-<아이디>`로 감).
 
+## 4-8. Windows 데스크톱의 NLA 서비스 계정 자동 설정 (`moavi-nla`)
+
+실환경에서 발견: 콘솔에 NLA 계정이 없으면 Warpgate → Windows RDP가 CredSSP `STATUS_LOGON_FAILURE`로 실패했다.
+지금은 Warpgate가 Windows 데스크톱으로 RDP를 열기 전(포털 보안 게이트웨이 연결, Warpgate .rdp, Warpgate 브라우저 RDP)
+엔진이 게스트 에이전트(SYSTEM PowerShell)로:
+- 로컬 계정 `moavi-nla`를 만들거나 비밀번호를 다시 넣는다(비밀번호 만료 없음). 비밀번호는 엔진이 데스크톱마다
+  무작위로 만들어 `vlab_warpgate_nla`에 봉인하고, **stdin으로만** 넘긴다(명령줄·로그·사용자 응답에 없음).
+- Remote Desktop Users(`S-1-5-32-555`)에 넣고, 로컬 콘솔 로그온은 막는다(SeDenyInteractiveLogonRight).
+- `fPromptForPassword=1` — 세션은 Windows 로그온 화면에서 멈추고 사용자가 **자기 계정**으로 로그인한다.
+- 도메인 컨트롤러는 건너뛴다(로컬 계정 없음). 도메인 구성원은 로컬 계정으로 동작하지만 GPO가
+  `fPromptForPassword`를 덮을 수 있다.
+- 그 데스크톱의 Warpgate RDP 대상에 이 계정을 넣는다. 콘솔의 전역 `rdp_nla_user/password`가 있으면 그것이 우선.
+- 6시간마다 다시 확인하고, 초기화(기본 스냅숏 되돌리기)·재생성·삭제·배정 변경 때 비밀번호를 버려 다음 연결에서
+  새로 만든다. 사용자·데스크톱 비밀번호가 아니라 이 데스크톱 전용 서비스 자격이다.
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.

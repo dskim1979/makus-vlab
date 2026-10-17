@@ -68,9 +68,17 @@ _SCHEMA = (
     )''',
     # one-off upgrade steps that went through (migrate_legacy_users)
     '''CREATE TABLE IF NOT EXISTS vlab_warpgate_state (key TEXT PRIMARY KEY, value TEXT)''',
+    # a Windows desktop's own RDP NLA service account (moavi-nla): its random password, sealed;
+    # applied_at = when the account was last made / set on this VM
+    '''CREATE TABLE IF NOT EXISTS vlab_warpgate_nla (
+        desktop_id TEXT PRIMARY KEY,
+        vmid INTEGER NOT NULL DEFAULT 0,
+        password_encrypted TEXT NOT NULL DEFAULT '',
+        applied_at TEXT
+    )''',
 )
 
-TABLES = ('vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state')
+TABLES = ('vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla')
 
 _lock = threading.Lock()
 
@@ -573,7 +581,9 @@ def remove_target(cfg, ref, proto=None):
 def forget_desktop(desktop_id, background=True):
     """A desktop was deleted or taken from its user: remove its Warpgate targets (every protocol) so
     they do not pile up and nobody keeps a way in. Best effort, off the request thread; failures are
-    logged and the mappings stay for the next try."""
+    logged and the mappings stay for the next try. Its NLA account password is dropped too (a new
+    one is set on the next connect)."""
+    nla_forget(desktop_id)
     if not any(get_mapping(target_ref(desktop_id, p)) for p in TARGET_KINDS) or not is_enabled():
         return
     cfg = config(secret=True)
@@ -805,3 +815,107 @@ def start_auto_connect(attempts=30, wait=10):
     t = threading.Thread(target=run, name='vlab-wg-autoconnect', daemon=True)
     t.start()
     return t
+
+
+# --- a Windows desktop's own RDP NLA service account ------------------------------------
+#
+# Warpgate's RDP target needs a password that passes the desktop's network level authentication
+# (CredSSP). It is not the user's: each Windows desktop gets a local account moavi-nla with a random
+# password the engine makes, seals and hands only to that desktop's Warpgate target. The desktop is
+# set to ask for the password at its logon screen anyway (fPromptForPassword), so nobody is signed in
+# as moavi-nla - the user signs in with their own account. A console-wide rdp_nla_user/password, when
+# set, still wins.
+
+NLA_USER = 'moavi-nla'
+NLA_REAPPLY = 6 * 3600     # make sure again after this long (a reverted disk loses the account)
+
+
+def _nla_row(desktop_id):
+    r = db().query_one('SELECT * FROM vlab_warpgate_nla WHERE desktop_id = ?', (desktop_id,))
+    return dict(r) if r else None
+
+
+def nla_password(desktop_id, vmid):
+    """The desktop's NLA password: made once per desktop and VM (a recreated VM gets a new one), sealed.
+    Meets Windows' complexity rules."""
+    import secrets
+    from pegaprox.core.db import get_db
+    r = _nla_row(desktop_id)
+    if r and int(r['vmid']) == int(vmid) and r['password_encrypted']:
+        pw = _unseal(r['password_encrypted'])
+        if pw:
+            return pw
+    pw = 'Mv1!' + secrets.token_urlsafe(24)
+    db().execute('INSERT OR REPLACE INTO vlab_warpgate_nla (desktop_id, vmid, password_encrypted, applied_at) '
+                 'VALUES (?, ?, ?, NULL)', (desktop_id, int(vmid), get_db()._encrypt(pw)))
+    return pw
+
+
+def nla_needs_apply(desktop_id, vmid):
+    from datetime import datetime, timezone
+    r = _nla_row(desktop_id)
+    if not r or int(r['vmid']) != int(vmid) or not r['applied_at']:
+        return True
+    try:
+        at = datetime.fromisoformat(r['applied_at'])
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - at).total_seconds() > NLA_REAPPLY
+    except Exception:
+        return True
+
+
+def nla_mark_applied(desktop_id):
+    db().execute('UPDATE vlab_warpgate_nla SET applied_at = ? WHERE desktop_id = ?', (now(), desktop_id))
+
+
+def nla_applied_credentials(desktop_id, vmid):
+    """(user, password) when the account is on this VM, else None."""
+    r = _nla_row(desktop_id)
+    if not r or int(r['vmid']) != int(vmid) or not r['applied_at']:
+        return None
+    pw = _unseal(r['password_encrypted'])
+    return (NLA_USER, pw) if pw else None
+
+
+def nla_forget(desktop_id):
+    """The desktop was reset, recreated, deleted or reassigned: a new password next time."""
+    db().execute('DELETE FROM vlab_warpgate_nla WHERE desktop_id = ?', (desktop_id,))
+
+
+RDP_USERS_SID = 'S-1-5-32-555'
+RDP_TS_KEY = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+
+def nla_account_script():
+    """PowerShell, as SYSTEM through the guest agent; the password comes on stdin (never the command
+    line). Makes / updates the local account moavi-nla (password never expires), puts it in Remote
+    Desktop Users, denies it local console logon, and has RDP always ask for the password at the
+    logon screen. Skips a domain controller (no local accounts there). Prints nla=ok / nla=dc."""
+    return '\n'.join([
+        "$ErrorActionPreference = 'Stop'",
+        "if ((Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4) { 'nla=dc'; exit 0 }",
+        "$pw = [Console]::In.ReadToEnd().Trim()",
+        "if (-not $pw) { 'nla=nopassword'; exit 2 }",
+        "$sec = ConvertTo-SecureString $pw -AsPlainText -Force",
+        f"$u = Get-LocalUser -Name '{NLA_USER}' -ErrorAction SilentlyContinue",
+        f"if (-not $u) {{ New-LocalUser -Name '{NLA_USER}' -Password $sec -PasswordNeverExpires -AccountNeverExpires "
+        "-UserMayNotChangePassword -Description 'MOAVI Desk security gateway (NLA only, no sign-in)' | Out-Null }",
+        f"else {{ Set-LocalUser -Name '{NLA_USER}' -Password $sec -PasswordNeverExpires $true; Enable-LocalUser -Name '{NLA_USER}' }}",
+        f"$sid = (Get-LocalUser -Name '{NLA_USER}').SID.Value",
+        f"$m = @(Get-LocalGroupMember -SID '{RDP_USERS_SID}' -ErrorAction SilentlyContinue | Where-Object {{ $_.SID.Value -eq $sid }})",
+        f"if ($m.Count -eq 0) {{ Add-LocalGroupMember -SID '{RDP_USERS_SID}' -Member $sid }}",
+        f"$ts = '{RDP_TS_KEY}'",
+        'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }',
+        "Set-ItemProperty -Path $ts -Name 'fPromptForPassword' -Value 1 -Type DWord",
+        # no console logon for it (the RDP session still asks for the user's own account)
+        "try { $cfg = Join-Path $env:TEMP 'moavi-nla.inf'; $sdb = Join-Path $env:TEMP 'moavi-nla.sdb'",
+        "  secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null; $lines = @(Get-Content $cfg)",
+        "  $has = $lines | Where-Object { $_ -like 'SeDenyInteractiveLogonRight*' }",
+        "  if (-not $has -or $has -notlike \"*$sid*\") {",
+        "    if ($has) { $lines = $lines | ForEach-Object { if ($_ -like 'SeDenyInteractiveLogonRight*') { \"$_,*$sid\" } else { $_ } } }",
+        "    else { $lines = $lines | ForEach-Object { $_; if ($_ -eq '[Privilege Rights]') { \"SeDenyInteractiveLogonRight = *$sid\" } } }",
+        "    Set-Content -Path $cfg -Value $lines -Encoding Unicode",
+        "    secedit /configure /db $sdb /cfg $cfg /areas USER_RIGHTS | Out-Null }",
+        "  Remove-Item $cfg, $sdb -ErrorAction SilentlyContinue } catch { }",
+        "'nla=ok'", 'exit 0']) + '\n'

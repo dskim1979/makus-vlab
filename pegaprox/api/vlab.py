@@ -2538,6 +2538,12 @@ def _reset_one(desk):
     r = mgr.rollback_snapshot(node, int(desk['vmid']), desk['vm_type'], desk['base_snap'])
     if not isinstance(r, dict) or not r.get('success'):
         return str((r or {}).get('error') if isinstance(r, dict) else r) or 'rollback failed'
+    # the base has no moavi-nla account (or an older password): a new one on the next Warpgate RDP
+    try:
+        from pegaprox.vlab.warpgate import nla_forget
+        nla_forget(desk['id'])
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate NLA reset for {desk['name']}: {str(e)[:200]}")
     policy = _gpu_policy((store.get_pool(desk['pool_id']) or {}).get('settings'))
     if policy:
         e = _apply_gpu(desk, node, policy)

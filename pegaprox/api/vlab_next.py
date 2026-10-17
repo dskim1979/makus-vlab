@@ -1810,8 +1810,13 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     port = 3389
     pol = core.pool_policy.effective((pool or {}).get('settings'))
     os_kind = _guest_os(mgr, node, vmid)
-    if os_kind == 'windows' and pol['rdp_tune']:
-        rdp_prepare(desk, mgr, node)
+    if os_kind == 'windows':
+        if pol['rdp_tune']:
+            rdp_prepare(desk, mgr, node)
+        # Warpgate RDP (file or browser): the desktop's own NLA service account first
+        from pegaprox.api.vlab_warpgate import prepare_windows_nla, warpgate_serves_rdp
+        if warpgate_serves_rdp(protocol):
+            prepare_windows_nla(desk, mgr, node)
     elif os_kind == 'linux' and not rdp_listening(ip, port):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)

@@ -347,7 +347,7 @@ SYNC_TABLES = (
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
-    'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state',
+    'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
     # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
     'vlab_wg_oidc',
 )
@@ -420,6 +420,7 @@ ENCRYPTED_COLUMNS = {
     'vlab_ide_sessions': ('token_encrypted',),
     'vlab_warpgate': ('admin_token_encrypted', 'rdp_nla_password_encrypted'),
     'vlab_wg_oidc': ('private_key_encrypted',),
+    'vlab_warpgate_nla': ('password_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 

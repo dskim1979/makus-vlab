@@ -1150,3 +1150,110 @@ def test_migration_takes_back_only_what_the_engine_put_on_old_users(env, fake_wg
     # once is enough
     fake_wg.sso['old-alice'] = [{'id': 'c9', 'provider': 'moavi-desk', 'email': 'alice@moavi-desk.invalid'}]
     assert wg.migrate_legacy_users(cfg) == (0, 0)
+
+
+# --- a Windows desktop's own RDP NLA service account (moavi-nla) ---------------------------
+
+def _configure_no_nla(admin):
+    return admin.put('/api/vlab/admin/warpgate', json={
+        'base_url': 'https://wg.example', 'admin_token': 'secret-admin-token',
+        'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True})
+
+
+@pytest.fixture
+def agent(monkeypatch):
+    """The guest agent: records what ran and answers like the script would."""
+    import pegaprox.api.vlab_next as nxt
+    runs = []
+    reply = {'value': (0, 'nla=ok\r\n', '', '')}
+
+    def run(mgr, node, vmid, command, stdin=None, wait=0):
+        runs.append({'vmid': vmid, 'command': command, 'stdin': stdin})
+        return reply['value']
+    monkeypatch.setattr(nxt, '_agent_run', run)
+    return runs, reply
+
+
+def test_nla_password_is_per_desktop_sealed_and_new_for_a_new_vm(env, db):
+    pw = wg.nla_password('dsk_a', 300)
+    assert wg.nla_password('dsk_a', 300) == pw and wg.nla_password('dsk_b', 301) != pw
+    assert len(pw) >= 20 and any(c.isupper() for c in pw) and any(c.islower() for c in pw) and any(c.isdigit() for c in pw)
+    row = wg.db().query_one('SELECT * FROM vlab_warpgate_nla WHERE desktop_id = ?', ('dsk_a',))
+    assert row['password_encrypted'] and pw not in row['password_encrypted']
+    assert wg.nla_password('dsk_a', 999) != pw                       # the VM was recreated
+    wg.nla_forget('dsk_b')
+    assert wg.db().query_one('SELECT * FROM vlab_warpgate_nla WHERE desktop_id = ?', ('dsk_b',)) is None
+
+
+def test_nla_script_takes_the_password_on_stdin_only():
+    s = wg.nla_account_script()
+    assert '[Console]::In.ReadToEnd()' in s and 'moavi-nla' in s
+    assert "fPromptForPassword' -Value 1" in s and 'S-1-5-32-555' in s
+    assert 'DomainRole -ge 4' in s and 'PasswordNeverExpires' in s and 'SeDenyInteractiveLogonRight' in s
+
+
+def test_windows_connect_sets_up_the_nla_account_and_warpgate_uses_it(env, fake_wg, agent, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    runs, _reply = agent
+    _, _, admin, alice, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    assert r.status_code == 200, r.get_json()
+    pw = wg.nla_password(d['id'], d['vmid'])
+    assert len(runs) == 1 and runs[0]['stdin'].strip() == pw
+    assert all(pw not in part for part in runs[0]['command'])       # never on the command line
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert tgt['options']['username'] == 'moavi-nla' and tgt['options']['auth']['password'] == pw
+    assert tgt['options']['interactive_logon'] is True
+    assert pw not in json.dumps(r.get_json())                       # never to the user
+    # the next connect does not run it again (until NLA_REAPPLY)
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    assert len(runs) == 1
+
+
+def test_a_failed_nla_setup_is_not_remembered(env, fake_wg, agent, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    from pegaprox.api import vlab_warpgate as api_wg
+    runs, reply = agent
+    _, mgr, admin, _, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    reply['value'] = (None, '', '', 'guest agent refused')
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is False
+    assert wg.nla_applied_credentials(d['id'], d['vmid']) is None
+    reply['value'] = (0, 'nla=dc', '', '')                            # a domain controller: no local account
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is False and len(runs) == 2
+    reply['value'] = (0, 'nla=ok', '', '')
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is True
+    assert wg.nla_applied_credentials(d['id'], d['vmid'])[0] == 'moavi-nla'
+
+
+def test_the_console_nla_account_still_wins(env, fake_wg, agent):
+    from pegaprox.api import vlab_warpgate as api_wg
+    runs, _reply = agent
+    _, mgr, admin, _, _ = env
+    _configure(admin)                                                # sets rdp_nla_user / password
+    _pool, d = _assign()
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is False and runs == []
+    opts = api_wg._desktop_target_options(wg.config(secret=True), 'rdp', '10.0.0.31', d)
+    assert opts['username'] == 'moavi-nla' and opts['auth']['password'] == 'nlapw'
+
+
+def test_reset_and_delete_drop_the_nla_password(env, fake_wg, agent, monkeypatch):
+    from pegaprox.api import vlab as core_api
+    from pegaprox.api import vlab_warpgate as api_wg
+    _, mgr, admin, _, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is True
+    first = wg.nla_password(d['id'], d['vmid'])
+    mgr.rollback_snapshot.return_value = {'success': True}
+    monkeypatch.setattr(core_api, '_live_node', lambda desk: ({'status': 'running'}, 'pve1'))
+    assert core_api._reset_one(dict(d, base_snap='base')) is None
+    assert wg.nla_applied_credentials(d['id'], d['vmid']) is None    # set again on the next connect
+    assert wg.nla_password(d['id'], d['vmid']) != first
+    store.remove_desktop(d['id'])
+    assert wg.db().query_one('SELECT * FROM vlab_warpgate_nla WHERE desktop_id = ?', (d['id'],)) is None

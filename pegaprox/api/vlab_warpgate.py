@@ -223,15 +223,57 @@ def my_ssh_config():
 
 # --- portal connect ----------------------------------------------------------------------
 
-def _desktop_target_options(cfg, proto, ip):
+def _desktop_target_options(cfg, proto, ip, desk=None):
     """프로토콜별 Warpgate 대상 옵션. RDP는 interactive_logon=True(자동 로그인 안 함); NLA 서비스
-    계정 비번은 설정의 것(사용자 비번 아님). VNC는 None 인증."""
+    계정은 콘솔 설정의 것이 있으면 그것, 없으면 그 Windows 데스크톱의 moavi-nla(엔진이 만든 무작위
+    비번, prepare_windows_nla) - 사용자 비번이 아니다. VNC는 None 인증."""
     if proto == 'ssh':
         return wg.ssh_target_options(ip, 22, 'moavi')
     if proto == 'vnc':
         return wg.vnc_target_options(ip, int(cfg['vnc_port']))
-    return wg.rdp_target_options(ip, 3389, cfg.get('rdp_nla_user') or 'moavi-nla',
-                                 cfg.get('rdp_nla_password') or '', interactive_logon=True)
+    user, pw = cfg.get('rdp_nla_user') or '', cfg.get('rdp_nla_password') or ''
+    if not (user and pw) and desk:
+        own = wg.nla_applied_credentials(desk['id'], desk['vmid'])
+        if own:
+            user, pw = own
+    return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True)
+
+
+def warpgate_serves_rdp(protocol):
+    """Will this connect go through Warpgate: the .rdp (rdp_via_warpgate) or browser RDP
+    (web_rdp_provider=warpgate)?"""
+    if not wg.is_enabled():
+        return False
+    cfg = wg.config()
+    return bool(cfg['rdp_via_warpgate']) if protocol == 'rdp' else cfg['web_rdp_provider'] == 'warpgate'
+
+
+def prepare_windows_nla(desk, mgr, node, wait=25):
+    """Before Warpgate opens RDP to a Windows desktop: its own NLA account moavi-nla, made / refreshed
+    through the guest agent (password on stdin). Skipped when the console sets a global NLA account or
+    Warpgate is off. True when the desktop's own account is ready. Never raises."""
+    if not wg.is_enabled():
+        return False
+    cfg = wg.config(secret=True)
+    if cfg.get('rdp_nla_user') and cfg.get('rdp_nla_password'):
+        return False
+    if not wg.nla_needs_apply(desk['id'], desk['vmid']):
+        return True
+    from pegaprox.api.vlab_next import _agent_run
+    pw = wg.nla_password(desk['id'], desk['vmid'])
+    try:
+        code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                        '-ExecutionPolicy', 'Bypass', '-Command', wg.nla_account_script()],
+                                        stdin=pw + '\n', wait=wait)
+    except Exception as ex:
+        code, out, e = None, '', str(ex)[:200]
+    if code == 0 and 'nla=ok' in (out or ''):
+        wg.nla_mark_applied(desk['id'])
+        log_audit('system', 'vlab.warpgate.nla', f"{desk['name']}: RDP NLA service account {wg.NLA_USER} set", '')
+        return True
+    logging.warning(f"[VLAB] Warpgate NLA account on {desk.get('name')} not set: "
+                    f"{e or (out or '').strip()[:80] or f'exit {code}'}")
+    return False
 
 
 WG_DOWN_TEXT = '보안 게이트웨이에 연결할 수 없습니다. 잠시 뒤 다시 시도하세요.'
@@ -268,7 +310,7 @@ def browser_rdp_via_warpgate(desk, username, ip):
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
         target_uuid, _name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
-                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
+                                            _desktop_target_options(cfg, 'rdp', ip, desk), role_id)
     except Exception as e:
         return _wg_down(cfg, 'browser RDP', desk, e)
     log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate (web UI)", get_client_ip())
@@ -291,7 +333,7 @@ def rdp_answer_via_warpgate(desk, username, ip, pol):
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
         _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
-                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
+                                            _desktop_target_options(cfg, 'rdp', ip, desk), role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
         if not secret:
             raise wg.WarpgateError('Warpgate did not return a ticket secret')
@@ -339,9 +381,12 @@ def my_desktop_warpgate(desktop_id):
         return jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409
 
     if proto == 'rdp':
-        if _guest_os(mgr, node, int(desk['vmid'])) == 'windows' and pol['rdp_tune']:
-            rdp_prepare(desk, mgr, node)
-        elif _guest_os(mgr, node, int(desk['vmid'])) == 'linux' and not rdp_listening(ip, 3389):
+        os_kind = _guest_os(mgr, node, int(desk['vmid']))
+        if os_kind == 'windows':
+            if pol['rdp_tune']:
+                rdp_prepare(desk, mgr, node)
+            prepare_windows_nla(desk, mgr, node)
+        elif os_kind == 'linux' and not rdp_listening(ip, 3389):
             return jsonify({'error': 'This Linux desktop has no RDP server (xrdp)', 'code': 'NO_RDP'}), 409
     elif proto == 'ssh' and not rdp_listening(ip, 22):
         return jsonify({'error': 'This desktop has no SSH server on port 22', 'code': 'NO_SSH'}), 409
@@ -352,7 +397,7 @@ def my_desktop_warpgate(desktop_id):
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        options = _desktop_target_options(cfg, proto, ip)
+        options = _desktop_target_options(cfg, proto, ip, desk)
         target_uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], proto, options, role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
     except wg.WarpgateError as e:
