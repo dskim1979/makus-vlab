@@ -370,7 +370,7 @@ def test_connect_refuses_a_stopped_desktop_and_an_unknown_protocol(connectable):
     admin.put(f"/api/vlab/admin/pools/{stopped['pool_id']}/policy", json={'start_on_connect': False})
     r = alice.post(f"/api/vlab/desktops/{stopped['id']}/connect", json={'protocol': 'vnc'})
     assert r.status_code == 409 and r.get_json()['code'] == 'VM_STOPPED'
-    assert alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'rdp'}).status_code == 400
+    assert alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'guac'}).status_code == 400
 
 
 # --- pool policy -------------------------------------------------------------------
@@ -379,7 +379,7 @@ def test_pool_policy_defaults_and_checks(connectable):
     admin, alice, _, _, desk, _ = connectable
     url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
     r = admin.get(url).get_json()
-    assert r['policy']['clipboard'] == 'both' and r['policy']['protocols'] == ['vnc', 'spice'] and r['reset_allowed'] is True
+    assert r['policy']['clipboard'] == 'both' and r['policy']['protocols'] == ['vnc', 'spice', 'rdp'] and r['policy']['rdp_tune'] is True and r['reset_allowed'] is True
     for bad in ({'clipboard': 'sideways'}, {'protocols': []}, {'protocols': ['ftp']}, {'idle_shutdown_min': -1},
                 {'max_session_hours': 'x'}, {'allow_power': 'yes'}, {'colour': 'blue'}):
         assert admin.put(url, json=bad).status_code == 400, bad
@@ -1497,7 +1497,7 @@ def test_client_config_defaults_and_admin_settings(env):
 
 def test_client_settings_input_is_checked(env):
     _, admin, _, _, _ = env
-    for body in ({'latest_version': 'one'}, {'protocol': 'rdp'}, {'download_url': 'ftp://x'},
+    for body in ({'latest_version': 'one'}, {'protocol': 'guac'}, {'download_url': 'ftp://x'},
                  {'what': 1}, {'min_version': 9}):
         assert admin.put('/api/vlab/admin/client', json=body).status_code == 400, body
 

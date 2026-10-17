@@ -492,6 +492,38 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
 
 
 
+def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monkeypatch):
+    import pegaprox.api.vlab as core
+    import pegaprox.api.vlab_next as nxt
+    import pegaprox.utils.rbac as rbac
+    _, mgr, _, alice, _, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    pool = store.create_pool('사무실', 'dedicated', CID)
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'office-01')
+    store.set_assignment(d['id'], 'alice')
+    mgr._fetch_qemu_ips.return_value = ['10.0.0.31']
+    ran = []
+    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: ran.append(cmd[-1]) or (0, 'changed=1', '', ''))
+    nxt._rdp_tuned.clear()
+    os_kind = {'v': 'windows'}
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: os_kind['v'])
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})   # RDP is on by default now
+    assert r.status_code == 200, r.get_json()
+    rdp = r.get_json()['rdp']
+    assert 'networkautodetect:i:1' in rdp and 'connection type:i:7' in rdp
+    assert len(ran) == 1 and 'fDenyTSConnections' in ran[0] and 'AVC444ModePreferred' in ran[0] and 'SelectTransport' in ran[0]
+    alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert len(ran) == 1                                          # once, not at every connect
+    os_kind['v'] = 'linux'
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: False)
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'NO_RDP'
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)   # xrdp on the desktop
+    assert alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).status_code == 200
+    assert len(ran) == 1
+
+
 def test_bundled_guacamole_registers_itself_and_links_to_the_console_address(env, monkeypatch, tmp_path):
     _, _, admin, _, _, _ = env
     key = 'ffeeddccbbaa99887766554433221100'

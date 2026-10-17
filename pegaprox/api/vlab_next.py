@@ -931,9 +931,17 @@ def rdp_redirects(pol):
             f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
 
 
+# the lines that let mstsc pick the codec and transport for the link it measures (RDP 8+: UDP
+# with TCP as the fallback, H.264/AVC when the host offers it)
+RDP_NETWORK = ('connection type:i:7', 'networkautodetect:i:1', 'bandwidthautodetect:i:1', 'autoreconnection enabled:i:1',
+               'videoplaybackmode:i:1', 'compression:i:1')
+
+
 def rdp_file(ext, username, pol=None):
     lines = [f"full address:s:{ext['address']}:{ext['port']}", f'username:s:{username}', 'prompt for credentials:i:1',
              'screen mode id:i:2', 'use multimon:i:1', *rdp_redirects(pol), 'audiomode:i:0', 'authentication level:i:2']
+    if pol is not None:
+        lines += RDP_NETWORK
     gw = catalog.get_gateway(ext['gateway_id']) if ext.get('gateway_id') else None
     if gw and gw['enabled'] and gw['kind'] in ('rdpgw', 'msrdgw'):
         lines += [f"gatewayhostname:s:{gw['address']}:{gw['port']}", 'gatewayusagemethod:i:1', 'gatewaycredentialssource:i:4',
@@ -1726,9 +1734,64 @@ def guac_link(gw, username, name, host, port, minutes=5, pol=None):
     return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={q}"
 
 
+# Windows, as SYSTEM through the guest agent: RDP on (and its firewall rules, by their fixed
+# names - the display group is translated), and the RDS policies for H.264/AVC 444, hardware
+# encoding (a GPU / vGPU desktop), the GPU for every session, UDP and TCP. Says changed=0/1.
+RDP_TS = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+RDP_TUNE = (('AVC444ModePreferred', 1), ('AVCHardwareEncodePreferred', 1), ('bEnumerateHWBeforeSW', 1), ('SelectTransport', 0))
+RDP_RULES = ('RemoteDesktop-UserMode-In-TCP', 'RemoteDesktop-UserMode-In-UDP')
+RDP_TUNE_EVERY = 6 * 3600
+_rdp_tuned = {}   # desktop id -> (vmid, when)
+
+
+def rdp_prepare_script():
+    sets = '; '.join(f"if ((Get-ItemProperty -Path $ts -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
+                     f"{{ Set-ItemProperty -Path $ts -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in RDP_TUNE)
+    rules = ', '.join(f"'{r}'" for r in RDP_RULES)
+    return '\n'.join([
+        "$ErrorActionPreference = 'Stop'", '$changed = 0',
+        "$tk = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server'",
+        "if ((Get-ItemProperty -Path $tk -Name fDenyTSConnections).fDenyTSConnections -ne 0) "
+        "{ Set-ItemProperty -Path $tk -Name fDenyTSConnections -Value 0; $changed = 1 }",
+        f"foreach ($r in @({rules})) {{ $f = Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue; "
+        "if ($f -and $f.Enabled -ne 'True') { Enable-NetFirewallRule -Name $r; $changed = 1 } }",
+        f"$ts = '{RDP_TS}'", 'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+        '"changed=$changed"', 'exit 0']) + '\n'
+
+
+def rdp_prepare(desk, mgr, node, wait=8):
+    """Make a Windows desktop ready for RDP (rdp_prepare_script), at most every RDP_TUNE_EVERY.
+    Never raises; a guest still busy after `wait` seconds finishes on its own."""
+    got = _rdp_tuned.get(desk['id'])
+    if got and got[0] == desk['vmid'] and time.time() - got[1] < RDP_TUNE_EVERY:
+        return None
+    try:
+        code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                        '-ExecutionPolicy', 'Bypass', '-Command', rdp_prepare_script()], wait=wait)
+    except Exception as ex:
+        code, out, e = None, '', str(ex)[:200]
+    if code == 0:
+        _rdp_tuned[desk['id']] = (desk['vmid'], time.time())
+        if 'changed=1' in (out or ''):
+            log_audit('system', 'vlab.rdp.prepare', f"{desk['name']}: RDP on, H.264/AVC 444 and UDP", '')
+    elif e:
+        logging.info(f"[VLAB] RDP setup on {desk.get('name')}: {e}")
+    return code
+
+
+def rdp_listening(ip, port=3389, timeout=1.5):
+    """Does the desktop answer on its RDP port (a Linux desktop with xrdp / gnome-remote-desktop)?"""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     """The connect route's answer for rdp (an .rdp file) and guac (a browser RDP link).
-    Returns (answer, None) or (None, error response)."""
+    Returns (answer, None) or (None, error response). Windows: made ready on the way (rdp_tune);
+    Linux: only when something listens on 3389, else NO_RDP - the client then opens SPICE / VNC."""
     if desk['vm_type'] != 'qemu':
         return None, _bad('RDP needs a virtual machine (QEMU) with its guest agent')
     ip = _guest_ipv4(mgr, node, vmid)
@@ -1736,6 +1799,12 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         return None, (jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409)
     port = 3389
     pol = core.pool_policy.effective((pool or {}).get('settings'))
+    os_kind = _guest_os(mgr, node, vmid)
+    if os_kind == 'windows' and pol['rdp_tune']:
+        rdp_prepare(desk, mgr, node)
+    elif os_kind == 'linux' and not rdp_listening(ip, port):
+        return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
+                               'code': 'NO_RDP'}), 409)
     if protocol == 'rdp':
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
         return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None

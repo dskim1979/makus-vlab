@@ -63,7 +63,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | VM 관리 | VM 만들기(ISO · Windows 11은 UEFI/TPM 자동), ISO 업로드 · URL로 받기, 설정 · 디스크 · 네트워크 변경, 스냅샷, 노드 이동, 템플릿 변환, 삭제, 관리자 화면 열기(감사 기록) — 모두 VM별 권한(ACL) 검사 |
 | 풀 권한 | 사용자 · 부서(하위 포함) · AD/LDAP 그룹 단위 이용 권한, 권한이 있으면 포털에서 직접 받기(전용 · 초기화 · 빌드 팜) |
 | 초기화 · 골든 이미지 | 기준 스냅숏 자동 생성, 데스크톱·풀 단위 초기화(접속 중인 데스크톱은 건너뜀), 골든 이미지 버전 · 배포, 새 버전으로 일괄 교체(할당 · 권한 이전) |
-| 접속 | 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
+| 접속 | RDP 우선(새 풀 기본: RDP · SPICE · 브라우저, `.rdp`는 H.264 · UDP를 mstsc가 고름, Windows는 첫 RDP 접속 때 원격 데스크톱 · 방화벽 · AVC444 · UDP를 게스트 에이전트로 설정, Linux는 xrdp가 3389에 있을 때만 — 없으면 NO_RDP로 SPICE · VNC), 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
 | 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
 | FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |

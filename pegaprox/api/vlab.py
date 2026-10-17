@@ -3096,8 +3096,8 @@ def client_settings_put():
             return _bad(f'{k} must look like 1.2.3')
     if c['download_url'] and not re.match(r'^https?://', c['download_url']):
         return _bad('download_url must start with http:// or https://')
-    if c['protocol'] not in ('auto', 'spice', 'vnc'):
-        return _bad('protocol must be auto, spice or vnc')
+    if c['protocol'] not in ('auto', 'rdp', 'spice', 'vnc'):
+        return _bad('protocol must be auto, rdp, spice or vnc')
     settings = load_server_settings() or {}
     settings[_CLIENT_KEY] = c
     if not save_server_settings(settings):

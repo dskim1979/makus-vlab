@@ -12,6 +12,9 @@ takes effect:
   client_drives                the .rdp file: the user's own PC drives in the desktop (off = files
                                cannot be carried in or out that way)
   client_printers              the .rdp file (the PC's printers) and browser RDP (print to PDF)
+  rdp_tune                     a Windows desktop's first RDP connect: RDP on, its firewall rules, H.264/AVC
+                               444 with hardware encoding when there is a GPU, UDP and TCP
+                               (pegaprox/api/vlab_next.py rdp_prepare)
   start_on_connect             connect route: a stopped desktop is started, the user retries
   idle_shutdown_min            background tick: shut down after that long without a session
   reset_on_logout              session end: back to the base (reset and scheduled pools only)
@@ -33,13 +36,16 @@ WEB_IDE = ('jupyter', 'vscode')
 RESET_TYPES = ('reset', 'classroom')
 
 DEFAULTS = {
-    'protocols': ['vnc', 'spice'],
+    # RDP first (H.264 · UDP, the lightest on a WAN for office work), SPICE / VNC as the choice;
+    # a Linux desktop without an RDP server falls back to them by itself
+    'protocols': ['vnc', 'spice', 'rdp'],
     'spice_fullscreen': False,
     'clipboard': 'both',
     'usb_redirect': True,
     'usb_autoshare': False,
     'client_drives': False,
     'client_printers': True,
+    'rdp_tune': True,
     'start_on_connect': True,
     'idle_shutdown_min': 0,
     'reset_on_logout': False,
@@ -53,7 +59,7 @@ DEFAULTS = {
     'web_ide_idle_min': 240,
 }
 
-_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'start_on_connect',
+_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
           'reset_on_logout', 'allow_power', 'defer_when_busy')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
