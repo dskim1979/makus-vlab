@@ -1660,8 +1660,13 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
+    from pegaprox.vlab import directory
+    joined_before = directory.auto_join_on(pool)
     settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
     store.set_pool_settings(pool['id'], settings)
+    pool = store.get_pool(pool['id']) or pool
+    if not joined_before and directory.auto_join_on(pool):
+        directory.queue_pool(pool)          # the switch turned on: the desktops not joined yet
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
               get_client_ip())
     return jsonify({'policy': pol})
@@ -2548,6 +2553,8 @@ def _reset_one(desk):
         e = _set_slot(desk['cluster_id'], node, desk['vmid'], accel.LEASE_SLOT, f"mapping={loan['resource_id']},pcie=1")
         if e:
             logging.warning(f"[VLAB] loaned card of {desk['vm_type']}/{desk['vmid']} after reset: {e}")
+    from pegaprox.vlab import directory
+    directory.queue_new(desk, 'reset')       # its base may predate the join
     return None
 
 

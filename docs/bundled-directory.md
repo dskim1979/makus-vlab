@@ -75,6 +75,15 @@ AD 가 있는 기관은 쓰지 않는다(그 AD 를 그대로 쓴다).
   가입한 데스크톱의 사용자는 `/etc/passwd` 에 없으므로 공유 저장소 확인의 LOCAL_ACCOUNT 경고가 나오지 않고, 엔진이 기록하는 uid/gid(`vlab_storage_ids`)가 모든 VM 에서 같다. 템플릿에 realmd · sssd · adcli · mkhomedir.
 - 상태는 데스크톱마다 `vlab_directory_joins`(joined / failed / other / not_joined / pending, 코드, 컴퓨터 이름). 가입한 데스크톱의 RDP 파일은 `도메인\아이디`.
 
+## 자동 도메인 조인
+
+- 풀 정책 `auto_domain_join`: 비워 두면 내장 디렉터리를 쓰는 동안 켜짐. 켜진 풀에 데스크톱이 생기거나(추가 · 템플릿 복제 · 다시 만들기)
+  처음 상태로 돌아가면(초기화) `vlab_directory_autojoin` 큐에 들어가고, 스위치를 켜면 아직 조인되지 않은 데스크톱이 모두 들어간다.
+- 엔진 스레드 하나가 20초마다 최대 3대를 처리한다(활성 서버만, 한 대마다 lease 확인). 게스트 에이전트가 아직 없으면 30초부터 10분까지
+  늘려 가며 다시 묻고 12번 뒤 GAVE_UP, 꺼져 있으면 5분마다 보며 7일 뒤 그만둔다. 로그인한 사람이 없으면 Windows 는 바로 재시작한다.
+- Windows 는 조인 전에 머신 SID 를 보고, 다른 데스크톱이 이미 알린 SID 면 조인하지 않고 NOT_SYSPREPPED 로 멈춘다(템플릿 sysprep 필요).
+  템플릿을 복제하지 않은 첫 VM 은 SID 가 하나뿐이라 그대로 조인된다.
+
 ## 이중화
 
 - HA 상대 서버에 두 번째 DC(`VLAB_DIRECTORY_ROLE=replica`, `samba-tool domain join … DC`). DC 끼리 복제, 각 서버의 엔진은 자기 서버의 DC(`VLAB_DIRECTORY_HOSTNAME.<realm>` 별칭, 그 DC 가 만든 CA)를 쓴다. 두 번째 DC 쪽 엔진은 `vlab-svc` 비밀번호를 HA 동기화된 봉인 사본에서 읽는다.

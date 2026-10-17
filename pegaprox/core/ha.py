@@ -348,7 +348,7 @@ SYNC_TABLES = (
     'vlab_capacity_daily',
     # the bundled directory (pegaprox/vlab/directory.py): the engine's sealed accounts, the last
     # push of each portal account, the domain join of each desktop
-    'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins',
+    'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

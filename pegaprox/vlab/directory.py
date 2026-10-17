@@ -76,7 +76,8 @@ UAC_DONT_EXPIRE = 0x10000
 GROUP_GLOBAL_SECURITY = -2147483646
 
 # exit status of the guest join scripts
-JOIN_CODES = {0: 'OK', 21: 'OTHER_DOMAIN', 22: 'NO_DNS', 23: 'JOIN_FAILED', 24: 'NO_TOOLS', 25: 'RENAME_FAILED'}
+JOIN_CODES = {0: 'OK', 21: 'OTHER_DOMAIN', 22: 'NO_DNS', 23: 'JOIN_FAILED', 24: 'NO_TOOLS', 25: 'RENAME_FAILED',
+              26: 'NOT_SYSPREPPED'}
 
 SETTINGS_KEY = 'vlab_directory'
 SETTING_DEFAULTS = {
@@ -113,10 +114,20 @@ _SCHEMA = (
         computer TEXT NOT NULL DEFAULT '',
         domain TEXT NOT NULL DEFAULT '',
         os TEXT NOT NULL DEFAULT '',
-        at TEXT NOT NULL
+        at TEXT NOT NULL,
+        machine_sid TEXT NOT NULL DEFAULT ''
+    )''',
+    # desktops waiting for the automatic join (a pool with auto_domain_join): a new or cloned
+    # desktop, one put back to its base, the running ones when the switch was turned on
+    '''CREATE TABLE IF NOT EXISTS vlab_directory_autojoin (
+        desktop_id TEXT PRIMARY KEY,
+        reason TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_at REAL NOT NULL DEFAULT 0,
+        since TEXT NOT NULL
     )''',
 )
-TABLES = ('vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins')
+TABLES = ('vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin')
 
 _lock = threading.Lock()
 _last_reconcile = [0.0]
@@ -138,6 +149,10 @@ def db():
             if not getattr(d, '_vlab_directory', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                try:    # made before the duplicate-SID check
+                    d.execute("ALTER TABLE vlab_directory_joins ADD COLUMN machine_sid TEXT NOT NULL DEFAULT ''")
+                except Exception:
+                    pass
                 d._vlab_directory = True
     return d
 
@@ -1095,17 +1110,28 @@ def _ps_str(v):
     return "'" + str(v).replace("'", "''") + "'"
 
 
-def windows_join_script(name, restart=False):
-    """PowerShell for the guest agent (as SYSTEM). The join account's password comes on stdin."""
+_WIN_SID = ("$sid = ''; try { $sid = (Get-LocalUser | Select-Object -First 1).SID.AccountDomainSid.Value } catch {}; "
+            "\"sid=$sid\"")
+
+
+def windows_join_script(name, restart=False, taken_sids=()):
+    """PowerShell for the guest agent (as SYSTEM). The join account's password comes on stdin.
+    taken_sids: the machine SIDs other desktops reported - a clone with one of them was not
+    generalized (sysprep) and is not joined (exit 26, NOT_SYSPREPPED)."""
     c, s = config(), settings()
     dns = desktop_dns() if s['set_dns'] else []
     dns_ps = '@(' + ','.join(_ps_str(x) for x in dns) + ')'
+    taken_ps = '@(' + ','.join(_ps_str(x) for x in taken_sids if x) + ')'
     return '\n'.join([
         "$ErrorActionPreference = 'Stop'",
         f"$domain = {_ps_str(c['realm'])}; $netbios = {_ps_str(c['domain'])}; $ou = {_ps_str(c['desktops_dn'])}",
-        f"$user = {_ps_str(c['domain'] + chr(92) + JOIN_USER)}; $name = {_ps_str(name)}; $dns = {dns_ps}",
+        f"$user = {_ps_str(c['domain'] + chr(92) + JOIN_USER)}; $name = {_ps_str(name)}; $dns = {dns_ps}; $taken = {taken_ps}",
         "$pw = [Console]::In.ReadToEnd().Trim()",
+        _WIN_SID,
         "$cs = Get-CimInstance Win32_ComputerSystem",
+        "if (-not $cs.PartOfDomain -and $sid -and ($taken -contains $sid)) {",
+        "  [Console]::Error.WriteLine(\"machine SID $sid is another desktop's: the template was not generalized with sysprep\"); exit 26",
+        "}",
         "if ($cs.PartOfDomain) {",
         "  \"domain=$($cs.Domain)\"; \"computer=$env:COMPUTERNAME\"",
         "  if ($cs.Domain -ieq $domain) { 'joined=1'; exit 0 } else { exit 21 }",
@@ -1183,17 +1209,92 @@ def linux_join_script(name):
 def status_script(os_kind):
     """Only asks: is the guest in a domain, which one, under which name."""
     if os_kind == 'windows':
-        return ('$cs = Get-CimInstance Win32_ComputerSystem; "computer=$env:COMPUTERNAME"; '
+        return (_WIN_SID + '; $cs = Get-CimInstance Win32_ComputerSystem; "computer=$env:COMPUTERNAME"; '
                 'if ($cs.PartOfDomain) { "domain=$($cs.Domain)"; "joined=1" } else { "joined=0" }; exit 0')
     return ('D=$(realm list --name-only 2>/dev/null | head -n1); echo "computer=$(hostname -s)"; '
             'if [ -n "$D" ]; then echo "domain=$D"; echo joined=1; else echo joined=0; fi; exit 0')
 
 
-def record_join(desktop_id, state, code, detail='', computer='', domain='', os_kind=''):
-    db().execute('INSERT OR REPLACE INTO vlab_directory_joins (desktop_id, state, code, detail, computer, domain, os, at) '
-                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                 (desktop_id, state, code, (detail or '')[:500], computer or '', domain or '', os_kind or '', now()))
+def record_join(desktop_id, state, code, detail='', computer='', domain='', os_kind='', machine_sid=None):
+    """machine_sid None keeps the one known."""
+    if machine_sid is None:
+        machine_sid = (join_of(desktop_id) or {}).get('machine_sid') or ''
+    db().execute('INSERT OR REPLACE INTO vlab_directory_joins (desktop_id, state, code, detail, computer, domain, os, at, machine_sid) '
+                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 (desktop_id, state, code, (detail or '')[:500], computer or '', domain or '', os_kind or '', now(), machine_sid or ''))
     return join_of(desktop_id)
+
+
+def taken_sids(desktop_id):
+    """The machine SIDs the other desktops reported (Windows, for the sysprep check)."""
+    return sorted({r['machine_sid'] for r in db().query(
+        "SELECT machine_sid FROM vlab_directory_joins WHERE desktop_id != ? AND machine_sid != ''", (desktop_id,)) or []})
+
+
+# --- the automatic join queue (pegaprox/api/vlab_directory.py runs it) ---------------------------
+
+AUTO_MAX_ATTEMPTS = 12            # agent not up / still running: about an hour and a half with the backoff
+AUTO_WAIT_DAYS = 7                # a desktop that stays off this long leaves the queue
+
+
+def auto_join_on(pool):
+    """The pool's switch; unset follows the bundled directory (on while it is in use)."""
+    from pegaprox.vlab import policy as pool_policy
+    if not pool:
+        return False
+    v = pool_policy.effective(pool.get('settings')).get('auto_domain_join')
+    return active() and (v if isinstance(v, bool) else True)
+
+
+def enqueue(desktop_id, reason):
+    """Queue one desktop (again); a row already waiting starts over."""
+    db().execute('INSERT OR REPLACE INTO vlab_directory_autojoin (desktop_id, reason, attempts, next_at, since) VALUES (?, ?, 0, 0, ?)',
+                 (desktop_id, reason, now()))
+
+
+def queue_new(desk, reason='new'):
+    """A desktop made, cloned or put back to its base: queued when its pool joins by itself."""
+    try:
+        from pegaprox.vlab import store
+        if desk and desk.get('vm_type', 'qemu') == 'qemu' and auto_join_on(store.get_pool(desk['pool_id'])):
+            enqueue(desk['id'], reason)
+            if reason != 'new':
+                record_join(desk['id'], 'pending', 'QUEUED', 'joins by itself once the desktop runs',
+                            **{k: (join_of(desk['id']) or {}).get(k, '') for k in ('computer', 'domain')})
+            return True
+    except Exception as e:
+        logging.warning(f"[VLAB] automatic domain join of {desk and desk.get('id')}: not queued ({e.__class__.__name__})")
+    return False
+
+
+def queue_pool(pool):
+    """The switch turned on: every desktop of the pool not joined yet."""
+    from pegaprox.vlab import store
+    j = joins()
+    n = 0
+    for d in store.list_desktops(pool['id']):
+        if d.get('vm_type', 'qemu') == 'qemu' and (j.get(d['id']) or {}).get('state') != 'joined':
+            enqueue(d['id'], 'policy')
+            n += 1
+    return n
+
+
+def due_autojoins(limit):
+    return [dict(r) for r in db().query('SELECT * FROM vlab_directory_autojoin WHERE next_at <= ? ORDER BY next_at LIMIT ?',
+                                        (time.time(), int(limit))) or []]
+
+
+def autojoin_later(desktop_id, attempts, delay):
+    db().execute('UPDATE vlab_directory_autojoin SET attempts = ?, next_at = ? WHERE desktop_id = ?',
+                 (attempts, time.time() + delay, desktop_id))
+
+
+def autojoin_done(desktop_id):
+    db().execute('DELETE FROM vlab_directory_autojoin WHERE desktop_id = ?', (desktop_id,))
+
+
+def autojoin_waiting():
+    return {r['desktop_id']: dict(r) for r in db().query('SELECT * FROM vlab_directory_autojoin') or []}
 
 
 def join_of(desktop_id):

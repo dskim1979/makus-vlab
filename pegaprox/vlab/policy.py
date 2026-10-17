@@ -28,6 +28,9 @@ takes effect:
   web_ide                      the portal's 웹 IDE: JupyterLab and/or VS Code (code-server) through
                                vlab-proxy /ide/<session>/ (pegaprox/api/vlab_research.py)
   web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
+  auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
+                               (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
+                               bundled directory is in use
 """
 
 PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
@@ -57,6 +60,7 @@ DEFAULTS = {
     'defer_max_hours': 12,
     'web_ide': [],
     'web_ide_idle_min': 240,
+    'auto_domain_join': None,
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
@@ -100,6 +104,10 @@ def validate(data, pool_type):
         elif k == 'clipboard':
             if v not in CLIPBOARD:
                 return None, f"clipboard must be one of {', '.join(CLIPBOARD)}"
+            out[k] = v
+        elif k == 'auto_domain_join':
+            if v is not None and not isinstance(v, bool):
+                return None, 'auto_domain_join must be true, false or null'
             out[k] = v
         elif k in _BOOLS:
             if not isinstance(v, bool):

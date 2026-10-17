@@ -1677,6 +1677,9 @@ def main(debug_mode=False):
     try:
         from pegaprox.vlab.directory import sync_builtin as sync_builtin_directory
         sync_builtin_directory()
+        # desktops of pools with auto_domain_join join by themselves (pegaprox/api/vlab_directory.py)
+        from pegaprox.api.vlab_directory import start_autojoin_thread
+        start_autojoin_thread()
     except Exception as e:
         print(f"Bundled directory not set up: {e}")
 
