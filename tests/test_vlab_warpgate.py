@@ -75,7 +75,9 @@ class FakeWarpgate:
             uid = self.users.setdefault(body['username'], self._id('user'))
             return 201, {'id': uid, 'username': body['username']}
         if method == 'POST' and path == '/targets':
-            uid = self.targets.setdefault(body['name'], self._id('tgt'))
+            if body['name'] in self.targets:          # like the real API
+                return 409, 'Name already exists'
+            uid = self.targets[body['name']] = self._id('tgt')
             return 201, {'id': uid, 'name': body['name']}
         if method == 'POST' and path.endswith('/roles') or '/roles/' in path:
             return 201, {}
@@ -399,3 +401,16 @@ def test_remove_target_deletes_it_and_forgets_the_mapping(env, fake_wg):
     uid2, _ = wg.sync_target(cfg, 'dsk_y', 'stale', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
     fake_wg.targets = {}
     assert wg.remove_target(cfg, 'dsk_y') == uid2 and wg.get_mapping('dsk_y') is None
+
+
+def test_sync_adopts_an_existing_target_when_the_mapping_is_gone(env, fake_wg):
+    """Found against a live Warpgate: a restored / standby DB has no mapping but Warpgate has the
+    target - POST answers 409; the engine takes the existing one over instead of failing."""
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    uid, name = wg.sync_target(cfg, 'dsk_r', 'restored', 'ssh', wg.ssh_target_options('10.0.0.7', 22, 'moavi'))
+    wg.delete_mapping('dsk_r')
+    uid2, name2 = wg.sync_target(cfg, 'dsk_r', 'restored', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
+    assert (uid2, name2) == (uid, name) and wg.get_mapping('dsk_r')['address'] == '10.0.0.8'
+    assert any(c[:2] == ('PUT', f'/targets/{uid}') for c in fake_wg.calls)   # brought up to date

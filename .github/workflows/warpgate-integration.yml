@@ -117,6 +117,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Live test - RDP ticket sign-in (best effort)
+        if: ${{ !cancelled() && env.WARPGATE_TOKEN != '' }}
         continue-on-error: true
         run: |
           .venv/bin/python -m pytest tests/test_warpgate_live.py -m live_rdp -v -rA \

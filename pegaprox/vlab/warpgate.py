@@ -248,7 +248,9 @@ def _host_of(base_url):
 # --- admin API client (requests; _api() 한 곳으로 모아 테스트에서 가로챈다) --------------------
 
 class WarpgateError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _api(method, path, token, base_url, verify_tls, body=None, timeout=15):
@@ -273,7 +275,7 @@ def _call(cfg, method, path, body=None):
         raise WarpgateError('Warpgate가 설정되지 않았습니다')
     code, data = _api(method, path, cfg['admin_token'], cfg['base_url'], cfg.get('verify_tls'), body)
     if code >= 400:
-        raise WarpgateError(f'Warpgate API {method} {path} -> {code}: {str(data)[:200]}')
+        raise WarpgateError(f'Warpgate API {method} {path} -> {code}: {str(data)[:200]}', code)
     return data
 
 
@@ -332,8 +334,18 @@ def sync_target(cfg, ref, label, proto, options, role_id=None):
         except WarpgateError:
             uuid_val = ''
     if not uuid_val:
-        created = _call(cfg, 'POST', '/targets', body)
-        uuid_val = created['id']
+        try:
+            uuid_val = _call(cfg, 'POST', '/targets', body)['id']
+        except WarpgateError as e:
+            # the name is ours (moavi-<label>-<ref>) but our mapping is gone - a restored or
+            # standby DB, a reinstall: adopt Warpgate's target and bring it up to date
+            if e.status != 409:
+                raise
+            found = [t for t in (_call(cfg, 'GET', '/targets') or []) if isinstance(t, dict) and t.get('name') == name]
+            if not found:
+                raise
+            uuid_val = found[0]['id']
+            _call(cfg, 'PUT', f'/targets/{uuid_val}', body)
         if role_id:
             try:
                 _call(cfg, 'POST', f'/targets/{uuid_val}/roles/{role_id}')
