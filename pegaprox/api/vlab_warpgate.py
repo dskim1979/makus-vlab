@@ -224,12 +224,13 @@ def my_ssh_config():
 
 # --- portal connect ----------------------------------------------------------------------
 
-def _desktop_target_options(cfg, proto, ip, desk=None):
+def _desktop_target_options(cfg, proto, ip, desk=None, pol=None):
     """프로토콜별 Warpgate 대상 옵션. RDP는 interactive_logon=True(자동 로그인 안 함); NLA 서비스
     계정은 콘솔 설정의 것이 있으면 그것, 없으면 그 Windows 데스크톱의 moavi-nla(엔진이 만든 무작위
     비번, prepare_windows_nla) - 사용자 비번이 아니다. VNC는 None 인증."""
     if proto == 'ssh':
-        return wg.ssh_target_options(ip, 22, 'moavi')
+        # the pool's file transfer switch also turns the gateway's web-SSH file panel on or off
+        return wg.ssh_target_options(ip, 22, 'moavi', None if pol is None else pol.get('ssh_files', 'off') != 'off')
     if proto == 'vnc':
         return wg.vnc_target_options(ip, int(cfg['vnc_port']))
     user, pw = cfg.get('rdp_nla_user') or '', cfg.get('rdp_nla_password') or ''
@@ -433,7 +434,7 @@ def my_desktop_warpgate(desktop_id):
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        options = _desktop_target_options(cfg, proto, ip, desk)
+        options = _desktop_target_options(cfg, proto, ip, desk, pol)
         target_uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], proto, options, role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
     except wg.WarpgateError as e:

@@ -723,6 +723,7 @@ AUTOMATIONS = {
     # (the Warpgate admin API and the DB only, no cluster)
     ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'forget_desktop'): (1, 'read'),
+    ('pegaprox/vlab/warpgate.py', 'resync_ssh_file_transfer'): (1, 'read'),
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),

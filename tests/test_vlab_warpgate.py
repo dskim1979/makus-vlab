@@ -1312,3 +1312,54 @@ def test_rotating_a_stopped_desktop_waits_for_its_next_connect(env, fake_wg, age
     r = admin.post(f"/api/vlab/admin/desktops/{d['id']}/warpgate-nla/rotate")
     assert r.get_json() == {'rotated': True, 'applied': False, 'target_updated': False} and runs == []
     assert wg.nla_applied_credentials(d['id'], d['vmid']) is None and wg.nla_needs_apply(d['id'], d['vmid'])
+
+
+# --- the gateway's web-SSH file panel follows the pool's ssh_files policy (Warpgate fork moavi4) ---
+
+def _ssh_connect(env, monkeypatch, ssh_files):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True, 'ssh_files': ssh_files})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 200, r.get_json()
+    return pool, d
+
+
+@pytest.mark.parametrize('ssh_files,on', [('off', False), ('down', True), ('both', True)])
+def test_ssh_target_file_panel_follows_the_pool_policy(env, fake_wg, monkeypatch, ssh_files, on):
+    _ssh_connect(env, monkeypatch, ssh_files)
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert tgt['options']['kind'] == 'Ssh' and tgt['options']['web_file_transfer'] is on
+
+
+def test_changing_the_policy_resyncs_existing_ssh_targets(env, fake_wg, monkeypatch):
+    real = wg.resync_ssh_file_transfer
+    monkeypatch.setattr(wg, 'resync_ssh_file_transfer', lambda desks, on, background=True: real(desks, on, background=False))
+    pool, d = _ssh_connect(env, monkeypatch, 'both')
+    _, _, admin, _, _ = env
+    uid = wg.get_mapping(wg.target_ref(d['id'], 'ssh'))['target_uuid']
+    n = len(fake_wg.calls)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True, 'ssh_files': 'off'})
+    puts = [b for (m, p, b) in fake_wg.calls[n:] if m == 'PUT' and p == f'/targets/{uid}']
+    assert puts and puts[-1]['options']['web_file_transfer'] is False and puts[-1]['options']['host'] == '10.0.0.31'
+    # no change of the on/off state: nothing sent
+    n = len(fake_wg.calls)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True, 'ssh_files': 'off', 'clipboard': 'none'})
+    assert not [c for c in fake_wg.calls[n:] if c[1].startswith('/targets/')]
+
+
+def test_an_image_without_the_file_panel_still_gets_the_target(env, fake_wg, monkeypatch):
+    real = fake_wg.__call__
+
+    class Strict:
+        def __call__(self, method, path, token, base_url, verify_tls, body=None, timeout=15):
+            if path.startswith('/targets') and isinstance(body, dict) and 'web_file_transfer' in body.get('options', {}):
+                return 400, 'unknown field web_file_transfer'
+            return real(method, path, token, base_url, verify_tls, body, timeout)
+    monkeypatch.setattr(wg, '_api', Strict())
+    _ssh_connect(env, monkeypatch, 'both')
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert 'web_file_transfer' not in tgt['options']

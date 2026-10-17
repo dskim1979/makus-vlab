@@ -237,11 +237,16 @@ def target_name_for(ref, label):
     return f'{head}-{ref}'
 
 
-def ssh_target_options(host, port, username):
+def ssh_target_options(host, port, username, web_file_transfer=None):
     """SSH 대상: Warpgate 자체 공개키로 대상에 접속(사용자 비번 저장 안 함).
-    공개키는 Warpgate가 보관(ssh/own-keys)하고 대상 authorized_keys에 심는다."""
-    return {'kind': 'Ssh', 'host': host, 'port': int(port), 'username': username,
+    공개키는 Warpgate가 보관(ssh/own-keys)하고 대상 authorized_keys에 심는다.
+    web_file_transfer: the MOAVI Desk Warpgate build's web-SSH file panel (SFTP) for this target, from
+    the pool's ssh_files policy; None leaves it out (Warpgate's default)."""
+    opts = {'kind': 'Ssh', 'host': host, 'port': int(port), 'username': username,
             'allow_insecure_algos': False, 'auth': {'kind': 'PublicKey'}}
+    if web_file_transfer is not None:
+        opts['web_file_transfer'] = bool(web_file_transfer)
+    return opts
 
 
 def rdp_target_options(host, port, username, nla_password, domain='', interactive_logon=True):
@@ -434,6 +439,43 @@ def _ensure_sso_credential(cfg, uid, username):
 
 
 def sync_target(cfg, ref, label, proto, options, role_id=None):
+    """_sync_target; a Warpgate that refuses an option it does not know (web_file_transfer on an image
+    without the file panel) gets the target without it."""
+    try:
+        return _sync_target(cfg, ref, label, proto, options, role_id)
+    except WarpgateError as e:
+        if e.status != 400 or 'web_file_transfer' not in options:
+            raise
+        logging.info(f'[VLAB] Warpgate refused web_file_transfer ({e.status}); target synced without it')
+        return _sync_target(cfg, ref, label, proto, {k: v for k, v in options.items() if k != 'web_file_transfer'}, role_id)
+
+
+def resync_ssh_file_transfer(desks, on, background=True):
+    """A pool's ssh_files policy changed: bring its desktops' existing SSH targets' web file panel in
+    line (from the stored mapping; no guest call). Best effort, off the request thread."""
+    if not is_enabled():
+        return
+    todo = [(d, get_mapping(target_ref(d['id'], 'ssh'))) for d in desks]
+    todo = [(d, mp) for d, mp in todo if mp and mp['address']]
+    if not todo:
+        return
+    cfg = config(secret=True)
+
+    def run():
+        for d, mp in todo:
+            try:
+                sync_target(cfg, d['id'], d['name'], 'ssh',
+                            ssh_target_options(mp['address'], mp['port'] or 22, 'moavi', on))
+            except Exception as e:
+                logging.warning(f"[VLAB] Warpgate SSH target of {d['name']}: file panel not updated: {str(e)[:200]}")
+
+    if background:
+        threading.Thread(target=run, name='vlab-wg-ssh-files', daemon=True).start()
+    else:
+        run()
+
+
+def _sync_target(cfg, ref, label, proto, options, role_id=None):
     """데스크톱 1개·프로토콜 1개에 대응하는 Warpgate 대상을 보장(없으면 생성)하고 매핑을 저장한다.
     options는 *_target_options()가 만든 dict. role_id가 있으면 대상에 역할을 연결.
     SSH 대상이면 대상의 호스트 키를 Warpgate known hosts에 올린다(실패해도 동기화는 계속)."""

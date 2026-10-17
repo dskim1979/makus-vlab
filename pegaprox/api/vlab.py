@@ -1660,8 +1660,17 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
+    was = pool_policy.effective(pool.get('settings')).get('ssh_files', 'off') != 'off'
     settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
     store.set_pool_settings(pool['id'], settings)
+    now_on = pol.get('ssh_files', 'off') != 'off'
+    if now_on != was:
+        # existing Warpgate SSH targets follow the switch (their web file panel)
+        try:
+            from pegaprox.vlab.warpgate import resync_ssh_file_transfer
+            resync_ssh_file_transfer(store.list_desktops(pool['id']), now_on)
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate SSH file panel for pool '{pool['name']}': {str(e)[:200]}")
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
               get_client_ip())
     return jsonify({'policy': pol})
