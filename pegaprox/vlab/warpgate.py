@@ -993,6 +993,11 @@ RDP_USERS_SID = 'S-1-5-32-555'
 RDP_TS_KEY = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
 
 
+def _logon_privacy_lines():
+    from pegaprox.api.vlab_next import logon_privacy_lines
+    return logon_privacy_lines()
+
+
 def nla_account_script():
     """PowerShell, as SYSTEM through the guest agent; the password comes on stdin (never the command
     line). Makes / updates the local account moavi-nla (password never expires), puts it in Remote
@@ -1016,6 +1021,8 @@ def nla_account_script():
         f"$ts = '{RDP_TS_KEY}'",
         'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }',
         "Set-ItemProperty -Path $ts -Name 'fPromptForPassword' -Value 1 -Type DWord",
+        # nobody else's account on the logon screen (pegaprox/api/vlab_next.py LOGON_PRIVACY)
+        '$changed = 0', *_logon_privacy_lines(),
         # no console logon for it (the RDP session still asks for the user's own account)
         "try { $cfg = Join-Path $env:TEMP 'moavi-nla.inf'; $sdb = Join-Path $env:TEMP 'moavi-nla.sdb'",
         "  secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null; $lines = @(Get-Content $cfg)",

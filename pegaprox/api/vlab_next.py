@@ -1629,6 +1629,25 @@ RDP_TUNE = (('AVC444ModePreferred', 1), ('AVCHardwareEncodePreferred', 1), ('bEn
 RDP_RULES = ('RemoteDesktop-UserMode-In-TCP', 'RemoteDesktop-UserMode-In-UDP')
 RDP_USERS, AUTH_USERS = 'S-1-5-32-555', 'S-1-5-11'   # Remote Desktop Users, Authenticated Users
 RDP_TUNE_EVERY = 6 * 3600
+# Windows' logon / lock screen shows nobody else (found on 192.168.0.9: a desktop several people use
+# listed the others' accounts): not the last signed-in user, not the locked user, no list of local or
+# connected users, no account details, no fast user switching - only empty name / password fields
+LOGON_PRIVACY = (
+    (r'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+     (('DontDisplayLastUserName', 1), ('DontDisplayLockedUserId', 3), ('HideFastUserSwitching', 1))),
+    (r'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System',
+     (('DontEnumerateConnectedUsers', 1), ('EnumerateLocalUsers', 0), ('BlockUserFromShowingAccountDetailsOnSignin', 1))),
+)
+
+
+def logon_privacy_lines():
+    """PowerShell lines that set LOGON_PRIVACY (each value only when it differs; sets $changed)."""
+    out = []
+    for key, values in LOGON_PRIVACY:
+        out.append(f"$k = '{key}'; if (-not (Test-Path $k)) {{ New-Item -Path $k -Force | Out-Null }}")
+        out += [f"if ((Get-ItemProperty -Path $k -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
+                f"{{ Set-ItemProperty -Path $k -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in values]
+    return out
 _rdp_tuned = {}   # desktop id -> (vmid, when)
 
 
@@ -1644,6 +1663,7 @@ def rdp_prepare_script():
         f"foreach ($r in @({rules})) {{ $f = Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue; "
         "if ($f -and $f.Enabled -ne 'True') { Enable-NetFirewallRule -Name $r; $changed = 1 } }",
         f"$ts = '{RDP_TS}'", 'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+        *logon_privacy_lines(),
         # no AD: the VM's own accounts may sign in over RDP (Authenticated Users in Remote Desktop
         # Users); a domain member is left to its GPO - there that would be every domain account
         "try { if (-not (Get-CimInstance Win32_ComputerSystem).PartOfDomain) { "
