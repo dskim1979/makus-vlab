@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>MOAVI bench - document scroll</title>
+<style>
+  html, body { margin: 0; background: #e8e8e8; font: 15px/1.6 "Malgun Gothic", "Segoe UI", sans-serif; color: #222; }
+  .page { width: 794px; margin: 24px auto; padding: 72px 80px; background: #fff; box-shadow: 0 1px 4px #0003; box-sizing: border-box; }
+  h1 { font-size: 26px; margin: 0 0 12px; } h2 { font-size: 19px; margin: 28px 0 8px; color: #1f4e79; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+  th, td { border: 1px solid #999; padding: 4px 8px; text-align: right; } th { background: #dde7f3; } td:first-child, th:first-child { text-align: left; }
+  svg { display: block; margin: 12px auto; }
+  .foot { text-align: center; color: #888; font-size: 12px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<div id="doc"></div>
+<script>
+// A long office-like document (text, tables, charts), generated with a fixed seed so every
+// run scrolls exactly the same pixels, then scrolled at a steady ?pxs= pixels per second.
+let seed = 20261017;
+const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+const words = ('가상 데스크톱 서버 네트워크 대역폭 지연 사용자 연구실 강의 과제 보고서 결과 분석 측정 프로토콜 ' +
+  'the of and remote desktop session latency bandwidth frame encoder network client server report quarter budget').split(' ');
+const sentence = () => { let n = 8 + Math.floor(rnd() * 14), s = []; while (n--) s.push(words[Math.floor(rnd() * words.length)]); return s.join(' ') + '.'; };
+const para = () => '<p>' + Array.from({ length: 4 + Math.floor(rnd() * 4) }, sentence).join(' ') + '</p>';
+const table = () => {
+  let h = '<table><tr><th>항목</th>' + ['1분기', '2분기', '3분기', '4분기', '합계'].map(x => '<th>' + x + '</th>').join('') + '</tr>';
+  for (let r = 0; r < 8; r++) {
+    const v = Array.from({ length: 4 }, () => Math.round(rnd() * 90000));
+    h += '<tr><td>' + words[r % words.length] + '</td>' + v.concat([v.reduce((a, b) => a + b)]).map(x => '<td>' + x.toLocaleString() + '</td>').join('') + '</tr>';
+  }
+  return h + '</table>';
+};
+const chart = () => {
+  const c = ['#1f4e79', '#c55a11', '#548235', '#7030a0'];
+  let s = '<svg width="560" height="220" viewBox="0 0 560 220"><rect width="560" height="220" fill="#fafafa" stroke="#ccc"/>';
+  for (let i = 0; i < 12; i++) for (let k = 0; k < 3; k++) {
+    const h = 20 + rnd() * 160; s += `<rect x="${30 + i * 44 + k * 12}" y="${200 - h}" width="11" height="${h}" fill="${c[k]}"/>`;
+  }
+  return s + '</svg>';
+};
+let html = '';
+for (let p = 1; p <= 120; p++) {
+  html += '<div class="page">' + (p === 1 ? '<h1>MOAVI Desk 연간 운영 보고서</h1>' : '') + '<h2>' + p + '. ' + sentence() + '</h2>';
+  html += para() + para() + (p % 2 ? table() : chart()) + para() + para() + '<div class="foot">- ' + p + ' -</div></div>';
+}
+document.getElementById('doc').innerHTML = html;
+
+const pxs = Number(new URLSearchParams(location.search).get('pxs')) || 900;
+let last = null, y = 0;
+function step(t) {
+  if (last !== null) {
+    y += pxs * (t - last) / 1000;
+    if (y > document.documentElement.scrollHeight - innerHeight) y = 0;   // wrap to the top
+    scrollTo(0, Math.round(y));
+  }
+  last = t; requestAnimationFrame(step);
+}
+setTimeout(() => requestAnimationFrame(step), 1000);
+</script>
+</body>
+</html>

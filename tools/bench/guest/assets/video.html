@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>MOAVI bench - video</title>
+<style>html, body { margin: 0; height: 100%; background: #000; overflow: hidden; } video { width: 100%; height: 100%; object-fit: contain; }</style>
+</head>
+<body>
+<video id="v" autoplay muted loop playsinline></video>
+<script>
+// ?src= a file:/// URL of a local 1080p video; muted so autoplay is allowed and the audio
+// channel does not add to the bytes being compared
+const v = document.getElementById('v');
+v.src = new URLSearchParams(location.search).get('src') || '';
+v.play().catch(() => {});
+</script>
+</body>
+</html>
