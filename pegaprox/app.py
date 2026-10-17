@@ -198,6 +198,10 @@ def create_app():
             # Both of these are gated by the installation token instead.
             '/api/auto-install/answer',
             '/api/auto-install/progress',
+            # MOAVI Desk - Warpgate's server-side calls to the sign-in provider (pegaprox/vlab/wg_oidc.py):
+            # no session to protect; the client secret / the bearer token is the gate
+            '/api/vlab/oidc/token',
+            '/api/vlab/oidc/userinfo',
         )
         if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
                 and request.path.startswith('/api/')

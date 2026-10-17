@@ -223,6 +223,35 @@ SSH는 Warpgate 자체 키 + 대상 사용자명)으로 대상에 붙는다. 사
   `VLAB_WARPGATE_VERIFY_TLS`. 기존 설정은 절대 덮어쓰지 않고, 토큰·비밀번호는 로그에 남기지 않는다.
   Warpgate가 늦게 뜨면 10초 간격으로 30번 다시 시도한다.
 
+## 4-6. Warpgate 로그인 = MOAVI Desk 로그인 (OIDC, `pegaprox/vlab/wg_oidc.py`)
+
+Warpgate 0.29.2는 RDP/SSH 대상 티켓으로 웹 세션을 열지 않으므로, 브라우저 경로는 Warpgate 로그인이 필요하다.
+엔진이 Warpgate 하나만을 위한 최소 OIDC 공급자가 되어 그 로그인을 포털 세션으로 대신한다(비밀번호 없음).
+
+- 켜기: `VLAB_WARPGATE_OIDC_SECRET`(엔진·Warpgate 같은 값). 비우면 꺼짐(엔드포인트 404).
+- `warpgate.yaml`:
+  ```yaml
+  sso_providers:
+    - name: moavi-desk
+      label: MOAVI Desk
+      provider:
+        type: custom
+        client_id: warpgate
+        client_secret: <VLAB_WARPGATE_OIDC_SECRET>
+        issuer_url: http://vlab-engine:5000/api/vlab/oidc   # VLAB_WARPGATE_OIDC_ISSUER와 같게
+        scopes: [email, profile]
+  ```
+- 엔드포인트: `/api/vlab/oidc/.well-known/openid-configuration`, `/jwks`, `/token`, `/userinfo`(issuer 기준,
+  Warpgate가 서버에서 부름), `/authorize`(콘솔 주소 `VLAB_PUBLIC_URL` 또는 `https://VLAB_HOSTNAME`, 브라우저가 포털
+  세션 쿠키를 들고 옴). PKCE S256 필수, redirect_uri는 Warpgate 호스트의 `/@warpgate/api/sso/return`만.
+- ID 토큰: RS256(키는 한 번 만들어 `vlab_wg_oidc`에 봉인, HA 동기화), `email`은 실제 주소가 아니라
+  `<아이디>@moavi-desk.invalid`. 엔진이 Warpgate 사용자에 SSO 자격(provider `moavi-desk` + 그 이메일)을 붙인다.
+  `warpgate_roles` 클레임을 보내지 않으므로 Warpgate는 역할을 건드리지 않는다.
+- 코드는 1분·1회용, 액세스 토큰은 5분, 메모리에만.
+- 한계: Warpgate 로그인 화면은 처음 들어올 때 SSO를 스스로 시작하지 않는다(사용자 이름 입력 뒤에만). 그래서
+  첫 접속엔 **MOAVI Desk** 버튼 한 번이 남는다. 완전 무클릭은 Warpgate를 콘솔과 같은 출처(`/@warpgate/`)로
+  프록시하고 콘솔 페이지가 `/@warpgate/api/sso/providers/moavi-desk/start`를 불러야 가능(후속).
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.

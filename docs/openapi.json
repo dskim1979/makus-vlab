@@ -65356,6 +65356,147 @@
         ]
       }
     },
+    "/api/vlab/oidc/.well-known/openid-configuration": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_discovery_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "OIDC discovery for Warpgate (no sign-in; nothing secret).",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/jwks": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_jwks_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The public key Warpgate checks the ID token with.",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/authorize": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_authorize_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Warpgate sends the browser here; the user's portal session answers (no password). Only Warpgate's own SSO return URL is accepted, with PKCE S256.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/oidc/token": {
+      "post": {
+        "operationId": "vlab_warpgate.oidc_token_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "Code -> ID token, for Warpgate (client_secret_basic or _post).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/userinfo": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_userinfo_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "x-pegaprox-auth": "public"
+      },
+      "post": {
+        "operationId": "vlab_warpgate.oidc_userinfo_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/shellws": {
       "get": {
         "operationId": "__flask_sock.node_shell_websocket_proxy_get",

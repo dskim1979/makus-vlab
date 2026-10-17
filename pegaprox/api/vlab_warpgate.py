@@ -11,6 +11,7 @@ MOAVI Desk - Warpgate 접근 게이트웨이(bastion) API (pegaprox/vlab/warpgat
   POST /api/vlab/admin/warpgate/test         연결 점검(대상 목록 읽기)                         vlab.pool.manage
   GET  /api/vlab/admin/warpgate/sessions     관리자 세션/녹화 페이지 링크                      vlab.pool.view
   POST /api/vlab/me/desktops/<id>/warpgate   {protocol: rdp|ssh|vnc} 티켓 발급 + 접속 좌표     vlab.desk
+  /api/vlab/oidc/...                         Warpgate 로그인을 MOAVI Desk 세션으로(OIDC 공급자, wg_oidc.py)
 """
 
 import logging
@@ -25,6 +26,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.vlab import policy as pool_policy
 from pegaprox.vlab import store
 from pegaprox.vlab import warpgate as wg
+from pegaprox.vlab import wg_oidc
 
 bp = Blueprint('vlab_warpgate', __name__)
 
@@ -363,3 +365,103 @@ def my_desktop_warpgate(desktop_id):
 
     log_audit(username, 'vlab.warpgate.connect', f"{proto.upper()} to '{desk['name']}' via Warpgate", get_client_ip())
     return jsonify({'type': 'warpgate', 'connection': wg.connection_coordinates(cfg, proto, target_name, secret, target_uuid)})
+
+
+# --- Warpgate signs its users in with MOAVI Desk (OpenID Connect, pegaprox/vlab/wg_oidc.py) --------
+
+def _oidc_off():
+    return jsonify({'error': 'not found'}), 404
+
+
+def _oauth_error(code, status=400):
+    resp = jsonify({'error': code})
+    resp.status_code = status
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@bp.route('/api/vlab/oidc/.well-known/openid-configuration', methods=['GET'])
+def oidc_discovery():
+    """OIDC discovery for Warpgate (no sign-in; nothing secret)."""
+    if not wg_oidc.is_enabled():
+        return _oidc_off()
+    return jsonify(wg_oidc.metadata())
+
+
+@bp.route('/api/vlab/oidc/jwks', methods=['GET'])
+def oidc_jwks():
+    """The public key Warpgate checks the ID token with."""
+    if not wg_oidc.is_enabled():
+        return _oidc_off()
+    return jsonify(wg_oidc.jwks())
+
+
+@bp.route('/api/vlab/oidc/authorize', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def oidc_authorize():
+    """Warpgate sends the browser here; the user's portal session answers (no password). Only
+    Warpgate's own SSO return URL is accepted, with PKCE S256."""
+    from urllib.parse import urlencode
+    if not wg_oidc.is_enabled() or not wg.is_enabled():
+        return _oidc_off()
+    if (getattr(request, 'session', None) or {}).get('api_token'):
+        return _bad('Sign in to the portal first', 403)     # an API token is not a browser sign-in
+    a = request.args
+    redirect_uri = a.get('redirect_uri', '')
+    if a.get('client_id') != wg_oidc.CLIENT_ID or not wg_oidc.redirect_allowed(redirect_uri, wg.config()['base_url']):
+        return _bad('invalid client or redirect_uri')      # never redirect to an unknown place
+    state = a.get('state', '')
+
+    def back(**q):
+        return '', 302, {'Location': redirect_uri + ('&' if '?' in redirect_uri else '?') + urlencode(q),
+                         'Cache-Control': 'no-store'}
+    if a.get('response_type') != 'code' or 'openid' not in a.get('scope', '').split():
+        return back(error='unsupported_response_type', state=state)
+    challenge = a.get('code_challenge', '')
+    if not challenge or a.get('code_challenge_method') != 'S256':
+        return back(error='invalid_request', error_description='PKCE S256 required', state=state)
+    username = _user()
+    # make sure Warpgate knows this user and its MOAVI Desk SSO credential before it comes back
+    try:
+        cfg = wg.config(secret=True)
+        wg.ensure_user(cfg, username, wg.ensure_role(cfg))
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate user {username} not prepared for sign-in: {str(e)[:200]}")
+    code = wg_oidc.issue_code(username, redirect_uri, a.get('nonce', ''), challenge)
+    log_audit(username, 'vlab.warpgate.sso', 'signed in to 보안 게이트웨이 with the portal session', get_client_ip())
+    return back(code=code, state=state)
+
+
+@bp.route('/api/vlab/oidc/token', methods=['POST'])
+def oidc_token():
+    """Code -> ID token, for Warpgate (client_secret_basic or _post)."""
+    if not wg_oidc.is_enabled():
+        return _oidc_off()
+    auth = request.authorization
+    form = request.form
+    if auth and auth.type == 'basic':
+        from urllib.parse import unquote
+        cid, secret = unquote(auth.username or ''), unquote(auth.password or '')
+    else:
+        cid, secret = form.get('client_id', ''), form.get('client_secret', '')
+    if not wg_oidc.check_client(cid, secret):
+        return _oauth_error('invalid_client', 401)
+    if form.get('grant_type') != 'authorization_code':
+        return _oauth_error('unsupported_grant_type')
+    out = wg_oidc.redeem_code(form.get('code'), form.get('redirect_uri', ''), form.get('code_verifier', ''))
+    if not out:
+        return _oauth_error('invalid_grant')
+    resp = jsonify(out)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@bp.route('/api/vlab/oidc/userinfo', methods=['GET', 'POST'])
+def oidc_userinfo():
+    if not wg_oidc.is_enabled():
+        return _oidc_off()
+    h = request.headers.get('Authorization', '')
+    info = wg_oidc.userinfo(h[7:] if h.startswith('Bearer ') else '')
+    if not info:
+        return _oauth_error('invalid_token', 401)
+    return jsonify(info)

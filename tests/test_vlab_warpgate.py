@@ -58,6 +58,7 @@ class FakeWarpgate:
         self.keys = {}      # uid -> [ {id,label,openssh_public_key} ]
         self.kinds = {}     # target uuid -> options.kind
         self.known_hosts = []
+        self.sso = {}       # uid -> [ {id, provider, email} ]
 
     def _id(self, p):
         self.next += 1
@@ -121,6 +122,14 @@ class FakeWarpgate:
                 return 404, 'not found'
             self.targets = {k: v for k, v in self.targets.items() if v != uid}
             return 204, ''
+        m = re.match(r'^/users/([^/]+)/credentials/sso$', path)
+        if m:
+            lst = self.sso.setdefault(m.group(1), [])
+            if method == 'GET':
+                return 200, list(lst)
+            row = dict(body, id=self._id('sso'))
+            lst.append(row)
+            return 201, row
         # public-key credentials: /users/<uid>/credentials/public-keys[/<id>]
         m = re.match(r'^/users/([^/]+)/credentials/public-keys(?:/([^/]+))?$', path)
         if m:
@@ -885,3 +894,135 @@ def test_remove_target_without_a_protocol_removes_every_target_of_the_desktop(en
     assert sorted(wg.remove_target(cfg, 'dsk_all')) == sorted([a, b])
     assert wg.list_mappings() == [] and not ({a, b} & set(fake_wg.targets.values()))
     assert wg.remove_target(cfg, 'dsk_all') == []
+
+
+# --- Warpgate signs in with the portal session (OIDC provider, pegaprox/vlab/wg_oidc.py) ---
+
+RETURN = 'https://wg.example/@warpgate/api/sso/return'
+
+
+def _pkce():
+    import base64
+    import hashlib
+    import secrets
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+    return verifier, challenge
+
+
+def _basic(cid, secret):
+    import base64
+    return {'Authorization': 'Basic ' + base64.b64encode(f'{cid}:{secret}'.encode()).decode()}
+
+
+@pytest.fixture
+def oidc_on(monkeypatch):
+    monkeypatch.setenv('VLAB_WARPGATE_OIDC_SECRET', 'oidc-client-secret')
+    monkeypatch.setenv('VLAB_WARPGATE_OIDC_ISSUER', 'http://vlab-engine:5000/api/vlab/oidc')
+    monkeypatch.setenv('VLAB_HOSTNAME', 'vlab.example')
+    monkeypatch.setenv('VLAB_HTTPS_PORT', '443')
+
+
+def _authorize(client, challenge, **over):
+    q = {'response_type': 'code', 'client_id': 'warpgate', 'redirect_uri': RETURN, 'scope': 'openid email profile',
+         'state': 'st-1', 'nonce': 'n-1', 'code_challenge': challenge, 'code_challenge_method': 'S256'}
+    q.update(over)
+    return client.get('/api/vlab/oidc/authorize', query_string={k: v for k, v in q.items() if v is not None})
+
+
+def test_oidc_is_off_without_a_client_secret(env, monkeypatch):
+    _, _, _, alice, _ = env
+    monkeypatch.delenv('VLAB_WARPGATE_OIDC_SECRET', raising=False)
+    assert alice.get('/api/vlab/oidc/.well-known/openid-configuration').status_code == 404
+    assert alice.post('/api/vlab/oidc/token', data={}).status_code == 404
+
+
+def test_warpgate_signs_a_portal_user_in_without_a_password(env, fake_wg, oidc_on):
+    import jwt
+    from urllib.parse import parse_qs, urlparse
+    api, _, admin, alice, _ = env
+    _configure(admin)
+    meta = alice.get('/api/vlab/oidc/.well-known/openid-configuration').get_json()
+    assert meta['issuer'] == 'http://vlab-engine:5000/api/vlab/oidc'
+    assert meta['authorization_endpoint'] == 'https://vlab.example/api/vlab/oidc/authorize'
+    assert meta['token_endpoint'] == meta['issuer'] + '/token' and meta['code_challenge_methods_supported'] == ['S256']
+    verifier, challenge = _pkce()
+    r = _authorize(alice, challenge)
+    assert r.status_code == 302, r.get_data(as_text=True)
+    loc = urlparse(r.headers['Location'])
+    assert f'{loc.scheme}://{loc.netloc}{loc.path}' == RETURN
+    q = parse_qs(loc.query)
+    assert q['state'] == ['st-1'] and q['code'][0]
+    # Warpgate knows alice by her MOAVI Desk SSO credential - no password anywhere
+    uid = fake_wg.users['alice']
+    assert [(c['provider'], c['email']) for c in fake_wg.sso[uid]] == [('moavi-desk', 'alice@moavi-desk.invalid')]
+    # Warpgate (no portal session, no browser headers) trades the code
+    anon = api.anon()
+    raw = api.app.test_client()
+    tok = raw.post('/api/vlab/oidc/token', headers=_basic('warpgate', 'oidc-client-secret'),
+                    data={'grant_type': 'authorization_code', 'code': q['code'][0], 'redirect_uri': RETURN,
+                          'code_verifier': verifier})
+    assert tok.status_code == 200, tok.get_json()
+    t = tok.get_json()
+    assert tok.headers['Cache-Control'] == 'no-store'
+    keys = anon.get('/api/vlab/oidc/jwks').get_json()['keys']
+    pub = jwt.PyJWK(keys[0]).key
+    claims = jwt.decode(t['id_token'], pub, algorithms=['RS256'], audience='warpgate', issuer=meta['issuer'])
+    assert claims['sub'] == 'alice' and claims['nonce'] == 'n-1' and claims['email'] == 'alice@moavi-desk.invalid'
+    assert claims['email_verified'] is True and 'warpgate_roles' not in claims   # Warpgate keeps the user's roles
+    assert jwt.get_unverified_header(t['id_token'])['kid'] == keys[0]['kid']
+    ui = anon.get('/api/vlab/oidc/userinfo', headers={'Authorization': 'Bearer ' + t['access_token']}).get_json()
+    assert ui['email'] == 'alice@moavi-desk.invalid' and ui['preferred_username'] == 'alice'
+    # a code is single use
+    again = anon.post('/api/vlab/oidc/token', headers=_basic('warpgate', 'oidc-client-secret'),
+                      data={'grant_type': 'authorization_code', 'code': q['code'][0], 'redirect_uri': RETURN,
+                            'code_verifier': verifier})
+    assert again.status_code == 400 and again.get_json()['error'] == 'invalid_grant'
+    # a second sign-in does not add the credential twice; the key stays the same
+    _authorize(alice, _pkce()[1])
+    assert len(fake_wg.sso[uid]) == 1
+    assert anon.get('/api/vlab/oidc/jwks').get_json()['keys'][0]['kid'] == keys[0]['kid']
+
+
+def test_oidc_refuses_what_is_not_warpgate(env, fake_wg, oidc_on):
+    from urllib.parse import parse_qs, urlparse
+    api, _, admin, alice, _ = env
+    _configure(admin)
+    anon = api.anon()
+    verifier, challenge = _pkce()
+    # not signed in to the portal: no code
+    assert _authorize(anon, challenge).status_code == 401
+    # an unknown client or a return URL that is not Warpgate's: no redirect at all
+    assert _authorize(alice, challenge, client_id='other').status_code == 400
+    assert _authorize(alice, challenge, redirect_uri='https://evil.example/@warpgate/api/sso/return').status_code == 400
+    assert _authorize(alice, challenge, redirect_uri='https://wg.example/steal').status_code == 400
+    # PKCE is required
+    r = _authorize(alice, None)
+    assert r.status_code == 302 and 'error=invalid_request' in r.headers['Location'] and 'code=' not in r.headers['Location']
+    # the token endpoint wants the client secret, the right verifier and the same redirect URI
+    code = parse_qs(urlparse(_authorize(alice, challenge).headers['Location']).query)['code'][0]
+    data = {'grant_type': 'authorization_code', 'code': code, 'redirect_uri': RETURN, 'code_verifier': verifier}
+    assert anon.post('/api/vlab/oidc/token', headers=_basic('warpgate', 'wrong'), data=data).status_code == 401
+    bad = dict(data, code_verifier='x' * 50)
+    assert anon.post('/api/vlab/oidc/token', headers=_basic('warpgate', 'oidc-client-secret'), data=bad).status_code == 400
+    # (the failed try spent the code)
+    assert anon.post('/api/vlab/oidc/token', headers=_basic('warpgate', 'oidc-client-secret'), data=data).status_code == 400
+    assert anon.get('/api/vlab/oidc/userinfo', headers={'Authorization': 'Bearer nope'}).status_code == 401
+
+
+def test_oidc_code_expires(env, fake_wg, oidc_on, monkeypatch):
+    from pegaprox.vlab import wg_oidc
+    _, _, admin, _, _ = env
+    _configure(admin)
+    verifier, challenge = _pkce()
+    code = wg_oidc.issue_code('alice', RETURN, 'n', challenge)
+    real = wg_oidc.time.time
+    monkeypatch.setattr(wg_oidc.time, 'time', lambda: real() + wg_oidc.CODE_TTL + 1)
+    assert wg_oidc.redeem_code(code, RETURN, verifier) is None
+
+
+def test_warpgate_yaml_snippet_carries_no_secret(oidc_on):
+    from pegaprox.vlab import wg_oidc
+    snip = wg_oidc.warpgate_yaml_snippet()
+    assert 'oidc-client-secret' not in snip and 'name: moavi-desk' in snip and 'type: custom' in snip
+    assert 'issuer_url: http://vlab-engine:5000/api/vlab/oidc' in snip

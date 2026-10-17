@@ -379,6 +379,7 @@ def ensure_user(cfg, username, role_id=None):
     if uid is None:
         created = _call(cfg, 'POST', '/users', {'username': username})
         uid = created['id']
+    _ensure_sso_credential(cfg, uid, username)
     if role_id:
         try:
             # the API wants a JSON body here (AddUserRoleRequest, optional expires_at) - without one
@@ -388,6 +389,20 @@ def ensure_user(cfg, username, role_id=None):
             if e.status != 409:   # 409 = already has the role; anything else is a real failure
                 raise
     return uid
+
+
+def _ensure_sso_credential(cfg, uid, username):
+    """With MOAVI Desk as Warpgate's sign-in (pegaprox/vlab/wg_oidc.py), Warpgate finds the user by
+    this SSO credential: provider moavi-desk + the user's fixed SSO e-mail. No password anywhere."""
+    from pegaprox.vlab import wg_oidc
+    if not wg_oidc.is_enabled():
+        return
+    email = wg_oidc.sso_email(username)
+    have = _call(cfg, 'GET', f'/users/{uid}/credentials/sso') or []
+    if any(isinstance(c, dict) and c.get('provider') == wg_oidc.PROVIDER_NAME and c.get('email') == email
+           for c in have):
+        return
+    _call(cfg, 'POST', f'/users/{uid}/credentials/sso', {'provider': wg_oidc.PROVIDER_NAME, 'email': email})
 
 
 def sync_target(cfg, ref, label, proto, options, role_id=None):
