@@ -33,6 +33,7 @@ takes effect:
 PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
 CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
 WEB_IDE = ('jupyter', 'vscode')
+SSH_FILES = ('off', 'down', 'up', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
 RESET_TYPES = ('reset', 'classroom')
 
 DEFAULTS = {
@@ -57,10 +58,12 @@ DEFAULTS = {
     'defer_max_hours': 12,
     'web_ide': [],
     'web_ide_idle_min': 240,
+    'browser_ssh': False,       # the portal's browser terminal (Guacamole SSH) for Linux desktops
+    'ssh_files': 'off',         # that terminal's file transfer (SFTP)
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
-          'reset_on_logout', 'allow_power', 'defer_when_busy')
+          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080)}
@@ -100,6 +103,10 @@ def validate(data, pool_type):
         elif k == 'clipboard':
             if v not in CLIPBOARD:
                 return None, f"clipboard must be one of {', '.join(CLIPBOARD)}"
+            out[k] = v
+        elif k == 'ssh_files':
+            if v not in SSH_FILES:
+                return None, f"ssh_files must be one of {', '.join(SSH_FILES)}"
             out[k] = v
         elif k in _BOOLS:
             if not isinstance(v, bool):
