@@ -5,6 +5,7 @@ pegaprox/vlab/warpgate.py): 관리자 설정(토큰 봉인), 데스크톱 접속
 
 Warpgate 관리자 API는 wg._api를 가로채 흉내낸다(네트워크 없음)."""
 import json
+import re
 
 import pytest
 
@@ -52,6 +53,7 @@ class FakeWarpgate:
         self.roles = {}     # name -> uuid
         self.next = 1
         self.tickets = []
+        self.keys = {}      # uid -> [ {id,label,openssh_public_key} ]
 
     def _id(self, p):
         self.next += 1
@@ -83,6 +85,20 @@ class FakeWarpgate:
                          'secret': 'TKT-SECRET-123'}
         if method == 'PUT' and path.startswith('/targets/'):
             return 200, {}
+        # public-key credentials: /users/<uid>/credentials/public-keys[/<id>]
+        m = re.match(r'^/users/([^/]+)/credentials/public-keys(?:/([^/]+))?$', path)
+        if m:
+            uid, kid = m.group(1), m.group(2)
+            lst = self.keys.setdefault(uid, [])
+            if method == 'GET':
+                return 200, list(lst)
+            if method == 'POST':
+                row = {'id': self._id('key'), 'label': body['label'], 'openssh_public_key': body['openssh_public_key']}
+                lst.append(row)
+                return 201, row
+            if method == 'DELETE' and kid:
+                self.keys[uid] = [k for k in lst if k['id'] != kid]
+                return 200, {}
         return 404, 'not found'
 
 
@@ -200,7 +216,7 @@ def test_connect_ssh_uses_warpgate_public_key(env, fake_wg, monkeypatch):
 
 def test_portal_status_reflects_enabled(env):
     _, _, admin, alice, _ = env
-    assert alice.get('/api/vlab/me/warpgate').get_json() == {'enabled': False, 'protocols': ['rdp', 'ssh', 'vnc']}
+    assert alice.get('/api/vlab/me/warpgate').get_json() == {'enabled': False, 'protocols': ['rdp', 'ssh', 'vnc'], 'web_rdp_provider': 'guac'}
     _configure(admin)
     assert alice.get('/api/vlab/me/warpgate').get_json()['enabled'] is True
 
@@ -245,3 +261,70 @@ def test_second_connect_reuses_the_target(env, fake_wg, monkeypatch):
     puts = [p for (m, p, b) in fake_wg.calls if m == 'PUT' and p.startswith('/targets/')]
     assert len(posts) == 1 and len(puts) == 1   # 두 번째는 생성이 아니라 갱신
     assert len(fake_wg.tickets) == 2            # 티켓은 매번 새로
+
+
+# --- researcher native SSH: keys, config, policy, provider -------------------------------
+
+def test_public_key_validation_rejects_private_keys():
+    assert wg.is_public_key('ssh-ed25519 AAAAC3NzaC1lZDI1 user@host') is True
+    assert wg.is_public_key('ssh-rsa AAAAB3NzaC1yc2E=') is True
+    assert wg.is_public_key('-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----') is False
+    assert wg.is_public_key('not a key') is False and wg.is_public_key('') is False
+
+
+def test_ssh_username_and_config_entry_use_warpgate_not_proxyjump():
+    cfg = {'base_url': 'https://wg.example:8888', 'ssh_port': 2222}
+    assert wg.ssh_username('alice', 'moavi-x') == 'alice:moavi-x'
+    e = wg.ssh_config_entry(cfg, 'moavi-pc', 'alice', 'moavi-x')
+    assert e['hostname'] == 'wg.example' and e['port'] == 2222 and e['user'] == 'alice:moavi-x'
+    assert 'ProxyJump' not in e['config_snippet'] and 'User alice:moavi-x' in e['config_snippet']
+    assert e['ssh_command'] == 'ssh moavi-pc'
+
+
+def test_my_ssh_keys_add_list_delete(env, fake_wg):
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    assert alice.get('/api/vlab/me/ssh-keys').get_json()['keys'] == []
+    # a private key is refused, never sent to Warpgate
+    bad = alice.post('/api/vlab/me/ssh-keys', json={'openssh_public_key': '-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----'})
+    assert bad.status_code == 400 and not any(fake_wg.keys.values())
+    r = alice.post('/api/vlab/me/ssh-keys', json={'label': '노트북', 'openssh_public_key': 'ssh-ed25519 AAAAC3NzaC1 alice@pc'})
+    assert r.status_code == 201
+    keys = r.get_json()['keys']
+    assert len(keys) == 1 and keys[0]['label'] == '노트북'
+    assert alice.delete(f"/api/vlab/me/ssh-keys/{keys[0]['id']}").get_json()['keys'] == []
+
+
+def test_ssh_config_lists_researcher_ssh_desktops(env, fake_wg):
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    # off by default
+    assert alice.get('/api/vlab/me/ssh-config').get_json()['entries'] == []
+    pool = store.create_pool('연구실', 'dedicated', CID)
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'ai-box')
+    store.set_assignment(d['id'], 'alice')
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'researcher_ssh': True})
+    r = alice.get('/api/vlab/me/ssh-config').get_json()
+    assert r['enabled'] is True and r['warpgate_host'] == 'wg.example' and r['login'] == 'alice' and r['ssh_port'] == 2222
+    assert len(r['entries']) == 1
+    e = r['entries'][0]
+    assert e['user'].startswith('alice:moavi-ai-box-') and e['hostname'] == 'wg.example'
+    assert 'User alice:moavi-ai-box-' in r['managed_block'] and 'ProxyJump' not in r['managed_block']
+
+
+def test_policy_has_researcher_ssh_toggle():
+    from pegaprox.vlab import policy as pool_policy
+    assert pool_policy.effective({})['researcher_ssh'] is False
+    ok, err = pool_policy.validate({'researcher_ssh': True}, 'dedicated')
+    assert err is None and ok['researcher_ssh'] is True
+    assert pool_policy.validate({'researcher_ssh': 'yes'}, 'dedicated')[1]
+
+
+def test_web_rdp_provider_defaults_to_guac_and_switches(env):
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['web_rdp_provider'] == 'guac'
+    assert alice.get('/api/vlab/me/warpgate').get_json()['web_rdp_provider'] == 'guac'
+    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'warpgate'})
+    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['web_rdp_provider'] == 'warpgate'
+    assert admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': True, 'web_rdp_provider': 'bogus'}).status_code == 400

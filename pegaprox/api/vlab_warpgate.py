@@ -13,6 +13,8 @@ MOAVI Desk - Warpgate 접근 게이트웨이(bastion) API (pegaprox/vlab/warpgat
   POST /api/vlab/me/desktops/<id>/warpgate   {protocol: rdp|ssh|vnc} 티켓 발급 + 접속 좌표     vlab.desk
 """
 
+import re
+
 from flask import Blueprint, jsonify, request
 
 from pegaprox.api import vlab as core
@@ -71,8 +73,12 @@ def put_warpgate():
     token = data['admin_token'] if 'admin_token' in data else None
     nla_pw = data['rdp_nla_password'] if 'rdp_nla_password' in data else None
     nla_user = data['rdp_nla_user'] if 'rdp_nla_user' in data else None
+    provider = data.get('web_rdp_provider')
+    if provider is not None and provider not in ('guac', 'warpgate'):
+        return _bad('web_rdp_provider must be guac or warpgate')
     cfg = wg.save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
-                         admin_token=token, rdp_nla_user=nla_user, rdp_nla_password=nla_pw)
+                         admin_token=token, rdp_nla_user=nla_user, rdp_nla_password=nla_pw,
+                         web_rdp_provider=provider)
     log_audit(_user(), 'vlab.warpgate.config', f"Warpgate {base_url or '-'} enabled={enabled}", get_client_ip())
     return jsonify({'config': cfg})
 
@@ -102,8 +108,103 @@ def warpgate_sessions():
 @bp.route('/api/vlab/me/warpgate', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
 def my_warpgate_status():
-    """포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음)."""
-    return jsonify({'enabled': wg.is_enabled(), 'protocols': list(wg.TARGET_KINDS)})
+    """포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음).
+    web_rdp_provider: 브라우저 RDP를 누가 서비스하는지(guac 기본 / warpgate 검증 후)."""
+    cfg = wg.config()
+    return jsonify({'enabled': wg.is_enabled(), 'protocols': list(wg.TARGET_KINDS),
+                    'web_rdp_provider': cfg['web_rdp_provider']})
+
+
+# --- researcher native SSH: the user's own keys and ssh config ---------------------------
+
+def _my_ssh_desktops(username):
+    """researcher_ssh 정책이 켜진 풀의, 이 사용자에게 배정된 데스크톱."""
+    from pegaprox.api.vlab_next import shared_member
+    out = []
+    for d in store.list_desktops():
+        if d['assigned_user'] != username and not shared_member(d, username):
+            continue
+        pol = pool_policy.effective((store.get_pool(d['pool_id']) or {}).get('settings'))
+        if pol.get('researcher_ssh'):
+            out.append(d)
+    return out
+
+
+@bp.route('/api/vlab/me/ssh-keys', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_ssh_keys():
+    """내 계정: 내가 Warpgate에 등록한 SSH 공개키 목록. 개인키는 다루지 않는다."""
+    if not wg.is_enabled():
+        return jsonify({'enabled': False, 'keys': []})
+    cfg = wg.config(secret=True)
+    try:
+        return jsonify({'enabled': True, 'keys': wg.list_user_keys(cfg, _user())})
+    except wg.WarpgateError as e:
+        return jsonify({'error': str(e), 'code': 'WG_API'}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'code': 'WG_UNREACHABLE'}), 502
+
+
+@bp.route('/api/vlab/me/ssh-keys', methods=['POST'])
+@require_auth(perms=['vlab.desk'])
+def add_my_ssh_key():
+    """내 공개키를 Warpgate에 등록(엔진은 저장하지 않음). 개인키·잘못된 형식은 거부한다."""
+    if not wg.is_enabled():
+        return jsonify({'error': 'Warpgate 게이트웨이가 켜져 있지 않습니다', 'code': 'WG_OFF'}), 409
+    data = _body()
+    key = str(data.get('openssh_public_key') or '').strip()
+    label = str(data.get('label') or '').strip() or 'MOAVI Desk'
+    if not wg.is_public_key(key):
+        return _bad('openssh_public_key: OpenSSH 공개키 한 줄이어야 합니다(개인키는 받지 않습니다)')
+    cfg = wg.config(secret=True)
+    try:
+        wg.add_user_key(cfg, _user(), label, key)
+    except wg.WarpgateError as e:
+        return jsonify({'error': str(e), 'code': 'WG_API'}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'code': 'WG_UNREACHABLE'}), 502
+    log_audit(_user(), 'vlab.warpgate.ssh_key_add', f"SSH public key '{label}'", get_client_ip())
+    return jsonify({'keys': wg.list_user_keys(cfg, _user())}), 201
+
+
+@bp.route('/api/vlab/me/ssh-keys/<key_id>', methods=['DELETE'])
+@require_auth(perms=['vlab.desk'])
+def delete_my_ssh_key(key_id):
+    if not wg.is_enabled():
+        return jsonify({'error': 'Warpgate 게이트웨이가 켜져 있지 않습니다', 'code': 'WG_OFF'}), 409
+    cfg = wg.config(secret=True)
+    try:
+        wg.delete_user_key(cfg, _user(), key_id)
+    except wg.WarpgateError as e:
+        return jsonify({'error': str(e), 'code': 'WG_API'}), 502
+    except Exception as e:
+        return jsonify({'error': str(e)[:200], 'code': 'WG_UNREACHABLE'}), 502
+    log_audit(_user(), 'vlab.warpgate.ssh_key_del', f"SSH public key {key_id}", get_client_ip())
+    return jsonify({'keys': wg.list_user_keys(cfg, _user())})
+
+
+@bp.route('/api/vlab/me/ssh-config', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_ssh_config():
+    """researcher_ssh 풀의 내 데스크톱을 자기 SSH 도구로 쓰기 위한 정보: Warpgate 호스트·포트·로그인과
+    데스크톱별 ~/.ssh/config 항목(`User <wguser>:<target>`; Warpgate는 점프 호스트가 아니라 이 형식으로
+    대상을 고른다). MOAVI Desk 클라이언트가 이 블록을 사용자의 config에 자동으로 넣는다."""
+    if not wg.is_enabled():
+        return jsonify({'enabled': False, 'entries': []})
+    cfg = wg.config()
+    username = _user()
+    host_alias_prefix = 'moavi-'
+    entries = []
+    for d in _my_ssh_desktops(username):
+        target = wg.target_name_for(d['id'], d['name'])
+        alias = host_alias_prefix + re.sub(r'[^A-Za-z0-9._-]+', '-', d['name']).strip('-').lower()
+        e = wg.ssh_config_entry(cfg, alias, username, target)
+        e['desktop_id'] = d['id']
+        e['desktop_name'] = d['name']
+        entries.append(e)
+    managed = ''.join(e['config_snippet'] + '\n' for e in entries)
+    return jsonify({'enabled': True, 'warpgate_host': wg._host_of(cfg['base_url']), 'ssh_port': cfg['ssh_port'],
+                    'login': username, 'entries': entries, 'managed_block': managed.strip()})
 
 
 # --- portal connect ----------------------------------------------------------------------

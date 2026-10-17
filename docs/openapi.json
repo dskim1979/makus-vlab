@@ -65174,7 +65174,164 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음).",
+        "summary": "포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음). web_rdp_provider: 브라우저 RDP를 누가 서비스하는지(guac 기본 / warpgate 검증 후).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-keys": {
+      "get": {
+        "operationId": "vlab_warpgate.my_ssh_keys_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "내 계정: 내가 Warpgate에 등록한 SSH 공개키 목록. 개인키는 다루지 않는다.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      },
+      "post": {
+        "operationId": "vlab_warpgate.add_my_ssh_key_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "내 공개키를 Warpgate에 등록(엔진은 저장하지 않음). 개인키·잘못된 형식은 거부한다.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-keys/{key_id}": {
+      "delete": {
+        "operationId": "vlab_warpgate.delete_my_ssh_key_delete",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-config": {
+      "get": {
+        "operationId": "vlab_warpgate.my_ssh_config_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "researcher_ssh 풀의 내 데스크톱을 자기 SSH 도구로 쓰기 위한 정보: Warpgate 호스트·포트·로그인과 데스크톱별 ~/.ssh/config 항목(`User <wguser>:<target>`; Warpgate는 점프 호스트가 아니라 이 형식으로 대상을 고른다). MOAVI Desk 클라이언트가 이 블록을 사용자의 config에 자동으로 넣는다.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {

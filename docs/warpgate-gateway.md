@@ -101,6 +101,59 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 - 포털 연결을 Warpgate 경유로 라우팅,
 - 관리자에서 녹화 세션 링크.
 
+## 4-1. 연구자 네이티브 SSH (자기 SSH 도구로 게이트웨이 통과)
+연구자가 PuTTY·scp/pscp·WinSCP·VS Code Remote-SSH·git·rsync 를 **평소처럼** 쓰되 Warpgate를
+투명하게 거치게 한다(풀 정책 `researcher_ssh`, 브라우저 SSH와 별개).
+
+- **Warpgate는 점프 호스트가 아니다.** 저장소 README: "Not a jump host — forwards connection
+  straight to the target ... receives connections with specifically formatted credentials."
+  즉 `ssh -J`(ProxyJump)가 아니라 **SSH 사용자 이름에 대상을 넣어** 대상을 고른다:
+  `User <wguser>:<target>` + `HostName <warpgate>` + `Port <ssh_port>`. 그래서 대상 IP가 드러나지
+  않는다. (처음 피어 지시의 ProxyJump 대신 이 형식을 쓴 이유 — Warpgate가 그렇게 동작한다.)
+- **공개키 등록(비밀번호·개인키 비저장)**: 사용자가 포털 "내 계정" 또는 MOAVI Desk 클라이언트로
+  자기 **공개키**를 올리면 엔진이 Warpgate `POST /users/<id>/credentials/public-keys`
+  (`NewPublicKeyCredential{label, openssh_public_key}`)로 등록한다. 엔진은 개인키처럼 보이면
+  거부하고(`PRIVATE KEY`), 공개키를 자기 DB에 저장하지 않는다(보관은 Warpgate).
+- **클라이언트 자동 구성**: `GET /api/vlab/me/ssh-config` 가 Warpgate host/port/login과 researcher_ssh
+  데스크톱별 `~/.ssh/config` 항목(`Host moavi-<name>` 한 개 = `User <wguser>:<target>`)을 준다.
+  MOAVI Desk Windows 클라이언트가 이를 `%USERPROFILE%\.ssh\config` 의 **관리 블록(BEGIN/END MOAVI)**
+  안에만 써 넣어, PuTTY/WinSCP/VS Code가 데스크톱 이름만 고르면 바로 붙는다(블록 밖은 건드리지 않음).
+- **파일 전송(scp/SFTP)**은 브라우저 SSH와 같은 `ssh_files`류 정책을 따르고 Warpgate가 기록한다.
+  셸은 본질적으로 유출을 완전히 막지 못하므로, 엄격한 풀은 researcher_ssh를 끄고 브라우저 터미널만
+  허용하거나 셸/scp를 제한한다(문서에 명시).
+
+## 4-2. 공존과 전환 (web_rdp_provider)
+- Warpgate는 **추가(additive)** 다. 내장 Guacamole 브라우저 RDP/SSH, 외부 데스크톱 "브라우저로 연결",
+  방금 커밋한 `/ssh`(Guacamole SSH)는 **끄지 않고 그대로** 둔다 — 브라우저리스/원격/크롬북/태블릿
+  사용자의 유일한 접속 수단이라 절대 끊기면 안 된다.
+- 설정 `web_rdp_provider`(기본 `guac`)가 전환점이다. 브라우저 RDP는 실클러스터에서 Warpgate 웹 RDP가
+  검증될 때까지 **Guacamole가 기본**이다. 포털의 기존 "브라우저 RDP로 열기"는 그대로 Guacamole로
+  동작하고, Warpgate 연결은 **별도 메뉴**로 추가되어 둘 다 쓸 수 있다. → 브라우저 RDP는 항상
+  {Guacamole, Warpgate} 중 적어도 하나가 서비스하며, 둘 다 꺼지는 상태가 없다.
+- `GET /api/vlab/me/warpgate` 가 `enabled`·`web_rdp_provider`를 주어 포털이 무엇을 보일지 정한다.
+
+## 4-3. 실(real) Warpgate + Proxmox 클러스터 검증 체크리스트
+우리 작업은 **코드 + 모킹 테스트**뿐이다. 아래는 실제 Warpgate 컨테이너와 Proxmox 클러스터에서
+사람이 확인해야 할 항목이다. 전부 통과하기 전에는 기본 경로(Guacamole)를 끄지 않는다.
+
+- [ ] **브라우저 RDP (Warpgate)**: 포털 Warpgate 연결 → 새 탭에서 데스크톱 화면이 뜨고 로그인된다.
+- [ ] **네이티브 RDP**: `ticket-<secret>` 사용자 이름으로 Warpgate RDP 포트에 붙어 접속된다
+      (interactive_logon: 데스크톱 Windows 로그온 화면, 사용자 계정으로 로그인).
+- [ ] **네이티브 SSH (자기 도구)**: `ssh moavi-<name>`, `scp`, WinSCP, VS Code Remote-SSH가
+      `~/.ssh/config` 관리 블록으로 바로 붙고, 공개키로 인증된다(비밀번호 안 물음).
+- [ ] **브라우저 SSH (Warpgate)**: 티켓으로 브라우저 터미널이 열린다.
+- [ ] **VNC**: (해당 풀이 있으면) VNC 접속이 된다.
+- [ ] **세션 녹화**: 위 세션들이 Warpgate 관리자 녹화 페이지에서 재생된다.
+- [ ] **직접 접속 차단**: 데스크톱 IP로 직접 RDP/SSH/VNC → 막힘(Proxmox 보안 그룹, relay=Warpgate).
+- [ ] **1회용 티켓**: 한 번 쓴 티켓 재사용 불가, 만료 뒤 불가.
+- [ ] **비밀번호 비저장**: 엔진 DB·로그에 사용자/데스크톱 비밀번호가 없다(봉인된 관리자 토큰·NLA
+      서비스 계정만).
+- [ ] **디렉터리 로그인**: Warpgate가 OIDC/LDAP로 포털·디렉터리 계정을 인증한다(config.yaml).
+- [ ] **unattended-setup**: 컨테이너 첫 기동이 설정을 만들고 재기동이 안전하다(--if-config-exists skip).
+
+통과하면 전환: `web_rdp_provider=warpgate` 로 바꾸고(필요 시) Guacamole 경로를 내린다. 제거 방법과
+되돌리기는 아래 5절.
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.
@@ -108,3 +161,15 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 - **실제 검증 필요(클러스터 있어야 함)**: 실제 Warpgate 컨테이너에 대한 티켓 발급/사용,
   RDP `interactive_logon` + NLA 서비스 계정 동작, VNC None auth, 번들 디렉터리 LDAP/OIDC 연동,
   Proxmox 방화벽에서의 실제 차단, 세션 녹화 저장.
+
+### 5-1. 제거(삭제)는 검증 후에만 — 별도 커밋
+사용자가 실클러스터 검증(4-3)을 **문제없이** 확인한 뒤에만 대체 대상을 지운다. 그래서 삭제는
+**main Warpgate 커밋에 섞지 않고**, 적용 준비가 된 **별도 커밋**(제목에 "apply only after
+real-cluster verification passes")으로 브랜치 맨 위에 둔다. 그 커밋이 지우는 것:
+- 번들 Guacamole 컨테이너·배선(docker-compose의 guacd/guacamole/vlab-guac-key/vlab-guac,
+  `VLAB_GUACAMOLE`, 엔진의 내장 Guacamole 게이트웨이 등록),
+- 방금 커밋한 Guacamole 브라우저-SSH 엔드포인트 `/api/vlab/desktops/<id>/ssh` 와 관련 정책 필드,
+- 남아 있는 rdpGW 언급(번들하지 않음).
+
+검증 전에는 이 커밋을 적용하지 않는다(브라우저 RDP가 끊길 수 있음). 되돌리기: 해당 커밋을
+`git revert` 하거나, 적용 전이라면 단순히 적용하지 않는다. 커밋 해시·요약·롤백은 최종 보고 참조.

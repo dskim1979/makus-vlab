@@ -44,6 +44,7 @@ _SCHEMA = (
         verify_tls INTEGER NOT NULL DEFAULT 0,
         rdp_nla_user TEXT NOT NULL DEFAULT '',
         rdp_nla_password_encrypted TEXT NOT NULL DEFAULT '',
+        web_rdp_provider TEXT NOT NULL DEFAULT 'guac',
         enabled INTEGER NOT NULL DEFAULT 0,
         last_check TEXT,
         last_ok INTEGER,
@@ -96,11 +97,12 @@ def config(secret=False):
     if not r:
         return {'base_url': '', 'ssh_port': DEFAULT_PORTS['ssh'], 'rdp_port': DEFAULT_PORTS['rdp'],
                 'vnc_port': DEFAULT_PORTS['vnc'], 'verify_tls': False, 'enabled': False,
-                'rdp_nla_user': '', 'has_nla_password': False,
+                'rdp_nla_user': '', 'has_nla_password': False, 'web_rdp_provider': 'guac',
                 'has_token': False, 'last_check': None, 'last_ok': None, 'last_detail': ''}
     out = {'base_url': r['base_url'], 'ssh_port': r['ssh_port'], 'rdp_port': r['rdp_port'],
            'vnc_port': r['vnc_port'], 'verify_tls': bool(r['verify_tls']), 'enabled': bool(r['enabled']),
            'rdp_nla_user': r['rdp_nla_user'], 'has_nla_password': bool(r['rdp_nla_password_encrypted']),
+           'web_rdp_provider': r['web_rdp_provider'] or 'guac',
            'has_token': bool(r['admin_token_encrypted']), 'last_check': r['last_check'],
            'last_ok': None if r['last_ok'] is None else bool(r['last_ok']), 'last_detail': r['last_detail']}
     if secret:
@@ -120,13 +122,15 @@ def _unseal(sealed):
 
 
 def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
-                admin_token=None, rdp_nla_user=None, rdp_nla_password=None):
-    """설정 저장. admin_token / rdp_nla_password: None이면 기존값 유지, ''이면 지움, 값이면 봉인해 저장."""
+                admin_token=None, rdp_nla_user=None, rdp_nla_password=None, web_rdp_provider=None):
+    """설정 저장. admin_token / rdp_nla_password: None이면 기존값 유지, ''이면 지움, 값이면 봉인해 저장.
+    web_rdp_provider: 'guac'(기본, 항상 작동) 또는 'warpgate'(실클러스터 검증 후 전환)."""
     base_url = (base_url or '').strip().rstrip('/')
     r = _row()
     sealed = r['admin_token_encrypted'] if r else ''
     nla_sealed = r['rdp_nla_password_encrypted'] if r else ''
     nla_user = r['rdp_nla_user'] if r else ''
+    provider = (r['web_rdp_provider'] if r else 'guac') or 'guac'
     if admin_token is not None or rdp_nla_password is not None:
         from pegaprox.core.db import get_db
         gdb = get_db()
@@ -136,14 +140,16 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
             nla_sealed = gdb._encrypt(rdp_nla_password) if rdp_nla_password else ''
     if rdp_nla_user is not None:
         nla_user = (rdp_nla_user or '').strip()
+    if web_rdp_provider in ('guac', 'warpgate'):
+        provider = web_rdp_provider
     db().execute(
         '''INSERT OR REPLACE INTO vlab_warpgate
            (id, base_url, admin_token_encrypted, ssh_port, rdp_port, vnc_port, verify_tls,
-            rdp_nla_user, rdp_nla_password_encrypted, enabled,
+            rdp_nla_user, rdp_nla_password_encrypted, web_rdp_provider, enabled,
             last_check, last_ok, last_detail, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (CONFIG_ID, base_url, sealed, int(ssh_port), int(rdp_port), int(vnc_port),
-         1 if verify_tls else 0, nla_user, nla_sealed, 1 if enabled else 0,
+         1 if verify_tls else 0, nla_user, nla_sealed, provider, 1 if enabled else 0,
          r['last_check'] if r else None, r['last_ok'] if r else None,
          r['last_detail'] if r else '', now()))
     return config()
@@ -346,6 +352,63 @@ def issue_ticket(cfg, username, target_name, ttl_seconds=TICKET_TTL_SECONDS):
             'expiry': expiry, 'description': f'MOAVI Desk connect: {username} -> {target_name}'}
     data = _call(cfg, 'POST', '/tickets', body)
     return data.get('ticket'), data.get('secret')
+
+
+# --- researcher native SSH (own tools through Warpgate) ----------------------------------
+
+_PUBKEY_RE = re.compile(r'^(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-\S+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-\S+)\s+[A-Za-z0-9+/=]+(\s+\S.*)?$')
+
+
+def is_public_key(text):
+    """OpenSSH 공개키 한 줄인지 확인. 개인키처럼 보이면(-----BEGIN ... PRIVATE KEY-----) 거부."""
+    t = (text or '').strip()
+    if not t or 'PRIVATE KEY' in t.upper():
+        return False
+    return bool(_PUBKEY_RE.match(t))
+
+
+def list_user_keys(cfg, username):
+    """사용자의 Warpgate 공개키 자격 목록(개인키는 다루지 않음)."""
+    uid = ensure_user(cfg, username)
+    rows = _call(cfg, 'GET', f'/users/{uid}/credentials/public-keys') or []
+    return [{'id': r.get('id'), 'label': r.get('label', ''), 'openssh_public_key': r.get('openssh_public_key', ''),
+             'date_added': r.get('date_added'), 'last_used': r.get('last_used')} for r in rows if isinstance(r, dict)]
+
+
+def add_user_key(cfg, username, label, openssh_public_key, role_id=None):
+    """사용자 공개키를 Warpgate에 등록한다(엔진 DB에는 저장하지 않는다)."""
+    uid = ensure_user(cfg, username, role_id)
+    created = _call(cfg, 'POST', f'/users/{uid}/credentials/public-keys',
+                    {'label': (label or 'MOAVI Desk')[:80], 'openssh_public_key': openssh_public_key.strip()})
+    return created
+
+
+def delete_user_key(cfg, username, key_id):
+    uid = ensure_user(cfg, username)
+    _call(cfg, 'DELETE', f'/users/{uid}/credentials/public-keys/{key_id}')
+
+
+def ssh_username(username, target_name):
+    """Warpgate SSH는 점프 호스트가 아니라, 사용자 이름에 대상을 넣어 대상을 고른다(README: specifically
+    formatted credentials). 그래서 ProxyJump가 아니라 `User <wguser>:<target>` 형식을 쓴다."""
+    return f'{username}:{target_name}'
+
+
+def ssh_config_entry(cfg, host_alias, username, target_name):
+    """native SSH 도구(PuTTY/scp/WinSCP/VS Code Remote-SSH)용 ~/.ssh/config 한 항목."""
+    wg_host = _host_of(cfg['base_url'])
+    return {
+        'host': host_alias,
+        'hostname': wg_host,
+        'port': int(cfg['ssh_port']),
+        'user': ssh_username(username, target_name),
+        'target_name': target_name,
+        'ssh_command': f'ssh {host_alias}',
+        'config_snippet': (f'Host {host_alias}\n'
+                           f'    HostName {wg_host}\n'
+                           f'    Port {int(cfg["ssh_port"])}\n'
+                           f'    User {ssh_username(username, target_name)}\n'),
+    }
 
 
 def recording_url(cfg, session_id=None):
