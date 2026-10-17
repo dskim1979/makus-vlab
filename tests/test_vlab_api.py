@@ -402,7 +402,7 @@ def test_the_policy_shapes_the_connection(connectable):
     assert a['clipboard'] == 'to_desktop'
     (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
     assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': [],
-                              'screen_thumbnail': True}
+                              'screen_thumbnail': False}   # a reset pool: off unless turned on
 
 
 def test_the_policy_can_take_power_away(connectable):
@@ -545,8 +545,15 @@ def grabs(monkeypatch):
     return calls
 
 
+def _on(admin, desk):
+    """connectable's pools are reset pools, where the picture is off until an admin turns it on."""
+    r = admin.put(f"/api/vlab/admin/pools/{desk['pool_id']}/policy", json={'screen_thumbnail': True})
+    assert r.status_code == 200, r.get_json()
+
+
 def test_the_assigned_user_sees_their_running_desktop(connectable, grabs):
-    _, alice, _, _, desk, _ = connectable
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
     r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
     assert r.status_code == 200 and r.mimetype == 'image/png' and r.data == SHOT
     assert r.headers['Cache-Control'] == 'private, max-age=20' and r.headers['X-Screenshot-Cache'] == 'miss'
@@ -555,18 +562,34 @@ def test_the_assigned_user_sees_their_running_desktop(connectable, grabs):
     assert grabs == [('pve1', 'qemu', 300)]
 
 
-def test_only_the_assigned_user_and_admins_see_the_screen(connectable, grabs):
-    admin, _, bob, viewer, desk, _ = connectable
-    for who in (bob, viewer):
+def test_in_a_shared_pool_only_the_user_on_the_desktop_sees_it(connectable, grabs):
+    admin, alice, bob, viewer, desk, _ = connectable
+    _on(admin, desk)
+    for who in (bob, viewer, admin):   # not an admin either: it could be anyone's screen
         r = who.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
         assert r.status_code == 404 and r.data[:4] != SHOT[:4]
-    assert admin.get('/api/vlab/desktops/nope/screenshot').status_code == 404
-    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    # whoever has a session on it now does
+    store.start_session('bob', store.get_desktop(desk['id']), 'vnc', '10.0.0.9')
+    assert bob.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
     assert grabs == [('pve1', 'qemu', 300)]
 
 
+def test_a_dedicated_pool_shows_it_by_default_to_its_user_and_admins(env, grabs):
+    _, admin, alice, bob, _ = env
+    pool = admin.post('/api/vlab/admin/pools', json={'name': '전용', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    desk = admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': 300}).get_json()['desktop']
+    admin.put(f"/api/vlab/admin/desktops/{desk['id']}/assign", json={'username': 'alice'})
+    assert admin.get(f"/api/vlab/admin/pools/{pool['id']}/policy").get_json()['policy']['screen_thumbnail'] is True
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    assert bob.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 404
+    assert admin.get('/api/vlab/desktops/nope/screenshot').status_code == 404
+
+
 def test_no_picture_is_204_without_a_reason(connectable, grabs):
-    _, alice, _, _, desk, stopped = connectable
+    admin, alice, _, _, desk, stopped = connectable
+    _on(admin, desk)
+    _on(admin, stopped)
     r = alice.get(f"/api/vlab/desktops/{stopped['id']}/screenshot")
     assert r.status_code == 204 and r.data == b''
     grabs.grab.fail = IOError('vncproxy refused: HTTP 500')
@@ -577,21 +600,28 @@ def test_no_picture_is_204_without_a_reason(connectable, grabs):
     assert grabs == [('pve1', 'qemu', 300)]
 
 
-def test_the_pool_policy_turns_the_picture_off(connectable, grabs):
+def test_shared_pools_start_with_the_picture_off(connectable, grabs):
     admin, alice, _, _, desk, _ = connectable
     url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
-    assert admin.get(url).get_json()['policy']['screen_thumbnail'] is True
+    got = admin.get(url).get_json()
+    assert got['policy']['screen_thumbnail'] is False and got['defaults']['screen_thumbnail'] is False
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    # saving another setting does not pin the default down
+    assert admin.put(url, json={'clipboard': 'off'}).status_code == 200
+    assert 'screen_thumbnail' not in store.get_pool(desk['pool_id'])['settings']['policy']
     assert admin.put(url, json={'screen_thumbnail': 'no'}).status_code == 400
+    _on(admin, desk)
+    (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
+    assert mine['policy']['screen_thumbnail'] is True
     assert admin.put(url, json={'screen_thumbnail': False}).status_code == 200
     assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
-    (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
-    assert mine['policy']['screen_thumbnail'] is False
-    assert grabs == []
+    assert grabs == [('pve1', 'qemu', 300)]   # the one the listing started while it was on
 
 
 def test_a_black_display_says_off(connectable, grabs):
     from pegaprox.utils import vnc_grab
-    _, alice, _, _, desk, _ = connectable
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
     grabs.grab.fail = vnc_grab.BlankFrame('blank framebuffer (display likely off)')
     for _ in range(2):   # the second answer comes out of the cache
         r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
@@ -602,7 +632,8 @@ def test_a_black_display_says_off(connectable, grabs):
 def test_an_old_picture_is_answered_at_once_and_replaced_behind(connectable, grabs):
     import time
     import pegaprox.api.vms as vms
-    _, alice, _, _, desk, _ = connectable
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
     old = b'old-png'
     then = time.monotonic() - 60      # past the card's 20 s, inside the 5 min it may still show
     vms._vm_screenshot_cache[f'{CID}:300'] = (then, old)
@@ -627,7 +658,8 @@ def _settle(vms, key=f'{CID}:300'):
 
 def test_listing_the_desktops_starts_their_grabs(connectable, grabs):
     import pegaprox.api.vms as vms
-    _, alice, _, _, desk, _ = connectable
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
     assert alice.get('/api/vlab/me/desktops').status_code == 200
     _settle(vms)
     # only the running one (301 is stopped); the card's first look finds it cached

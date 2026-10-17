@@ -29,7 +29,9 @@ takes effect:
                                vlab-proxy /ide/<session>/ (pegaprox/api/vlab_research.py)
   web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
   screen_thumbnail             the portal card's screen picture (/api/vlab/desktops/<id>/screenshot). It is
-                               the VM's console: a Windows desktop used over RDP shows its lock screen there
+                               the VM's console: a Windows desktop used over RDP shows its lock screen there.
+                               Off by default except in dedicated pools - where desktops pass from user to
+                               user the picture could be someone else's screen (defaults_for)
   auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
                                (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
                                bundled directory is in use
@@ -41,6 +43,8 @@ CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
 WEB_IDE = ('jupyter', 'vscode')
 SSH_FILES = ('off', 'down', 'up', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
 RESET_TYPES = ('reset', 'classroom')
+# pools whose desktops pass from one user to the next: the screen picture is off unless set
+SHARED_SCREEN_TYPES = ('reset', 'shared', 'classroom', 'buildfarm')
 
 DEFAULTS = {
     # RDP first (H.264 · UDP, the lightest on a WAN for office work), SPICE / VNC as the choice;
@@ -78,11 +82,19 @@ _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a
            'web_ide_idle_min': (10, 10080)}
 
 
-def effective(settings):
-    """The pool's policy with defaults filled in (and the protocols of pools made before
-    there was a policy)."""
-    settings = settings if isinstance(settings, dict) else {}
+def defaults_for(pool_type=None):
+    """DEFAULTS for a pool of that type (None: the dedicated defaults)."""
     out = dict(DEFAULTS)
+    if pool_type in SHARED_SCREEN_TYPES:
+        out['screen_thumbnail'] = False
+    return out
+
+
+def effective(settings, pool_type=None):
+    """The pool's policy with defaults filled in (and the protocols of pools made before
+    there was a policy). Pass the pool type where screen_thumbnail matters."""
+    settings = settings if isinstance(settings, dict) else {}
+    out = defaults_for(pool_type)
     if settings.get('protocols'):
         out['protocols'] = [p for p in settings['protocols'] if p in PROTOCOLS] or DEFAULTS['protocols']
     stored = settings.get('policy')
@@ -102,6 +114,8 @@ def validate(data, pool_type):
     if unknown:
         return None, f"unknown fields: {', '.join(unknown)}"
     out = dict(DEFAULTS)
+    # not filled in: a pool that never set it keeps its type's default (defaults_for)
+    out.pop('screen_thumbnail')
     for k, v in data.items():
         if k == 'protocols':
             if not isinstance(v, list) or not v or any(p not in PROTOCOLS for p in v):

@@ -329,7 +329,7 @@ def my_desktops():
         v['work'] = work.get(d['id'])
         v['pool_type'] = d.get('pool_type', '')
         v['last_connected'] = last.get(d['id'])
-        pol = pool_policy.effective(_settings_of(d))
+        pol = pool_policy.effective(_settings_of(d), d.get('pool_type'))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
                        'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide'],
                        'screen_thumbnail': pol['screen_thumbnail']}
@@ -548,7 +548,8 @@ def power_desktop(desktop_id):
 def desktop_screenshot(desktop_id):
     """The portal card's picture of a running desktop: the console tile's grab (screendump, one
     shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache.
-    The assigned user (vlab.desk) or an admin with vlab.pool.view. 204 when there is no picture
+    The assigned user (vlab.desk) or an admin with vlab.pool.view; in a pool whose desktops pass
+    between users only the user on it now (assigned or in a session). 204 when there is no picture
     (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo;
     with X-Screen: off the display is there but black and the card says so.
     It is the VM's console, so a Windows desktop used over RDP shows its lock screen."""
@@ -561,13 +562,18 @@ def desktop_screenshot(desktop_id):
     desk = store.get_desktop(desktop_id)
     if not user or not desk or not _can_reach(desk['cluster_id']):
         return _bad('Desktop not found', 404)
-    mine = desk['assigned_user'] == _user() and has_permission(user, 'vlab.desk')
-    if not mine and not has_permission(user, 'vlab.pool.view'):
+    pool = store.get_pool(desk['pool_id']) or {}
+    shared = pool.get('type') in pool_policy.SHARED_SCREEN_TYPES
+    me = _user()
+    mine = has_permission(user, 'vlab.desk') and (desk['assigned_user'] == me or (shared and any(
+        s['desktop_id'] == desk['id'] and s['username'] == me for s in store.open_sessions())))
+    # where desktops pass between users only the one on it now sees it - not an admin either
+    if not mine and (shared or not has_permission(user, 'vlab.pool.view')):
         return _bad('Desktop not found', 404)
     none = ('', 204)
     if desk['vm_type'] != 'qemu' or standby_console_refusal():
         return none
-    if not pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))['screen_thumbnail']:
+    if not pool_policy.effective(pool.get('settings'), pool.get('type'))['screen_thumbnail']:
         return none
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False) or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
@@ -607,7 +613,7 @@ def warm_screens(desks, live):
         mgr = cluster_managers.get(d['cluster_id'])
         if (vm.get('status') != 'running' or not mgr or not getattr(mgr, 'is_connected', False)
                 or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox'
-                or not pool_policy.effective(_settings_of(d))['screen_thumbnail']):
+                or not pool_policy.effective(_settings_of(d), d.get('pool_type'))['screen_thumbnail']):
             continue
         try:
             cached_vm_frame(mgr, d['cluster_id'], vm.get('node') or d['node'], 'qemu', int(d['vmid']),
@@ -1726,7 +1732,8 @@ def get_pool_policy(pool_id):
     pool, err = _pool_or_error(pool_id)
     if err:
         return err
-    return jsonify({'policy': pool_policy.effective(pool.get('settings')), 'defaults': pool_policy.DEFAULTS,
+    return jsonify({'policy': pool_policy.effective(pool.get('settings'), pool.get('type')),
+                    'defaults': pool_policy.defaults_for(pool.get('type')),
                     'reset_allowed': pool.get('type') in pool_policy.RESET_TYPES})
 
 
