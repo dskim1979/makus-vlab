@@ -201,9 +201,11 @@ SSH는 Warpgate 자체 키 + 대상 사용자명)으로 대상에 붙는다. 사
   묻기"를 켜면, 대상 계정(NLA 서비스 계정)은 네트워크 수준 인증에만 쓰이고 사용자가 로그온 화면에서
   자기 AD 계정을 입력한다. 우리는 사용자 비밀번호를 저장하지 않는다. 이 화면 흐름은 실제 Windows/AD
   데스크톱에서 확인해야 한다(CI의 xrdp는 NLA가 없어 같은 경로가 아님).
-- **SSH**: 지금 대상 사용자명은 고정(`moavi`). 전용 풀은 데스크톱마다 사용자가 하나이므로, 대상
-  사용자명을 배정된 사용자의 디렉터리 계정으로 하고 Warpgate 클라이언트 공개키를 그 계정(AD/sssd의
-  authorized keys 또는 게스트 에이전트)으로 신뢰시키면 본인 계정으로 들어간다 — 후속 작업.
+- **SSH**: 접속하는 사용자 본인 계정으로 들어간다. 엔진이 접속할 때마다 SSH 대상 사용자명을 그 사용자의
+  아이디(로컬 · LDAP · 내장 디렉터리 SSSD — `use_fully_qualified_names = False`)로 맞추고, 게스트 에이전트로
+  그 계정의 `~/.ssh/authorized_keys`에 보안 게이트웨이 자체 공개키(`GET /ssh/own-keys`, 주석 `moavi-desk-gateway`)를
+  넣는다(홈이 없으면 `mkhomedir_helper`). 비밀번호는 쓰지 않는다. 데스크톱에 그 계정이 없으면 `SSH_NO_ACCOUNT`(409),
+  키를 못 넣으면 `SSH_KEY_FAILED`(502), Windows 데스크톱은 `SSH_LINUX_ONLY`(409) — 공용 `moavi` 계정으로 대신 들어가지 않는다.
 
 ## 4-5. 실환경(VM 117) 테스트 뒤 고친 것
 

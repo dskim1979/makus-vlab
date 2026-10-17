@@ -218,13 +218,14 @@ def my_ssh_config():
 
 # --- portal connect ----------------------------------------------------------------------
 
-def _desktop_target_options(cfg, proto, ip, desk=None, pol=None):
+def _desktop_target_options(cfg, proto, ip, desk=None, pol=None, ssh_user=None):
     """프로토콜별 Warpgate 대상 옵션. RDP는 interactive_logon=True(자동 로그인 안 함); NLA 서비스
     계정은 콘솔 설정의 것이 있으면 그것, 없으면 그 Windows 데스크톱의 moavi-nla(엔진이 만든 무작위
-    비번, prepare_windows_nla) - 사용자 비번이 아니다. VNC는 None 인증."""
+    비번, prepare_windows_nla) - 사용자 비번이 아니다. VNC는 None 인증.
+    SSH signs in as ssh_user: the connecting user's own desktop account (prepare_ssh_login)."""
     if proto == 'ssh':
         # the pool's file transfer switch also turns the gateway's web-SSH file panel on or off
-        return wg.ssh_target_options(ip, 22, 'moavi', None if pol is None else pol.get('ssh_files', 'off') != 'off')
+        return wg.ssh_target_options(ip, 22, ssh_user, None if pol is None else pol.get('ssh_files', 'off') != 'off')
     if proto == 'vnc':
         return wg.vnc_target_options(ip, int(cfg['vnc_port']))
     user, pw = cfg.get('rdp_nla_user') or '', cfg.get('rdp_nla_password') or ''
@@ -233,6 +234,32 @@ def _desktop_target_options(cfg, proto, ip, desk=None, pol=None):
         if own:
             user, pw = own
     return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True)
+
+
+SSH_NO_ACCOUNT_TEXT = "이 데스크톱에 '{}' 계정이 없습니다. 관리자에게 계정이나 도메인 조인을 요청하세요."
+
+
+def prepare_ssh_login(desk, mgr, node, login, cfg, wait=20):
+    """Before Warpgate opens SSH to a Linux desktop as `login`: Warpgate's own public key in that
+    account's authorized_keys, through the guest agent. (ok, code, detail); code SSH_NO_ACCOUNT
+    when the desktop has no such account, SSH_KEY_FAILED otherwise. Never raises."""
+    from pegaprox.api.vlab_next import _agent_run
+    try:
+        keys = wg.own_public_keys(cfg)
+    except Exception as e:
+        return False, 'SSH_KEY_FAILED', f'gateway keys: {str(e)[:150]}'
+    if not keys:
+        return False, 'SSH_KEY_FAILED', 'the gateway has no SSH client key'
+    try:
+        code, out, err, e = _agent_run(mgr, node, desk['vmid'], ['/bin/bash', '-c', wg.ssh_authorized_key_script()],
+                                       stdin=login + '\n' + '\n'.join(keys) + '\n', wait=wait)
+    except Exception as ex:
+        code, out, err, e = None, '', '', str(ex)[:200]
+    if code == 0 and 'ssh-user=ok' in (out or ''):
+        return True, '', ''
+    if code == 3 or 'ssh-user=missing' in (out or ''):
+        return False, 'SSH_NO_ACCOUNT', f"no account '{login}'"
+    return False, 'SSH_KEY_FAILED', e or f"exit {code}: {(err or out or '').strip()[:200]}"
 
 
 def warpgate_serves_rdp(protocol):
@@ -444,10 +471,24 @@ def my_desktop_warpgate(desktop_id):
         return jsonify({'error': 'This desktop has no VNC server', 'code': 'NO_VNC'}), 409
 
     cfg = wg.config(secret=True)
+    ssh_user = None
+    if proto == 'ssh':
+        # the user's own account on the desktop, never a shared one
+        if _guest_os(mgr, node, int(desk['vmid'])) == 'windows':
+            return jsonify({'error': '본인 계정 SSH는 Linux 데스크톱만 됩니다.', 'code': 'SSH_LINUX_ONLY'}), 409
+        ssh_user = wg.ssh_login_name(username)
+        if not ssh_user:
+            return jsonify({'error': f"'{username}'은(는) Linux 계정 이름으로 쓸 수 없습니다.", 'code': 'SSH_BAD_NAME'}), 409
+        ok, code, detail = prepare_ssh_login(desk, mgr, node, ssh_user, cfg)
+        if not ok:
+            logging.warning(f"[VLAB] Warpgate SSH to {desk.get('name')} as {ssh_user}: {detail}")
+            if code == 'SSH_NO_ACCOUNT':
+                return jsonify({'error': SSH_NO_ACCOUNT_TEXT.format(ssh_user), 'code': code}), 409
+            return jsonify({'error': '데스크톱에 SSH 키를 넣지 못했습니다. 게스트 에이전트를 확인하세요.', 'code': code}), 502
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        options = _desktop_target_options(cfg, proto, ip, desk, pol)
+        options = _desktop_target_options(cfg, proto, ip, desk, pol, ssh_user=ssh_user)
         target_uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], proto, options, role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
     except wg.WarpgateError as e:
