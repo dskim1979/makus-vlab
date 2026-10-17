@@ -4732,6 +4732,40 @@ def grab_vm_frame(mgr, node, vm_type, vmid, max_width=480):
         raise
 
 
+def cached_vm_frame(mgr, cluster_id, node, vm_type, vmid, fresh=False):
+    """grab_vm_frame behind the tile cache: (png, 'hit'|'miss') or (None, why). A failure is
+    remembered for _VM_SCREENSHOT_FAIL_TTL and answered as (None, 'failed-cached') without
+    touching the cluster. The console tile and the portal's desktop card (api/vlab.py) share
+    one cache, so the two never grab the same guest twice a minute. MK Oct 2026"""
+    cache_key = f"{cluster_id}:{vmid}"
+    now = time.monotonic()
+    if not fresh:
+        with _vm_screenshot_lock:
+            hit = _vm_screenshot_cache.get(cache_key)
+        # a remembered failure short-circuits before we touch the cluster at all
+        if hit and hit[1] is None and (now - hit[0]) < _VM_SCREENSHOT_FAIL_TTL:
+            return None, 'failed-cached'
+        if hit and hit[1] is not None and (now - hit[0]) < _VM_SCREENSHOT_TTL:
+            return hit[1], 'hit'
+
+    # screendump via qm monitor — no vncproxy, so no "console opened" PVE task
+    try:
+        png = grab_vm_frame(mgr, node, vm_type, vmid, max_width=480)
+    except Exception as e2:
+        with _vm_screenshot_lock:
+            _vm_screenshot_cache[cache_key] = (time.monotonic(), None)
+        return None, str(e2) or 'failed'
+
+    with _vm_screenshot_lock:
+        _vm_screenshot_cache[cache_key] = (time.monotonic(), png)
+        # keep the cache from growing unbounded on big estates
+        if len(_vm_screenshot_cache) > 512:
+            oldest = sorted(_vm_screenshot_cache.items(), key=lambda kv: kv[1][0])[:128]
+            for k, _ in oldest:
+                _vm_screenshot_cache.pop(k, None)
+    return png, 'miss'
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/screenshot', methods=['GET'])
 @require_auth()
 def get_vm_screenshot(cluster_id, node, vm_type, vmid):
@@ -4756,39 +4790,14 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
         return jsonify({'error': 'Permission denied: vm.console'}), 403
 
-    cache_key = f"{cluster_id}:{vmid}"
-    now = time.monotonic()
-    if request.args.get('fresh') != '1':
-        with _vm_screenshot_lock:
-            hit = _vm_screenshot_cache.get(cache_key)
-        # a remembered failure short-circuits before we touch the cluster at all
-        if hit and hit[1] is None and (now - hit[0]) < _VM_SCREENSHOT_FAIL_TTL:
+    png, state = cached_vm_frame(mgr, cluster_id, node, vm_type, vmid, fresh=request.args.get('fresh') == '1')
+    if png is None:
+        if state == 'failed-cached':
             return jsonify({'error': 'screenshot unavailable', 'cached': True}), 502
-        if hit and hit[1] is not None and (now - hit[0]) < _VM_SCREENSHOT_TTL:
-            resp = current_app.response_class(hit[1], mimetype='image/png')
-            resp.headers['Cache-Control'] = 'private, max-age=60'
-            resp.headers['X-Screenshot-Cache'] = 'hit'
-            return resp
-
-    # screendump via qm monitor — no vncproxy, so no "console opened" PVE task
-    try:
-        png = grab_vm_frame(mgr, node, vm_type, vmid, max_width=480)
-    except Exception as e2:
-        with _vm_screenshot_lock:
-            _vm_screenshot_cache[cache_key] = (time.monotonic(), None)
-        return jsonify({'error': f'screenshot unavailable: {e2}'}), 502
-
-    with _vm_screenshot_lock:
-        _vm_screenshot_cache[cache_key] = (time.monotonic(), png)
-        # keep the cache from growing unbounded on big estates
-        if len(_vm_screenshot_cache) > 512:
-            oldest = sorted(_vm_screenshot_cache.items(), key=lambda kv: kv[1][0])[:128]
-            for k, _ in oldest:
-                _vm_screenshot_cache.pop(k, None)
-
+        return jsonify({'error': f'screenshot unavailable: {state}'}), 502
     resp = current_app.response_class(png, mimetype='image/png')
     resp.headers['Cache-Control'] = 'private, max-age=60'
-    resp.headers['X-Screenshot-Cache'] = 'miss'
+    resp.headers['X-Screenshot-Cache'] = state
     return resp
 
 

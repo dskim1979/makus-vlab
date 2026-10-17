@@ -28,6 +28,8 @@ takes effect:
   web_ide                      the portal's 웹 IDE: JupyterLab and/or VS Code (code-server) through
                                vlab-proxy /ide/<session>/ (pegaprox/api/vlab_research.py)
   web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
+  screen_thumbnail             the portal card's screen picture (/api/vlab/desktops/<id>/screenshot). It is
+                               the VM's console: a Windows desktop used over RDP shows its lock screen there
 """
 
 PROTOCOLS = ('vnc', 'spice', 'rdp', 'guac')   # guac = RDP in the browser through a Guacamole gateway
@@ -60,10 +62,11 @@ DEFAULTS = {
     'web_ide_idle_min': 240,
     'browser_ssh': False,       # the portal's browser terminal (Guacamole SSH) for Linux desktops
     'ssh_files': 'off',         # that terminal's file transfer (SFTP)
+    'screen_thumbnail': True,   # the portal card shows the running desktop's screen
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
-          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh')
+          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'screen_thumbnail')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080)}

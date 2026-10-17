@@ -401,7 +401,8 @@ def test_the_policy_shapes_the_connection(connectable):
     a = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()
     assert a['clipboard'] == 'to_desktop'
     (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
-    assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': []}
+    assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': [],
+                              'screen_thumbnail': True}
 
 
 def test_the_policy_can_take_power_away(connectable):
@@ -515,6 +516,75 @@ def test_a_failed_power_action_is_reported(connectable):
     _mgr().vm_action.return_value = {'success': False, 'error': 'VM is locked (backup)'}
     r = alice.post(f"/api/vlab/desktops/{desk['id']}/power", json={'action': 'start'})
     assert r.status_code == 502 and 'locked' in r.get_json()['error']
+
+
+# --- screen thumbnail -------------------------------------------------------------
+
+PNG = b'\x89PNG\r\n\x1a\nfake'
+
+
+@pytest.fixture
+def grabs(monkeypatch):
+    """grab_vm_frame stubbed out, the shared tile cache empty: the calls it got."""
+    import pegaprox.api.vms as vms
+    class Calls(list):
+        pass
+    calls = Calls()
+
+    def grab(mgr, node, vm_type, vmid, max_width=480):
+        calls.append((node, vm_type, vmid))
+        if grab.fail:
+            raise IOError('blank framebuffer')
+        return PNG
+    grab.fail = False
+    monkeypatch.setattr(vms, 'grab_vm_frame', grab)
+    monkeypatch.setattr(vms, '_vm_screenshot_cache', {})
+    calls.grab = grab
+    return calls
+
+
+def test_the_assigned_user_sees_their_running_desktop(connectable, grabs):
+    _, alice, _, _, desk, _ = connectable
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 200 and r.mimetype == 'image/png' and r.data == PNG
+    assert r.headers['Cache-Control'] == 'private, max-age=60' and r.headers['X-Screenshot-Cache'] == 'miss'
+    # the second look comes out of the cache the console tile shares
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").headers['X-Screenshot-Cache'] == 'hit'
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_only_the_assigned_user_and_admins_see_the_screen(connectable, grabs):
+    admin, _, bob, viewer, desk, _ = connectable
+    for who in (bob, viewer):
+        r = who.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+        assert r.status_code == 404 and r.data[:4] != PNG[:4]
+    assert admin.get('/api/vlab/desktops/nope/screenshot').status_code == 404
+    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == PNG
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_no_picture_is_204_without_a_reason(connectable, grabs):
+    _, alice, _, _, desk, stopped = connectable
+    r = alice.get(f"/api/vlab/desktops/{stopped['id']}/screenshot")
+    assert r.status_code == 204 and r.data == b''
+    grabs.grab.fail = True
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 204 and r.data == b''
+    # the failure is remembered: no second grab until it runs out
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_the_pool_policy_turns_the_picture_off(connectable, grabs):
+    admin, alice, _, _, desk, _ = connectable
+    url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
+    assert admin.get(url).get_json()['policy']['screen_thumbnail'] is True
+    assert admin.put(url, json={'screen_thumbnail': 'no'}).status_code == 400
+    assert admin.put(url, json={'screen_thumbnail': False}).status_code == 200
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
+    assert mine['policy']['screen_thumbnail'] is False
+    assert grabs == []
 
 
 # --- session log -----------------------------------------------------------------
