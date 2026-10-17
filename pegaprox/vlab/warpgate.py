@@ -343,6 +343,21 @@ def sync_target(cfg, ref, label, proto, options, role_id=None):
     return uuid_val, name
 
 
+def remove_target(cfg, ref):
+    """데스크톱이 없어질 때 그 Warpgate 대상과 매핑을 지운다. 이미 없으면(404) 매핑만 지운다.
+    반환: 지운 대상 UUID 또는 None."""
+    mp = get_mapping(ref)
+    if not mp:
+        return None
+    if mp['target_uuid']:
+        code, data = _api('DELETE', f"/targets/{mp['target_uuid']}", cfg['admin_token'], cfg['base_url'],
+                          cfg.get('verify_tls'))
+        if code >= 400 and code != 404:
+            raise WarpgateError(f"Warpgate API DELETE /targets/{mp['target_uuid']} -> {code}: {str(data)[:200]}")
+    delete_mapping(ref)
+    return mp['target_uuid'] or None
+
+
 def issue_ticket(cfg, username, target_name, ttl_seconds=TICKET_TTL_SECONDS):
     """그 사용자 + 그 대상에만 쓸 수 있는 1회용·단시간 티켓을 발급한다.
     반환: (ticket_dict, secret). secret은 저장하지 말고 응답에만 싣는다."""

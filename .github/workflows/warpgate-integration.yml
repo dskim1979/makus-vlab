@@ -1,0 +1,140 @@
+name: Warpgate integration
+
+# MOAVI Desk x a LIVE Warpgate bastion (docs/warpgate-gateway.md): the engine's own Warpgate code
+# (pegaprox/vlab/warpgate.py) against a real Warpgate, with an OpenSSH and an xrdp target in
+# containers. Runs tests/test_warpgate_live.py, which the normal suite skips. Everything here is
+# throwaway: a fresh Warpgate per run, a random admin password and API token (masked, never echoed).
+
+on:
+  push:
+    branches: [claude/warpgate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warpgate-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WARPGATE_VERSION: v0.29.2
+  WARPGATE_SHA256: 0f7dfc9a27cce4d51b5213d52f5ded91f65ac61db9dd0427821c19503ebd1efe
+  WG_DIR: ${{ github.workspace }}/.wg
+  WG_HTTP_PORT: '8888'
+  WG_SSH_PORT: '2222'
+  WG_RDP_PORT: '33389'
+  SSH_TARGET_HOST: 127.0.0.1
+  SSH_TARGET_PORT: '2201'
+  SSH_TARGET_USER: moavi
+  RDP_TARGET_HOST: 127.0.0.1
+  RDP_TARGET_PORT: '3390'
+  RDP_TARGET_USER: abc
+  RDP_TARGET_PASSWORD: abc   # the linuxserver/rdesktop image's own default; a throwaway container
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Engine dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Client tools (ssh, sshpass, FreeRDP, Xvfb)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-client sshpass xvfb jq
+          sudo apt-get install -y -qq freerdp3-x11 || sudo apt-get install -y -qq freerdp2-x11
+          (command -v xfreerdp3 || command -v xfreerdp) && echo "FreeRDP ok"
+
+      - name: Download and verify Warpgate ${{ env.WARPGATE_VERSION }}
+        run: |
+          mkdir -p "$WG_DIR"
+          curl -fsSL -o "$WG_DIR/warpgate" \
+            "https://github.com/warp-tech/warpgate/releases/download/${WARPGATE_VERSION}/warpgate-${WARPGATE_VERSION}-x86_64-linux"
+          echo "${WARPGATE_SHA256}  $WG_DIR/warpgate" | sha256sum -c -
+          chmod +x "$WG_DIR/warpgate"
+          "$WG_DIR/warpgate" --version
+
+      - name: Configure Warpgate (unattended-setup) and start it
+        run: |
+          pw="$(openssl rand -hex 24)"
+          echo "::add-mask::$pw"
+          echo "WG_ADMIN_PASSWORD=$pw" >> "$GITHUB_ENV"
+          WARPGATE_ADMIN_PASSWORD="$pw" "$WG_DIR/warpgate" --config "$WG_DIR/warpgate.yaml" unattended-setup \
+            --data-path "$WG_DIR/data" --http-port "$WG_HTTP_PORT" --ssh-port "$WG_SSH_PORT" --rdp-port "$WG_RDP_PORT" \
+            --record-sessions --host-key-verification auto-accept --external-host 127.0.0.1
+          nohup "$WG_DIR/warpgate" --config "$WG_DIR/warpgate.yaml" run > "$WG_DIR/warpgate.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -skf "https://127.0.0.1:${WG_HTTP_PORT}/@warpgate/api/info" > /dev/null && { echo "Warpgate up"; break; }
+            sleep 1
+          done
+          curl -skf "https://127.0.0.1:${WG_HTTP_PORT}/@warpgate/api/info" | jq '{version, web_clients_enabled}'
+
+      - name: Admin API token (login as admin, mint a 1-day token)
+        run: |
+          base="https://127.0.0.1:${WG_HTTP_PORT}/@warpgate/api"
+          jq -n --arg u admin --arg p "$WG_ADMIN_PASSWORD" '{username:$u, password:$p}' > /tmp/login.json
+          code=$(curl -sk -o /tmp/login.out -w '%{http_code}' -c /tmp/wg.jar -H 'Content-Type: application/json' \
+                 --data @/tmp/login.json "$base/auth/login")
+          rm -f /tmp/login.json
+          echo "login HTTP $code"; test "$code" -lt 300
+          expiry="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)"
+          token="$(curl -skf -b /tmp/wg.jar -H 'Content-Type: application/json' \
+                   --data "{\"label\":\"moavi-ci\",\"expiry\":\"$expiry\"}" "$base/profile/api-tokens" | jq -r .secret)"
+          test -n "$token" && test "$token" != null
+          echo "::add-mask::$token"
+          echo "WARPGATE_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "WARPGATE_URL=https://127.0.0.1:${WG_HTTP_PORT}" >> "$GITHUB_ENV"
+
+      - name: Targets (OpenSSH trusting Warpgate's client key, xrdp desktop)
+        run: |
+          curl -skf -H "X-Warpgate-Token: $WARPGATE_TOKEN" \
+            "https://127.0.0.1:${WG_HTTP_PORT}/@warpgate/admin/api/ssh/own-keys" | jq -r '.[].public_key' > "$WG_DIR/wg_client_keys"
+          echo "Warpgate client keys: $(wc -l < "$WG_DIR/wg_client_keys")"; test -s "$WG_DIR/wg_client_keys"
+          docker run -d --name ssh-target -p "127.0.0.1:${SSH_TARGET_PORT}:2222" \
+            -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e USER_NAME="$SSH_TARGET_USER" -e PASSWORD_ACCESS=false \
+            -e PUBLIC_KEY_FILE=/keys/wg -v "$WG_DIR/wg_client_keys:/keys/wg:ro" \
+            lscr.io/linuxserver/openssh-server:latest
+          docker run -d --name rdp-target -p "127.0.0.1:${RDP_TARGET_PORT}:3389" --shm-size=1gb \
+            -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC lscr.io/linuxserver/rdesktop:latest
+          for p in "$SSH_TARGET_PORT" "$RDP_TARGET_PORT"; do
+            for i in $(seq 1 90); do (echo > /dev/tcp/127.0.0.1/$p) 2>/dev/null && { echo "port $p up"; break; }; sleep 2; done
+          done
+          sleep 10   # let sshd / xrdp finish their own start after the port opens
+
+      - name: Live tests - API, sync, keys, tickets, browser link, SSH, scp
+        run: |
+          mkdir -p out
+          .venv/bin/python -m pytest tests/test_warpgate_live.py -m "not live_rdp" -v -rA \
+            --junitxml=out/warpgate-live.xml 2>&1 | tee out/warpgate-live.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Live test - RDP ticket sign-in (best effort)
+        continue-on-error: true
+        run: |
+          .venv/bin/python -m pytest tests/test_warpgate_live.py -m live_rdp -v -rA \
+            --junitxml=out/warpgate-live-rdp.xml 2>&1 | tee out/warpgate-live-rdp.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p out
+          cp "$WG_DIR/warpgate.log" out/ 2>/dev/null || true
+          docker logs ssh-target > out/ssh-target.log 2>&1 || true
+          docker logs rdp-target > out/rdp-target.log 2>&1 || true
+          # never ship a secret: drop anything that looks like the token or a ticket secret
+          if [ -n "${WARPGATE_TOKEN:-}" ]; then sed -i "s/${WARPGATE_TOKEN}/***/g" out/* || true; fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: warpgate-integration
+          path: out/
+          retention-days: 14

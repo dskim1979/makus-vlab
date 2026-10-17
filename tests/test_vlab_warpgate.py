@@ -85,6 +85,12 @@ class FakeWarpgate:
                          'secret': 'TKT-SECRET-123'}
         if method == 'PUT' and path.startswith('/targets/'):
             return 200, {}
+        if method == 'DELETE' and path.startswith('/targets/'):
+            uid = path.rsplit('/', 1)[1]
+            if uid not in self.targets.values():
+                return 404, 'not found'
+            self.targets = {k: v for k, v in self.targets.items() if v != uid}
+            return 204, ''
         # public-key credentials: /users/<uid>/credentials/public-keys[/<id>]
         m = re.match(r'^/users/([^/]+)/credentials/public-keys(?:/([^/]+))?$', path)
         if m:
@@ -378,3 +384,18 @@ def test_browser_rdp_falls_back_to_guacamole_when_warpgate_fails(env, fake_wg, m
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
     assert r.status_code == 200, r.get_json()
     assert '/guacamole/?data=' in r.get_json()['url']    # never dark: Guacamole still serves it
+
+
+def test_remove_target_deletes_it_and_forgets_the_mapping(env, fake_wg):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    uid, _name = wg.sync_target(cfg, 'dsk_x', 'gone-soon', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
+    assert wg.remove_target(cfg, 'dsk_x') == uid
+    assert ('DELETE', f'/targets/{uid}', None) in fake_wg.calls and uid not in fake_wg.targets.values()
+    assert wg.get_mapping('dsk_x') is None
+    assert wg.remove_target(cfg, 'dsk_x') is None          # nothing left to remove
+    # already gone on the Warpgate side (404): the stale mapping is still dropped
+    uid2, _ = wg.sync_target(cfg, 'dsk_y', 'stale', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
+    fake_wg.targets = {}
+    assert wg.remove_target(cfg, 'dsk_y') == uid2 and wg.get_mapping('dsk_y') is None
