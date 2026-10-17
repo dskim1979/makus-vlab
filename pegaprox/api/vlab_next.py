@@ -353,6 +353,12 @@ def create_account():
         return _bad(str(e))
     if data.get('expires_at') and (data.get('role') or 'user') == 'admin':
         return _bad('expires_at: an administrator account does not expire')
+    # the bundled directory: the first password must be one the DC takes too
+    if directory.eligible(str(data.get('username') or '').strip().lower(), {'role': data.get('role') or 'user', 'auth_source': 'local'}):
+        why = directory.policy_error(data.get('password') or '', str(data.get('username') or '').strip().lower(),
+                                     data.get('display_name') or '')
+        if why:
+            return jsonify({'error': why, 'code': 'PASSWORD_POLICY'}), 400
     resp = core_users.create_user()
     ok, body = _core_ok(resp)
     if not ok:
@@ -473,8 +479,8 @@ def _directory_password_reset(username, data):
     try:
         directory.set_password(username, password, rec)
     except directory.DirectoryError as e:
-        if e.code == 'PASSWORD_REFUSED':
-            return jsonify({'error': 'The directory refused the password', 'code': e.code, 'detail': e.detail}), 400
+        if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+            return jsonify({'error': e.detail if e.code == 'PASSWORD_POLICY' else 'The directory refused the password', 'code': e.code, 'detail': e.detail}), 400
         return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
     sessions = invalidate_all_user_sessions(username)
     revoke_user_api_tokens(username)
@@ -611,6 +617,7 @@ def signup_config():
     t = acct.terms_settings()
     out = {'enabled': s['enabled'], 'departments': deps}
     if s['enabled']:
+        out['password_policy'] = directory.password_policy()
         out.update(verify_email=s['verify_email'], auto_domains=s['auto_domains'],
                    terms={'enabled': t['enabled'], 'version': t['version']})
     return jsonify(out)
@@ -667,8 +674,8 @@ def signup():
         except directory.DirectoryError as e:
             if e.code == 'EXISTS':
                 return _bad('This username is taken or already waiting for review', 409)
-            if e.code == 'PASSWORD_REFUSED':
-                return _bad('The password was refused - choose another one')
+            if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+                return _bad(e.detail if e.code == 'PASSWORD_POLICY' else 'The password was refused - choose another one')
             logging.warning(f'[VLAB] sign-up of {username}: bundled directory away ({e.code}), kept for the portal')
     if req is None:
         salt, pw_hash = hash_password(password)

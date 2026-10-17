@@ -1822,8 +1822,8 @@ def auth_change_password():
             if e.code == 'WRONG_PASSWORD':
                 log_audit(username, 'user.password_change_failed', 'Incorrect current password (directory)')
                 return jsonify({'error': 'Current password is incorrect'}), 401
-            if e.code == 'PASSWORD_REFUSED':
-                return jsonify({'error': 'The directory refused the new password', 'code': e.code, 'detail': e.detail}), 400
+            if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+                return jsonify({'error': e.detail if e.code == 'PASSWORD_POLICY' else 'The directory refused the new password', 'code': e.code, 'detail': e.detail}), 400
             return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
         if user.get('force_password_change'):
             user['force_password_change'] = False

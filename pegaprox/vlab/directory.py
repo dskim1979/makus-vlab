@@ -697,6 +697,7 @@ def adopt(username, password, row=None):
         raise DirectoryError('NOT_FOUND', f'no portal account {username}')
     if not NAME.match(username):
         raise DirectoryError('BAD_NAME', 'a directory account name has at most 20 characters: a-z 0-9 . _ -')
+    _require_policy(password, username, row.get('display_name') or '')
     with session() as conn:
         cur = find_user(conn, username)
         if cur is None:
@@ -751,6 +752,7 @@ def set_password(username, password, row=None):
     row = row if row is not None else _rows().get(username)
     if not owns(row):
         raise DirectoryError('NOT_FOUND', f'{username} is not a directory account')
+    _require_policy(password, username, row.get('display_name') or '')
     with session() as conn:
         cur = find_user(conn, username) or _create_user(conn, username, row)
         _set_password_dn(conn, cur['dn'], password, f'password of {username}')
@@ -764,6 +766,7 @@ def change_password(username, old, new, row=None):
     row = row if row is not None else _rows().get(username)
     if not owns(row):
         raise DirectoryError('NOT_FOUND', f'{username} is not a directory account')
+    _require_policy(new, username, row.get('display_name') or '')
     with session() as conn:
         cur = find_user(conn, username)
         if cur is None:
@@ -780,6 +783,7 @@ def signup_account(username, display_name, email, password, signup_id):
     deletes it (drop_signup). Raises; the caller then falls back to the portal's own hash."""
     if not NAME.match(username):
         raise DirectoryError('BAD_NAME', 'a directory account name has at most 20 characters')
+    _require_policy(password, username, display_name)
     row = {'display_name': display_name, 'email': email, 'enabled': False}
     with session() as conn:
         cur = find_user(conn, username)
@@ -816,6 +820,82 @@ def drop_signup(username):
         cur = find_user(conn, username)
         if cur is not None and cur['info'] == MARK and cur['description'].startswith(SIGNUP_PREFIX):
             _check(conn, conn.delete(cur['dn']), f'delete the sign-up account {username}')
+
+
+# --- the password policy: the portal's and the directory's together --------------------------
+
+_policy_cache = {'at': 0.0, 'dc': None}
+POLICY_TTL = 300
+
+
+def _dc_policy():
+    """The domain's own rule (minPwdLength, the complexity bit of pwdProperties), read from the
+    domain object and kept POLICY_TTL seconds. None when the DC cannot be asked."""
+    if time.time() - _policy_cache['at'] < POLICY_TTL:
+        return _policy_cache['dc']
+    try:
+        with session() as conn:
+            rows = _search(conn, config()['base_dn'], '(objectClass=domain)', ['minPwdLength', 'pwdProperties'])
+    except DirectoryError:
+        _policy_cache['at'] = time.time() - POLICY_TTL + 30     # asked again in 30 s, not on every call
+        return _policy_cache['dc']
+    out = {'min_length': 0, 'complexity': False}
+    for e in rows:
+        if e['dn'].lower() != config()['base_dn'].lower():
+            continue
+        m, p = _raw(e, 'minPwdLength'), _raw(e, 'pwdProperties')
+        out = {'min_length': int(m) if m and m.isdigit() else 0, 'complexity': bool(p and p.isdigit() and int(p) & 1)}
+    _policy_cache.update(at=time.time(), dc=out)
+    return out
+
+
+def password_policy():
+    """What a password must be so that the portal and, while the bundled directory is in use, the
+    DC both take it: {min_length, uppercase, lowercase, numbers, special, complexity, unified,
+    domain}. complexity is AD's: three of upper / lower / digit / sign, and not the account name."""
+    s = _settings()
+    out = {'min_length': int(s.get('password_min_length', 8) or 8),
+           'uppercase': bool(s.get('password_require_uppercase', True)),
+           'lowercase': bool(s.get('password_require_lowercase', True)),
+           'numbers': bool(s.get('password_require_numbers', True)),
+           'special': bool(s.get('password_require_special', False)),
+           'complexity': False, 'unified': False, 'domain': ''}
+    if active():
+        out.update(unified=True, domain=config()['domain'])
+        dc = _dc_policy() or {'min_length': 0, 'complexity': False}
+        out['min_length'] = max(out['min_length'], dc['min_length'])
+        out['complexity'] = dc['complexity']
+    return out
+
+
+def policy_error(password, username='', display_name=''):
+    """None when both the portal and the directory accept it, else what is missing (English,
+    the same wording as the core's validate_password_policy)."""
+    from pegaprox.utils.auth import validate_password_policy
+    pol = password_policy()
+    password = password or ''
+    ok, why = validate_password_policy(password)
+    errs = [why] if not ok and why else []
+    portal_min = int(_settings().get('password_min_length', 8) or 8)
+    if pol['min_length'] > portal_min and len(password) < pol['min_length']:
+        errs.append(f"at least {pol['min_length']} characters (the directory's rule)")
+    if pol['complexity']:
+        kinds = sum((any(c.isupper() for c in password), any(c.islower() for c in password),
+                     any(c.isdigit() for c in password), any(not c.isalnum() for c in password)))
+        if kinds < 3:
+            errs.append("three of: upper-case, lower-case, digits, signs (the directory's rule)")
+        low = password.lower()
+        name = (username or '').lower()
+        parts = [name] + [p for p in re.split(r'[\s,._\-#\t]+', (display_name or '').lower()) if len(p) >= 3]
+        if any(len(p) >= 3 and p in low for p in parts):
+            errs.append("not the account name or parts of the full name (the directory's rule)")
+    return '; '.join(errs) if errs else None
+
+
+def _require_policy(password, username, display_name=''):
+    why = policy_error(password, username, display_name)
+    if why:
+        raise DirectoryError('PASSWORD_POLICY', why)
 
 
 # --- hooks: never raise into the portal's own work -----------------------------------------------

@@ -272,12 +272,16 @@ def password_reset_request():
 
 
 def _policy():
-    s = _settings()
-    return {'min_length': int(s.get('password_min_length', 8) or 8),
-            'uppercase': bool(s.get('password_require_uppercase', True)),
-            'lowercase': bool(s.get('password_require_lowercase', True)),
-            'numbers': bool(s.get('password_require_numbers', True)),
-            'special': bool(s.get('password_require_special', False))}
+    """The portal's password rule, with the bundled directory's on top while it is in use
+    (unified: one password for the portal and the desktops)."""
+    return directory.password_policy()
+
+
+@bp.route('/api/vlab/password-policy', methods=['GET'])
+def password_policy():
+    """{min_length, uppercase, lowercase, numbers, special, complexity, unified, domain} - for the
+    sign-up, reset and 내 계정 forms; a password that passes it passes the directory too."""
+    return jsonify({'policy': _policy()})
 
 
 @bp.route('/api/vlab/password-reset/check', methods=['POST'])
@@ -310,6 +314,10 @@ def password_reset_confirm():
     if not ok:
         return _bad(why)
     name = r['username']
+    if directory.owns((load_users() or {}).get(name)):
+        why = directory.policy_error(password, name, ((load_users() or {}).get(name) or {}).get('display_name') or '')
+        if why:
+            return jsonify({'error': why, 'code': 'PASSWORD_POLICY'}), 400
     u = (load_users() or {}).get(name)
     if not u or not u.get('enabled', True) or not _resettable(u):
         accounts.use_reset(r['id'])
@@ -319,8 +327,8 @@ def password_reset_confirm():
         try:
             directory.set_password(name, password, u)
         except directory.DirectoryError as e:
-            if e.code == 'PASSWORD_REFUSED':
-                return jsonify({'error': 'The directory refused the password - choose another one', 'code': e.code}), 400
+            if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+                return jsonify({'error': e.detail if e.code == 'PASSWORD_POLICY' else 'The directory refused the password - choose another one', 'code': e.code}), 400
             return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
         if not accounts.use_reset(r['id']):
             return jsonify({'error': 'This link has expired or was used already - ask for a new one', 'code': 'LINK_INVALID'}), 400
@@ -941,7 +949,10 @@ def import_accounts():
         home = tenant
         if role not in ('admin', 'user', 'viewer'):
             home = core_users._role_home_tenant(role, tenant) or tenant
-        pw = accounts.make_password(s.get('password_min_length', 8), bool(s.get('password_require_special', False)))
+        pol = directory.password_policy()
+        pw = accounts.make_password(pol['min_length'], bool(pol['special']))
+        while directory.policy_error(pw, r['username'], r['display_name']):      # e.g. the name inside it
+            pw = accounts.make_password(pol['min_length'], bool(pol['special']))
         salt, pw_hash = hash_password(pw)
         stamp = datetime.now().isoformat()
         save_single_user(r['username'], {

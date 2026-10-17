@@ -126,7 +126,14 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
   이름이 같음). 가입한 데스크톱의 RDP 파일은 `MOAVI\아이디` 로 로그인합니다.
 - 이중화: HA 상대 서버에 두 번째 DC(`VLAB_DIRECTORY_ROLE=replica`)를 두면 DC 끼리 복제하고, 각 서버의 엔진은 자기 쪽 DC 를 씁니다.
   엔진의 봉인된 계정 · 가입 상태 표는 HA 동기화로 넘어갑니다.
-- API: `/api/vlab/admin/bundled-directory`(상태 · 설정 · 확인 · 맞춤 · 가입 계정 새 비밀번호 · 계정 · 그룹 · 가입 상태),
+- 비밀번호 규칙: 포털 정책과 DC 정책(minPwdLength, 복잡도)을 합친 것을 `GET /api/vlab/password-policy` 로 알리고(가입 · 비밀번호 찾기 ·
+  내 계정 화면), 모든 경로에서 그 규칙으로 먼저 검사합니다 — 포털이 받은 비밀번호는 DC 도 받습니다. CSV 일괄 등록의 첫 비밀번호도 그 규칙에 맞춰 만듭니다.
+- AD 디렉터리(관리 콘솔 > 사용자 > AD 디렉터리, `pegaprox/vlab/adobjects.py`): 내장 DC 또는 도메인(AD/LDAP)에 설정한 기관 AD 의 OU 트리 ·
+  사용자 · 그룹 · OU 를 보고 만들고 바꾸고 사용 중지 · 삭제, 그룹 구성원(직접 · 중첩) 추가 · 제거(자기 자신 · 순환 거부). 바꾸는 것은 그 소스의
+  바인드 계정으로 실제 디렉터리에 쓰고 감사 기록에 남깁니다(권한이 없으면 디렉터리가 거부하고 그대로 알림). 내장 DC 에서 포털이 관리하는
+  계정 · `moavi-users` · 부서 그룹은 여기서 바꾸지 않습니다(사용자 · 부서 화면에서). 부서와 OU 는 서로 따로 움직입니다.
+- API: `/api/vlab/admin/ad/*`(sources · test · tree · objects · object · ous · groups · users · members),
+  `/api/vlab/admin/bundled-directory`(상태 · 설정 · 확인 · 맞춤 · 가입 계정 새 비밀번호 · 계정 · 그룹 · 가입 상태),
   `/api/vlab/admin/desktops/<id>/domain-join[/check]`, `/api/vlab/admin/pools/<id>/domain-join`.
 
 ## 빠르게 시작하기

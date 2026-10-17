@@ -59,6 +59,7 @@ class DC:
                                       'sAMAccountName': 'vlab-svc', 'userPassword': SVC_PW})
         c.strategy.add_entry(JOIN_DN, {'objectClass': ['top', 'person', 'organizationalPerson', 'user'],
                                        'sAMAccountName': 'vlab-join', 'info': 'service'})
+        c.strategy.add_entry(BASE, {'objectClass': ['top', 'domain', 'domainDNS'], 'minPwdLength': '8', 'pwdProperties': '0'})
         for dn in (OU, USERS, GROUPS, f'OU=Desktops,{OU}', f'OU=Service,{OU}'):
             c.strategy.add_entry(dn, {'objectClass': ['top', 'organizationalUnit']})
 
@@ -116,6 +117,7 @@ def dc(monkeypatch, tmp_path):
     monkeypatch.setattr(directory, '_open', d.open)
     monkeypatch.setattr(directory, '_user_bind', d.has_password)
     directory._last_reconcile[0] = 0.0
+    directory._policy_cache.update(at=0.0, dc=None)
     return d
 
 
