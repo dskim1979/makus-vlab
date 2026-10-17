@@ -1277,6 +1277,7 @@ def test_nla_script_takes_the_password_on_stdin_only():
     assert '[Console]::In.ReadToEnd()' in s and 'moavi-nla' in s
     assert "fPromptForPassword' -Value 1" in s and 'S-1-5-32-555' in s
     assert 'DomainRole -ge 4' in s and 'PasswordNeverExpires' in s and 'SeDenyInteractiveLogonRight' in s
+    assert "DontDisplayLastUserName' -ne 1" in s and "EnumerateLocalUsers' -ne 0" in s and "DontDisplayLockedUserId' -ne 3" in s
 
 
 def test_windows_connect_sets_up_the_nla_account_and_warpgate_uses_it(env, fake_wg, agent, monkeypatch):
