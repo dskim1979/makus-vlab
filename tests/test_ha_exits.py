@@ -724,6 +724,8 @@ AUTOMATIONS = {
     ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'forget_desktop'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'resync_ssh_file_transfer'): (1, 'read'),
+    # MOAVI Desk: new, cloned and reset desktops join the bundled directory by themselves
+    ('pegaprox/api/vlab_directory.py', 'start_autojoin_thread'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),
@@ -983,6 +985,8 @@ CONFIRM_SITES = [
     # a clean-up put off while the desktop was working runs later; an idle loaned card goes back
     ('pegaprox/api/vlab_work.py', 'deferral_tick', ['vm_action', '_reset_one']),
     ('pegaprox/api/vlab_work.py', 'reclaim_tick', ['return_lease']),
+    # the automatic domain join of a desktop (guest agent: Add-Computer / realm join)
+    ('pegaprox/api/vlab_directory.py', 'autojoin_round', ['join_desktop']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',

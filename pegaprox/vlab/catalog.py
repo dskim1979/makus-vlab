@@ -311,8 +311,8 @@ def count_pending():
     return r['n'] if r else 0
 
 
-def add_signup(username, display_name, email, department_id, note, salt, password_hash, client_ip):
-    sid = new_id('sig')
+def add_signup(username, display_name, email, department_id, note, salt, password_hash, client_ip, sid=None):
+    sid = sid or new_id('sig')
     db().execute('INSERT INTO vlab_signups (id, username, display_name, email, department_id, note, password_salt, password_hash, '
                  'status, client_ip, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                  (sid, username, display_name, email, department_id, note, salt, password_hash, 'pending', client_ip, now()))

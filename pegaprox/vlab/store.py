@@ -231,7 +231,11 @@ def add_desktop(pool, node, vmid, name, vm_type='qemu', state='ready'):
     }
     db().execute('''INSERT INTO vlab_desktops (id, pool_id, cluster_id, node, vmid, vm_type, name, state, created_at)
                     VALUES (:id, :pool_id, :cluster_id, :node, :vmid, :vm_type, :name, :state, :created_at)''', desk)
-    return get_desktop(desk['id'])
+    out = get_desktop(desk['id'])
+    # a pool with auto_domain_join: the new desktop joins the bundled directory once it runs
+    from pegaprox.vlab import directory
+    directory.queue_new(out)
+    return out
 
 
 def desktop_for_vm(cluster_id, vmid):

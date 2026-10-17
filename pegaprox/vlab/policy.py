@@ -30,6 +30,9 @@ takes effect:
   web_ide_idle_min             an IDE nobody used for that long ends by itself (Jupyter's own timer)
   screen_thumbnail             the portal card's screen picture (/api/vlab/desktops/<id>/screenshot). It is
                                the VM's console: a Windows desktop used over RDP shows its lock screen there
+  auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
+                               (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
+                               bundled directory is in use
 """
 
 # browser RDP is no protocol of its own: with 보안 게이트웨이 (Warpgate) on, an 'rdp' pool opens in the browser too
@@ -65,6 +68,7 @@ DEFAULTS = {
     'ssh_files': 'off',         # that terminal's file transfer (SFTP)
     'researcher_ssh': False,    # researchers' own SSH tools (PuTTY/scp/WinSCP/VS Code) through Warpgate
     'screen_thumbnail': True,   # the portal card shows the running desktop's screen
+    'auto_domain_join': None,
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
@@ -114,6 +118,9 @@ def validate(data, pool_type):
         elif k == 'ssh_files':
             if v not in SSH_FILES:
                 return None, f"ssh_files must be one of {', '.join(SSH_FILES)}"
+        elif k == 'auto_domain_join':
+            if v is not None and not isinstance(v, bool):
+                return None, 'auto_domain_join must be true, false or null'
             out[k] = v
         elif k in _BOOLS:
             if not isinstance(v, bool):

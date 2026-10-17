@@ -350,6 +350,9 @@ SYNC_TABLES = (
     'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
     # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
     'vlab_wg_oidc',
+    # the bundled directory (pegaprox/vlab/directory.py): the engine's sealed accounts, the last
+    # push of each portal account, the domain join of each desktop
+    'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -421,6 +424,7 @@ ENCRYPTED_COLUMNS = {
     'vlab_warpgate': ('admin_token_encrypted', 'rdp_nla_password_encrypted'),
     'vlab_wg_oidc': ('private_key_encrypted',),
     'vlab_warpgate_nla': ('password_encrypted',),
+    'vlab_directory_secrets': ('secret_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 
