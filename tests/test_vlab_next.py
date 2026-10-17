@@ -524,32 +524,6 @@ def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monk
     assert len(ran) == 1
 
 
-def test_browser_ssh_for_a_linux_desktop_follows_the_sftp_policy(env, monkeypatch):
-    import pegaprox.api.vlab as core
-    import pegaprox.api.vlab_next as nxt
-    import pegaprox.utils.rbac as rbac
-    _, mgr, admin, alice, _, _ = env
-    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
-    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
-    pool = store.create_pool('연구실', 'dedicated', CID)
-    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'ai-ubuntu')
-    store.set_assignment(d['id'], 'alice')
-    key = '00112233445566778899aabbccddeeff'
-    admin.post('/api/vlab/admin/gateways', json={'name': 'g', 'kind': 'guacamole', 'address': 'guac.example.com', 'secret_key': key})
-    mgr._fetch_qemu_ips.return_value = ['10.0.0.9']
-    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
-    assert alice.get(f"/api/vlab/desktops/{d['id']}/ssh").status_code == 403    # off by default
-    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True, 'ssh_files': 'down'})
-    r = alice.get(f"/api/vlab/desktops/{d['id']}/ssh")
-    assert r.status_code == 200, r.get_json()
-    conn = _decrypt_guac(r.get_json()['url'], key)['connections']['ai-ubuntu']
-    assert conn['protocol'] == 'ssh' and conn['parameters']['hostname'] == '10.0.0.9' and conn['parameters']['username'] == 'alice'
-    p = conn['parameters']
-    assert p['enable-sftp'] == 'true' and p['sftp-disable-download'] == 'false' and p['sftp-disable-upload'] == 'true'
-    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: False)
-    assert alice.get(f"/api/vlab/desktops/{d['id']}/ssh").get_json()['code'] == 'NO_SSH'
-
-
 def test_bundled_guacamole_registers_itself_and_links_to_the_console_address(env, monkeypatch, tmp_path):
     _, _, admin, _, _, _ = env
     key = 'ffeeddccbbaa99887766554433221100'

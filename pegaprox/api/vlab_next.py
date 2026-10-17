@@ -1710,21 +1710,6 @@ def guac_params(pol):
             'enable-printing': 'true' if pol['client_printers'] else 'false'}
 
 
-def ssh_params(pol, host, port, username):
-    """Browser SSH (Guacamole terminal) parameters a pool policy sets: the SFTP file transfer
-    (none / download / upload / both). No password - Guacamole asks the user in the terminal."""
-    files = (pol or {}).get('ssh_files', 'off')
-    return {'hostname': host, 'port': str(port), 'username': username, 'color-scheme': 'green-black',
-            'enable-sftp': 'true' if files != 'off' else 'false',
-            'sftp-disable-download': 'false' if files in ('down', 'both') else 'true',
-            'sftp-disable-upload': 'false' if files in ('up', 'both') else 'true'}
-
-
-def guac_ssh_link(gw, username, name, host, port, pol=None, minutes=5):
-    """A browser SSH terminal link, same signed and encrypted guacamole-auth-json as guac_link."""
-    return _guac_link(gw, username, {name: {'protocol': 'ssh', 'parameters': ssh_params(pol, host, port, username)}}, minutes)
-
-
 def guac_link(gw, username, name, host, port, minutes=5, pol=None):
     """A guacamole-auth-json link for one RDP connection (browser RDP)."""
     return _guac_link(gw, username, {name: {'protocol': 'rdp', 'parameters': {
@@ -1875,35 +1860,6 @@ def my_external_guac(eid):
     return jsonify({'url': guac_link(gw, _user(), ext['name'], ext['address'], ext['port'])})
 
 
-@bp.route('/api/vlab/desktops/<desktop_id>/ssh', methods=['GET'])
-@require_auth(perms=['vlab.desk'])
-def my_desktop_ssh(desktop_id):
-    """A browser SSH terminal (Guacamole) for the user's own Linux desktop, when the pool allows
-    it and the desktop answers on port 22. The user types their account password in the terminal;
-    file transfer (SFTP) follows the pool policy."""
-    desk = store.get_desktop(desktop_id)
-    if not desk or desk['assigned_user'] != _user():
-        return _bad('Desktop not found', 404)
-    pol = core.pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))
-    if not pol.get('browser_ssh'):
-        return jsonify({'error': 'Browser SSH is off for this pool', 'code': 'SSH_OFF'}), 403
-    gw = _guac_gateway(store.get_pool(desk['pool_id']))
-    if not gw:
-        return jsonify({'error': 'No browser gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409
-    mgr = cluster_managers.get(desk['cluster_id'])
-    if not mgr or not getattr(mgr, 'is_connected', False):
-        return _bad('Cluster not connected', 503)
-    live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
-    if live.get('status') != 'running':
-        return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
-    node = live.get('node') or desk['node']
-    ip = _guest_ipv4(mgr, node, int(desk['vmid']))
-    if not ip:
-        return jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409
-    if not rdp_listening(ip, 22):
-        return jsonify({'error': 'This desktop has no SSH server on port 22', 'code': 'NO_SSH'}), 409
-    log_audit(_user(), 'vlab.desktop.connect', f"browser SSH to '{desk['name']}'", get_client_ip())
-    return jsonify({'url': guac_ssh_link(gw, _user(), desk['name'], ip, 22, pol=pol)})
 
 
 # --- golden image rollout ----------------------------------------------------------------
