@@ -43,7 +43,7 @@ from pegaprox.api import vlab as core
 from pegaprox.core import ha
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import accounts, catalog, store
+from pegaprox.vlab import accounts, catalog, directory, store
 
 bp = Blueprint('vlab_accounts', __name__)
 
@@ -223,6 +223,12 @@ def _local(u):
     return (u.get('auth_source') or 'local') == 'local'
 
 
+def _resettable(u):
+    """A reset link sets this account's password: a local one, or one of the bundled directory
+    (the new password goes to the DC then, pegaprox/vlab/directory.py)."""
+    return _local(u) or (directory.owns(u) and directory.active())
+
+
 @bp.route('/api/vlab/password-reset', methods=['POST'])
 def password_reset_request():
     """{login}: a username or a mail address. The answer is the same whether an account
@@ -245,7 +251,7 @@ def password_reset_request():
         for name, u in found:
             if not u.get('enabled', True) or not u.get('email'):
                 continue
-            if not _local(u):
+            if not _resettable(u):
                 _mail(u['email'], '비밀번호 변경 안내 / Password change',
                       f"{name} 계정은 기관 계정(AD/LDAP, SSO)으로 로그인합니다. 비밀번호는 기관 포털에서 바꾸세요.\n\n"
                       f"The account {name} signs in with your institution's directory. Change its password there.\n")
@@ -305,15 +311,28 @@ def password_reset_confirm():
         return _bad(why)
     name = r['username']
     u = (load_users() or {}).get(name)
-    if not u or not u.get('enabled', True) or not _local(u):
+    if not u or not u.get('enabled', True) or not _resettable(u):
         accounts.use_reset(r['id'])
         return jsonify({'error': 'This link has expired or was used already - ask for a new one', 'code': 'LINK_INVALID'}), 400
-    if not accounts.use_reset(r['id']):
-        return jsonify({'error': 'This link has expired or was used already - ask for a new one', 'code': 'LINK_INVALID'}), 400
-    salt, pw_hash = hash_password(password)
-    u.update(password_salt=salt, password_hash=pw_hash, password_changed_at=datetime.now().isoformat(),
-             force_password_change=False)
-    save_single_user(name, u)
+    if directory.owns(u):
+        # the DC's own password set; the link is spent only once the DC took it
+        try:
+            directory.set_password(name, password, u)
+        except directory.DirectoryError as e:
+            if e.code == 'PASSWORD_REFUSED':
+                return jsonify({'error': 'The directory refused the password - choose another one', 'code': e.code}), 400
+            return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
+        if not accounts.use_reset(r['id']):
+            return jsonify({'error': 'This link has expired or was used already - ask for a new one', 'code': 'LINK_INVALID'}), 400
+        u['force_password_change'] = False
+        save_single_user(name, u)
+    else:
+        if not accounts.use_reset(r['id']):
+            return jsonify({'error': 'This link has expired or was used already - ask for a new one', 'code': 'LINK_INVALID'}), 400
+        salt, pw_hash = hash_password(password)
+        u.update(password_salt=salt, password_hash=pw_hash, password_changed_at=datetime.now().isoformat(),
+                 force_password_change=False)
+        save_single_user(name, u)
     invalidate_all_user_sessions(name)
     revoke_user_api_tokens(name)
     ppglobals.login_attempts_by_user.pop(name, None)
@@ -356,12 +375,22 @@ def create_from_signup(req, reviewer, role=None, department_id=None, pool_ids=()
         catalog.review_signup(req['id'], 'rejected', reviewer, 'username taken meanwhile')
         return 'The username was taken meanwhile - the request is rejected'
     stamp = datetime.now().isoformat()
-    save_single_user(req['username'], {
+    row = {
         'password_salt': req['password_salt'], 'password_hash': req['password_hash'], 'password_changed_at': stamp,
         'role': role or ROLE_USER, 'display_name': req['display_name'] or req['username'], 'email': req['email'],
         'enabled': True, 'created_at': stamp, 'last_login': None, 'tenant_id': DEFAULT_TENANT_ID, 'permissions': [],
         'denied_permissions': [], 'portal_only': (role or ROLE_USER) == ROLE_USER,
-    })
+    }
+    in_directory = req.get('password_salt') == directory.SIGNUP_SALT
+    if in_directory:
+        # the password is on the DC already (signup_account): enable that account, keep no hash
+        row.update(password_salt='', password_hash='')
+        try:
+            directory.approve_signup(req['username'], row)
+        except directory.DirectoryError as e:
+            return f'The directory cannot be reached ({e.code}) - the request stays waiting, try again later'
+    else:
+        save_single_user(req['username'], row)
     dep = department_id or req.get('department_id')
     if dep and catalog.get_department(dep):
         catalog.set_department(req['username'], dep)
@@ -380,6 +409,8 @@ def create_from_signup(req, reviewer, role=None, department_id=None, pool_ids=()
     if expires_at:
         accounts.set_expiry(req['username'], accounts.parse_day(expires_at), reviewer)
     catalog.review_signup(req['id'], 'approved', reviewer)
+    if in_directory:
+        directory.after_change(req['username'])     # its department group
     return None
 
 
@@ -656,6 +687,7 @@ def apply_expiry(username, value, by):
     if before and before.get('expired_at') and (day is None or day >= date.today()) and not u.get('enabled', True):
         u['enabled'] = True
         save_single_user(username, u)
+        directory.after_change(username)
         log_audit(by, 'vlab.account.unexpired', f"{username} usable again (until {day or 'no limit'})", get_client_ip())
     return accounts.get_expiry(username)
 
@@ -717,6 +749,7 @@ def _expire(username, u, settings):
     log_audit('system', 'vlab.account.expired', f"{username}: past its last day - signed out and disabled", '')
     from pegaprox.api.vlab_notices import account_security
     account_security(username, 'expired', 'system')
+    directory.after_change(username)
     if settings['reclaim']:
         return _reclaim(username)
     return True
@@ -733,6 +766,7 @@ def _delete(username):
     accounts.forget(username)
     from pegaprox.vlab import notices
     notices.forget_user(username)
+    directory.after_delete(username)
     log_audit('system', 'user.deleted', f"Deleted user: {username} (expired account, kept the set days)", '')
 
 
@@ -920,6 +954,8 @@ def import_accounts():
             catalog.set_department(r['username'], r['department_id'])
         if r['expires_at']:
             accounts.set_expiry(r['username'], accounts.parse_day(r['expires_at']), _user())
+        # the bundled directory: the account with this first password goes there now
+        directory.after_create(r['username'], pw)
         mailed = False
         if deliver == 'mail' and r['email']:
             mailed, _err = _mail(r['email'], '계정 안내 / Your account',

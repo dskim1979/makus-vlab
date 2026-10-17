@@ -133,7 +133,7 @@ from pegaprox.api import vlab_accounts as acct
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import catalog, datasets, envcat, nas, store
+from pegaprox.vlab import catalog, datasets, directory, envcat, nas, store
 
 bp = Blueprint('vlab_next', __name__)
 
@@ -225,6 +225,7 @@ def create_department():
         return _bad(str(e))
     dep = catalog.save_department(None, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.create', f"department '{name}'", get_client_ip())
+    directory.after_departments()
     return jsonify({'department': dep}), 201
 
 
@@ -239,6 +240,7 @@ def update_department(dep_id):
         return _bad(str(e))
     dep = catalog.save_department(dep_id, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.update', f"department '{name}'", get_client_ip())
+    directory.after_departments()
     return jsonify({'department': dep})
 
 
@@ -252,6 +254,7 @@ def delete_department(dep_id):
         return _bad('Move or delete its sub-departments first', 409)
     catalog.delete_department(dep_id)
     log_audit(_user(), 'vlab.department.delete', f"department '{dep['name']}' (its members now belong to none)", get_client_ip())
+    directory.after_departments()
     return jsonify({'success': True})
 
 
@@ -275,6 +278,7 @@ def set_user_department(username):
         return _bad('department_id: no such department')
     catalog.set_department(username, dep)
     log_audit(_user(), 'vlab.department.member', f"{username} -> {dep or '(none)'}", get_client_ip())
+    directory.after_change(username)
     return jsonify({'username': username, 'department_id': dep})
 
 
@@ -361,8 +365,11 @@ def create_account():
     exp = None
     if data.get('expires_at'):
         exp = (acct.apply_expiry(name, data['expires_at'], _user()) or {}).get('expires_at')
+    # the bundled directory: the account and the password given here go there now (none kept)
+    moved = directory.after_create(name, data.get('password') or '')
     return jsonify({'user': dict(body['user'], department_id=data.get('department_id') or None,
-                                 must_change_password=bool(data.get('must_change_password')), expires_at=exp)}), 201
+                                 must_change_password=bool(data.get('must_change_password')), expires_at=exp,
+                                 directory=bool(moved))}), 201
 
 
 @bp.route('/api/vlab/admin/users/<username>', methods=['PUT'])
@@ -398,6 +405,7 @@ def update_account(username):
     if 'expires_at' in data:
         row = acct.apply_expiry(username, data['expires_at'], _user())
         log_audit(_user(), 'vlab.account.expiry', f"{username}: last day {row['expires_at'] if row else 'none'}", get_client_ip())
+    directory.after_change(username)
     return jsonify({'success': True})
 
 
@@ -415,6 +423,7 @@ def delete_account(username):
         accounts.forget(username)
         from pegaprox.vlab import notices
         notices.forget_user(username)
+        directory.after_delete(username)
     return resp
 
 
@@ -429,12 +438,57 @@ def reset_account_password(username):
         _only(data, ('password', 'must_change_password'))
     except ValueError as e:
         return _bad(str(e))
+    from pegaprox.utils.auth import load_users
+    if directory.owns((load_users() or {}).get(username)) and directory.active():
+        return _directory_password_reset(username, data)
     resp = core_users.admin_change_password(username)
     if _core_ok(resp)[0]:
         _force_password_change(username, bool(data.get('must_change_password')))
         if username != _user():
             from pegaprox.api.vlab_notices import account_security
             account_security(username, 'password', _user())
+    return resp
+
+
+def _directory_password_reset(username, data):
+    """An admin's reset of a bundled-directory account: the core route's checks (visible,
+    tenant, outrank, policy), then the DC's own password set - no hash is kept here."""
+    from pegaprox.api import users as core_users
+    from pegaprox.core.db import DEFAULT_TENANT_ID
+    from pegaprox.utils.auth import (invalidate_all_user_sessions, load_users, revoke_user_api_tokens,
+                                     validate_password_policy)
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    if username not in core._visible_users():
+        return _bad('User not found', 404)
+    rec = (load_users() or {}).get(username)
+    ct = core_users._caller_tenant_or_none()
+    if ct is not None and rec.get('tenant_id', DEFAULT_TENANT_ID) != ct:
+        return _bad('Access denied: cannot change passwords for users in other tenants', 403)
+    if not core_users._caller_can_manage_user(rec):
+        return _bad('Access denied: target has privileges beyond your own', 403)
+    password = str(data.get('password') or '')
+    ok, why = validate_password_policy(password)
+    if not ok:
+        return _bad(why)
+    try:
+        directory.set_password(username, password, rec)
+    except directory.DirectoryError as e:
+        if e.code == 'PASSWORD_REFUSED':
+            return jsonify({'error': 'The directory refused the password', 'code': e.code, 'detail': e.detail}), 400
+        return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
+    sessions = invalidate_all_user_sessions(username)
+    revoke_user_api_tokens(username)
+    invalidate_user_sse_tokens(username)
+    _force_password_change(username, bool(data.get('must_change_password')))
+    log_audit(_user(), 'user.password_reset', f"Admin reset the directory password of {username} ({sessions} sessions invalidated)",
+              get_client_ip())
+    if username != _user():
+        from pegaprox.api.vlab_notices import account_security
+        account_security(username, 'password', _user())
+    resp = jsonify({'success': True, 'message': f'Password for {username} changed', 'sessions_invalidated': sessions,
+                    'relogin_required': username == _user()})
+    if username == _user():
+        resp.delete_cookie('session_id')
     return resp
 
 
@@ -602,8 +656,23 @@ def signup():
         return _bad('Too many requests are waiting - try again later', 429)
     if ip and sum(1 for s in catalog.list_signups('pending') if s['client_ip'] == ip) >= MAX_PENDING_PER_IP:
         return _bad('Too many requests from this address are waiting', 429)
-    salt, pw_hash = hash_password(password)
-    req = catalog.add_signup(username, display, email, dep, note, salt, pw_hash, ip)
+    req = None
+    if directory.active() and directory.NAME.match(username):
+        # the bundled directory: the password goes to a disabled directory account now and the
+        # request keeps no hash of it; the review enables or deletes that account
+        sid = store.new_id('sig')
+        try:
+            directory.signup_account(username, display, email, password, sid)
+            req = catalog.add_signup(username, display, email, dep, note, directory.SIGNUP_SALT, '', ip, sid=sid)
+        except directory.DirectoryError as e:
+            if e.code == 'EXISTS':
+                return _bad('This username is taken or already waiting for review', 409)
+            if e.code == 'PASSWORD_REFUSED':
+                return _bad('The password was refused - choose another one')
+            logging.warning(f'[VLAB] sign-up of {username}: bundled directory away ({e.code}), kept for the portal')
+    if req is None:
+        salt, pw_hash = hash_password(password)
+        req = catalog.add_signup(username, display, email, dep, note, salt, pw_hash, ip)
     log_audit(username, 'vlab.signup.request', f"sign-up request {req['id']}", ip)
     from pegaprox.vlab import accounts
     if terms['enabled']:
@@ -666,6 +735,7 @@ def reject_signup(sid):
     except ValueError as e:
         return _bad(str(e))
     out = catalog.review_signup(sid, 'rejected', _user(), reason)
+    directory.after_signup_rejected(req['username'])
     log_audit(_user(), 'vlab.signup.reject', f"sign-up of {req['username']} rejected" + (f': {reason}' if reason else ''), get_client_ip())
     from pegaprox.api.vlab_notices import signup_answered
     signup_answered(req, False, reason)
@@ -1812,6 +1882,8 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     elif os_kind == 'linux' and not rdp_listening(ip, port):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)
+    # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
+    username = directory.desktop_login(desk['id'], username)
     if protocol == 'rdp':
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
         return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None

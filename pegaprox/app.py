@@ -1673,6 +1673,13 @@ def main(debug_mode=False):
     except Exception as e:
         print(f"Built-in Guacamole gateway not set up: {e}")
 
+    # MOAVI Desk - the bundled directory (VLAB_DIRECTORY=1): its service account, and sign-in on it
+    try:
+        from pegaprox.vlab.directory import sync_builtin as sync_builtin_directory
+        sync_builtin_directory()
+    except Exception as e:
+        print(f"Bundled directory not set up: {e}")
+
     start_cross_cluster_lb_thread()
     print("Started cross-cluster load balancer thread")
 

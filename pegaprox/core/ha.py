@@ -346,6 +346,9 @@ SYNC_TABLES = (
     'vlab_ci_links', 'vlab_accel_bookings',
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
+    # the bundled directory (pegaprox/vlab/directory.py): the engine's sealed accounts, the last
+    # push of each portal account, the domain join of each desktop
+    'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -414,6 +417,7 @@ ENCRYPTED_COLUMNS = {
     'auto_install_profiles': ('answer_encrypted',),
     'vlab_pool_storage': ('password_encrypted',),
     'vlab_ide_sessions': ('token_encrypted',),
+    'vlab_directory_secrets': ('secret_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 

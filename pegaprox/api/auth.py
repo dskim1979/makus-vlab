@@ -970,6 +970,21 @@ def auth_login():
                 resp.headers['Retry-After'] = str(lockout_time)
                 return resp, 401
             return jsonify({'error': 'Invalid credentials'}), 401
+
+        # MOAVI Desk: with the bundled directory on, a local account moves there now - the
+        # password just checked is written to the directory and nowhere else, the row keeps
+        # no hash after it (pegaprox/vlab/directory.py). It stays local when it may not move
+        # or the directory is away.
+        if not ha.is_standby():
+            try:
+                from pegaprox.vlab import directory as _bundled
+                _moved = _bundled.migrate_on_login(username, user, password)
+                if _moved is not None:
+                    user = _moved
+                    users_db[username] = _moved
+                    ldap_authenticated = True     # no local rehash below: there is no local hash
+            except Exception as e:
+                logging.warning(f"[VLAB] bundled directory move of '{username}': {e.__class__.__name__}")
     else:
         user = users_db[username]
         
@@ -1797,6 +1812,31 @@ def auth_change_password():
     
     user = users_db[username]
     
+    # MOAVI Desk: an account of the bundled directory changes its password on the directory
+    # itself - the current one checked by the DC, the new one set there, nothing kept here
+    from pegaprox.vlab import directory as _bundled
+    if _bundled.owns(user) and _bundled.active():
+        try:
+            _bundled.change_password(username, current_password, new_password, user)
+        except _bundled.DirectoryError as e:
+            if e.code == 'WRONG_PASSWORD':
+                log_audit(username, 'user.password_change_failed', 'Incorrect current password (directory)')
+                return jsonify({'error': 'Current password is incorrect'}), 401
+            if e.code == 'PASSWORD_REFUSED':
+                return jsonify({'error': 'The directory refused the new password', 'code': e.code, 'detail': e.detail}), 400
+            return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
+        if user.get('force_password_change'):
+            user['force_password_change'] = False
+            save_single_user(username, user)
+        sessions_removed = invalidate_all_user_sessions(username)
+        tokens_revoked = revoke_user_api_tokens(username)
+        from pegaprox.utils.realtime import invalidate_user_sse_tokens
+        invalidate_user_sse_tokens(username)
+        log_audit(username, 'user.password_changed', f"Password changed in the bundled directory, {sessions_removed} session(s) invalidated, {tokens_revoked} API token(s) revoked")
+        resp = jsonify({'success': True, 'sessions_invalidated': sessions_removed, 'relogin_required': True})
+        resp.delete_cookie('session_id')
+        return resp
+
     # NS: LDAP/OIDC users cannot change their password here - they must change it in their identity provider
     if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
         provider_name = {'ldap': 'LDAP/Active Directory', 'oidc': 'your OIDC provider', 'entra': 'Microsoft Entra ID'}.get(user['auth_source'], 'your identity provider')
