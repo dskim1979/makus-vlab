@@ -449,6 +449,28 @@ def test_linux_join_failure_and_the_pool_list(desk_env):
     assert j['state'] == 'other' and 'corp.example' in j['detail']
 
 
+def _blocked():
+    r = _Resp(None, 500)
+    r.text = '{"data":null,"message":"Agent error: Command guest-exec has been disabled"}'
+    return r
+
+def test_windows_output_is_utf8_and_a_blocked_guest_exec_is_named(desk_env):
+    api, seed, admin, dc, mgr, pool, d1, d2 = desk_env
+    g = Guest(mgr)
+    admin.post(f"/api/vlab/admin/desktops/{d1['id']}/domain-join", json={})
+    admin.post(f"/api/vlab/admin/desktops/{d1['id']}/domain-join/check", json={})
+    join, check = [d['command'][-1] for u, d in g.runs if u.endswith('/agent/exec')][-2:]
+    # a Korean Windows answers in CP949 otherwise: the detail would be stored as mojibake
+    assert '[Console]::OutputEncoding = [Text.Encoding]::UTF8' in join
+    assert check.startswith('[Console]::OutputEncoding = [Text.Encoding]::UTF8')
+    # Rocky / RHEL qemu-guest-agent blocks guest-exec: its own code, not the raw agent answer
+    g2 = Guest(mgr, os_id='rocky')
+    mgr._api_post.side_effect = lambda url, data=None: _blocked() \
+        if url.endswith('/agent/exec') else g2.post(url, data)
+    j = admin.post(f"/api/vlab/admin/desktops/{d2['id']}/domain-join", json={}).get_json()['join']
+    assert j['state'] == 'failed' and j['code'] == 'AGENT_EXEC_DISABLED'
+
+
 def test_tables_are_synced_and_the_secret_column_sealed():
     from pegaprox.core import ha
     for t in directory.TABLES:

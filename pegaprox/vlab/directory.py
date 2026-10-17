@@ -1114,6 +1114,10 @@ _WIN_SID = ("$sid = ''; try { $sid = (Get-LocalUser | Select-Object -First 1).SI
             "\"sid=$sid\"")
 
 
+# Windows' own messages (a Korean Windows: CP949) come back as UTF-8, not mojibake
+_WIN_UTF8 = '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
+
+
 def windows_join_script(name, restart=False, taken_sids=()):
     """PowerShell for the guest agent (as SYSTEM). The join account's password comes on stdin.
     taken_sids: the machine SIDs other desktops reported - a clone with one of them was not
@@ -1124,6 +1128,7 @@ def windows_join_script(name, restart=False, taken_sids=()):
     taken_ps = '@(' + ','.join(_ps_str(x) for x in taken_sids if x) + ')'
     return '\n'.join([
         "$ErrorActionPreference = 'Stop'",
+        _WIN_UTF8,
         f"$domain = {_ps_str(c['realm'])}; $netbios = {_ps_str(c['domain'])}; $ou = {_ps_str(c['desktops_dn'])}",
         f"$user = {_ps_str(c['domain'] + chr(92) + JOIN_USER)}; $name = {_ps_str(name)}; $dns = {dns_ps}; $taken = {taken_ps}",
         "$pw = [Console]::In.ReadToEnd().Trim()",
@@ -1209,7 +1214,7 @@ def linux_join_script(name):
 def status_script(os_kind):
     """Only asks: is the guest in a domain, which one, under which name."""
     if os_kind == 'windows':
-        return (_WIN_SID + '; $cs = Get-CimInstance Win32_ComputerSystem; "computer=$env:COMPUTERNAME"; '
+        return (_WIN_UTF8 + '; ' + _WIN_SID + '; $cs = Get-CimInstance Win32_ComputerSystem; "computer=$env:COMPUTERNAME"; '
                 'if ($cs.PartOfDomain) { "domain=$($cs.Domain)"; "joined=1" } else { "joined=0" }; exit 0')
     return ('D=$(realm list --name-only 2>/dev/null | head -n1); echo "computer=$(hostname -s)"; '
             'if [ -n "$D" ]; then echo "domain=$D"; echo joined=1; else echo joined=0; fi; exit 0')
