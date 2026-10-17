@@ -337,6 +337,10 @@ EXITS = {
     ('pegaprox/api/pbs.py', 'probe_pbs_fingerprint', 'socket'): (1, 'read'),
     # MOAVI Desk: the gateway and licence-server port checks (an admin's request, no cluster)
     ('pegaprox/api/vlab_next.py', '_tcp_probe', 'socket'): (1, 'read'),
+    # MOAVI Desk: a desktop's RDP/SSH/VNC port probe on connect (a user's request, no cluster write)
+    ('pegaprox/api/vlab_next.py', 'rdp_listening', 'socket'): (1, 'read'),
+    # MOAVI Desk: the Warpgate bastion admin API (an external gateway service, not a cluster/node/BMC)
+    ('pegaprox/vlab/warpgate.py', '_api', 'http-direct'): (1, 'external'),
     ('pegaprox/api/pbs.py', 'auto_attach_pbs_to_clusters', 'socket'): (1, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'socket'): (2, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'http-session'): (1, 'login'),
@@ -515,8 +519,10 @@ def test_the_inventory_counts_what_the_report_says():
     # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
     # (+1 since: the licence seats' lmstat, an external read)
-    assert sum(n for n, _v in EXITS.values()) == 260 and len(EXITS) == 155
-    assert len({(f, q) for f, q, _k in EXITS}) == 141
+    # (+2 since: the Warpgate bastion admin API, an external http; the desktop RDP/SSH/VNC
+    #  port probe on connect, a socket read)
+    assert sum(n for n, _v in EXITS.values()) == 262 and len(EXITS) == 157
+    assert len({(f, q) for f, q, _k in EXITS}) == 143
     assert by['guard'] == 46 and by['client'] == 85
 
 

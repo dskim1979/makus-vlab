@@ -346,6 +346,8 @@ SYNC_TABLES = (
     'vlab_ci_links', 'vlab_accel_bookings',
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
+    # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
+    'vlab_warpgate', 'vlab_warpgate_targets',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -414,6 +416,7 @@ ENCRYPTED_COLUMNS = {
     'auto_install_profiles': ('answer_encrypted',),
     'vlab_pool_storage': ('password_encrypted',),
     'vlab_ide_sessions': ('token_encrypted',),
+    'vlab_warpgate': ('admin_token_encrypted', 'rdp_nla_password_encrypted'),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 
