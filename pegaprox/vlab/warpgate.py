@@ -46,6 +46,7 @@ _SCHEMA = (
         rdp_nla_password_encrypted TEXT NOT NULL DEFAULT '',
         web_rdp_provider TEXT NOT NULL DEFAULT 'guac',
         rdp_via_warpgate INTEGER NOT NULL DEFAULT 0,
+        allow_direct_fallback INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 0,
         last_check TEXT,
         last_ok INTEGER,
@@ -99,13 +100,14 @@ def config(secret=False):
         return {'base_url': '', 'ssh_port': DEFAULT_PORTS['ssh'], 'rdp_port': DEFAULT_PORTS['rdp'],
                 'vnc_port': DEFAULT_PORTS['vnc'], 'verify_tls': False, 'enabled': False,
                 'rdp_nla_user': '', 'has_nla_password': False, 'web_rdp_provider': 'guac',
-                'rdp_via_warpgate': False,
+                'rdp_via_warpgate': False, 'allow_direct_fallback': False,
                 'has_token': False, 'last_check': None, 'last_ok': None, 'last_detail': ''}
     out = {'base_url': r['base_url'], 'ssh_port': r['ssh_port'], 'rdp_port': r['rdp_port'],
            'vnc_port': r['vnc_port'], 'verify_tls': bool(r['verify_tls']), 'enabled': bool(r['enabled']),
            'rdp_nla_user': r['rdp_nla_user'], 'has_nla_password': bool(r['rdp_nla_password_encrypted']),
            'web_rdp_provider': r['web_rdp_provider'] or 'guac',
            'rdp_via_warpgate': bool(r['rdp_via_warpgate']),
+           'allow_direct_fallback': bool(r['allow_direct_fallback']),
            'has_token': bool(r['admin_token_encrypted']), 'last_check': r['last_check'],
            'last_ok': None if r['last_ok'] is None else bool(r['last_ok']), 'last_detail': r['last_detail']}
     if secret:
@@ -126,10 +128,11 @@ def _unseal(sealed):
 
 def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
                 admin_token=None, rdp_nla_user=None, rdp_nla_password=None, web_rdp_provider=None,
-                rdp_via_warpgate=None):
+                rdp_via_warpgate=None, allow_direct_fallback=None):
     """설정 저장. admin_token / rdp_nla_password: None이면 기존값 유지, ''이면 지움, 값이면 봉인해 저장.
     web_rdp_provider: 'guac'(기본, 항상 작동) 또는 'warpgate'(실클러스터 검증 후 전환).
-    rdp_via_warpgate: 전용 앱·mstsc용 .rdp를 Warpgate로 향하게 할지(None이면 기존값 유지)."""
+    rdp_via_warpgate: 전용 앱·mstsc용 .rdp를 Warpgate로 향하게 할지(None이면 기존값 유지).
+    allow_direct_fallback: Warpgate 장애 때 직접/Guacamole 경로로 열어 줄지(기본 꺼짐 = 접속 거부. 켜면 보안 약화)."""
     base_url = (base_url or '').strip().rstrip('/')
     r = _row()
     sealed = r['admin_token_encrypted'] if r else ''
@@ -139,6 +142,9 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
     via = bool(r['rdp_via_warpgate']) if r else False
     if rdp_via_warpgate is not None:
         via = bool(rdp_via_warpgate)
+    fallback = bool(r['allow_direct_fallback']) if r else False
+    if allow_direct_fallback is not None:
+        fallback = bool(allow_direct_fallback)
     if admin_token is not None or rdp_nla_password is not None:
         from pegaprox.core.db import get_db
         gdb = get_db()
@@ -153,11 +159,11 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
     db().execute(
         '''INSERT OR REPLACE INTO vlab_warpgate
            (id, base_url, admin_token_encrypted, ssh_port, rdp_port, vnc_port, verify_tls,
-            rdp_nla_user, rdp_nla_password_encrypted, web_rdp_provider, rdp_via_warpgate, enabled,
+            rdp_nla_user, rdp_nla_password_encrypted, web_rdp_provider, rdp_via_warpgate, allow_direct_fallback, enabled,
             last_check, last_ok, last_detail, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (CONFIG_ID, base_url, sealed, int(ssh_port), int(rdp_port), int(vnc_port),
-         1 if verify_tls else 0, nla_user, nla_sealed, provider, 1 if via else 0, 1 if enabled else 0,
+         1 if verify_tls else 0, nla_user, nla_sealed, provider, 1 if via else 0, 1 if fallback else 0, 1 if enabled else 0,
          r['last_check'] if r else None, r['last_ok'] if r else None,
          r['last_detail'] if r else '', now()))
     return config()
@@ -425,6 +431,12 @@ def issue_ticket(cfg, username, target_name, ttl_seconds=TICKET_TTL_SECONDS):
 # --- researcher native SSH (own tools through Warpgate) ----------------------------------
 
 _PUBKEY_RE = re.compile(r'^(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-\S+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-\S+)\s+[A-Za-z0-9+/=]+(\s+\S.*)?$')
+
+
+def looks_like_private_key(text):
+    """A pasted private key (PEM / OpenSSH / PuTTY .ppk) - refused with its own message."""
+    t = (text or '').upper()
+    return 'PRIVATE KEY' in t or 'PUTTY-USER-KEY-FILE' in t
 
 
 def is_public_key(text):

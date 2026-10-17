@@ -1832,17 +1832,23 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
                                'code': 'NO_RDP'}), 409)
     if protocol == 'rdp':
         # "RDP through Warpgate" on: an .rdp aimed at Warpgate with a single-use ticket
-        # (pegaprox/api/vlab_warpgate.py); otherwise, or if Warpgate fails, the direct / RD Gateway file
+        # (pegaprox/api/vlab_warpgate.py). Warpgate down: refused (WG_DOWN) unless the admin allowed
+        # the direct fallback. Switch off: the direct / RD Gateway file as before
         from pegaprox.api.vlab_warpgate import rdp_answer_via_warpgate
-        answer = rdp_answer_via_warpgate(desk, username, ip, pol)
+        answer, err = rdp_answer_via_warpgate(desk, username, ip, pol)
+        if err:
+            return None, err
         if answer:
             return answer, None
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
         return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
     # coexistence: the engine picks who serves browser RDP (pegaprox/api/vlab_warpgate.py) - Warpgate
-    # only when switched to it, Guacamole otherwise and whenever Warpgate fails
+    # when switched to it (Warpgate down: refused, WG_DOWN, unless the admin allowed the fallback),
+    # Guacamole otherwise
     from pegaprox.api.vlab_warpgate import browser_rdp_via_warpgate
-    url = browser_rdp_via_warpgate(desk, username, ip)
+    url, err = browser_rdp_via_warpgate(desk, username, ip)
+    if err:
+        return None, err
     if url:
         return {'type': 'guac', 'url': url, 'via': 'warpgate'}, None
     gw = _guac_gateway(pool)

@@ -132,15 +132,22 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
   사용자의 유일한 접속 수단이라 절대 끊기면 안 된다.
 - 설정 `web_rdp_provider`(기본 `guac`)가 전환점이다. 브라우저 RDP는 실클러스터에서 Warpgate 웹 RDP가
   검증될 때까지 **Guacamole가 기본**이다. 포털의 기존 "브라우저 RDP로 열기"는 그대로 Guacamole로
-  동작하고, Warpgate 연결은 **별도 메뉴**로 추가되어 둘 다 쓸 수 있다. → 브라우저 RDP는 항상
-  {Guacamole, Warpgate} 중 적어도 하나가 서비스하며, 둘 다 꺼지는 상태가 없다.
+  동작하고, Warpgate 연결은 **별도 메뉴**로 추가되어 둘 다 쓸 수 있다. → 기본 설정에서 브라우저 RDP는
+  Guacamole가 서비스한다.
+- **Warpgate로 전환한 경로는 장애 시 닫힌다(fail closed)**: `web_rdp_provider=warpgate` 이거나
+  `rdp_via_warpgate` 가 켜진 상태에서 Warpgate가 응답하지 않으면, 엔진은 직접 `.rdp`나 Guacamole로 몰래
+  돌리지 않고 `503 WG_DOWN`("Warpgate에 연결할 수 없습니다. 잠시 뒤 다시 시도하거나 관리자에게
+  문의하세요.")을 돌려준다. 몰래 돌리면 bastion을 우회하고, 직접 접속을 막은 현장에서는 어차피 실패한다.
+  관리자가 **"Warpgate 장애 시 직접 접속 허용"**(`allow_direct_fallback`, 기본 꺼짐, 보안 약화)을 켠
+  경우에만 그 접속을 직접 `.rdp`/Guacamole로 열고 감사 기록(`vlab.warpgate.fallback`)을 남긴다.
 - `GET /api/vlab/me/warpgate` 가 `enabled`·`web_rdp_provider`를 주어 포털이 무엇을 보일지 정한다.
 - **전용 앱·mstsc(.rdp)**: 설정 `rdp_via_warpgate`(기본 꺼짐). 켜면 `POST /api/vlab/desktops/<id>/connect
   {protocol:rdp}` 의 `.rdp`가 데스크톱 주소 대신 Warpgate RDP 리스너를 향하고, 사용자 이름에 그 사용자·
   데스크톱 전용 1회용 티켓(`ticket-<secret>`)이 들어간다(비밀번호 없음, 응답에 `via: warpgate`). 풀 정책의
   리디렉션·네트워크 자동 감지 줄은 그대로, `enablecredsspsupport:i:0`(Warpgate RDP는 NLA 없는 TLS),
   `prompt for credentials:i:0`, 자동 재연결 끔(티켓 1회용). 대상은 `interactive_logon` 이라 데스크톱
-  로그온 화면에서 사용자가 본인(AD) 계정을 입력한다. Warpgate 오류 시 그 접속만 직접 `.rdp`로 돌아간다.
+  로그온 화면에서 사용자가 본인(AD) 계정을 입력한다. Warpgate 오류 시 `503 WG_DOWN`(fail closed);
+  `allow_direct_fallback` 을 켠 경우에만 그 접속을 직접 `.rdp`로 연다.
   클라이언트는 파일을 그대로 mstsc로 열고 "Warpgate 경유"를 안내한다.
 
 ## 4-3. 실(real) Warpgate + Proxmox 클러스터 검증 체크리스트

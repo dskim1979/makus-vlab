@@ -284,8 +284,8 @@ def test_the_engine_made_rdp_file_connects_through_warpgate(wg, cfg, monkeypatch
     monkeypatch.setattr(api_wg, 'get_client_ip', lambda: '127.0.0.1')
     file_user = f'{USER}-file'
     desk = {'id': f'it-desk-{RUN}', 'name': f'win-{RUN}'}
-    answer = api_wg.rdp_answer_via_warpgate(desk, file_user, RDP_HOST, pool_policy.effective({}))
-    assert answer and answer['via'] == 'warpgate', answer
+    answer, err = api_wg.rdp_answer_via_warpgate(desk, file_user, RDP_HOST, pool_policy.effective({}))
+    assert err is None and answer and answer['via'] == 'warpgate', (answer, err)
     text = answer['rdp']
     lines = text.splitlines()
     assert f'full address:s:127.0.0.1:{WG_RDP}' in lines
