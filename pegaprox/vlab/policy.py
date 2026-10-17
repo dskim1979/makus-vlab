@@ -118,6 +118,7 @@ def validate(data, pool_type):
         elif k == 'ssh_files':
             if v not in SSH_FILES:
                 return None, f"ssh_files must be one of {', '.join(SSH_FILES)}"
+            out[k] = v
         elif k == 'auto_domain_join':
             if v is not None and not isinstance(v, bool):
                 return None, 'auto_domain_join must be true, false or null'

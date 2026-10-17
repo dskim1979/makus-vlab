@@ -724,6 +724,8 @@ AUTOMATIONS = {
     ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'forget_desktop'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'resync_ssh_file_transfer'): (1, 'read'),
+    # MOAVI Desk: the portal card's screen picture refreshed off the request (a screendump, read only)
+    ('pegaprox/api/vms.py', '_grab_in_background'): (1, 'read'),
     # MOAVI Desk: new, cloned and reset desktops join the bundled directory by themselves
     ('pegaprox/api/vlab_directory.py', 'start_autojoin_thread'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
