@@ -184,6 +184,14 @@ _COLUMNS = (
     ('vlab_build_jobs', 'artifacts', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'artifacts_dir', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'source', "TEXT NOT NULL DEFAULT ''"),
+    # board target (pegaprox/api/vlab_next.py): 'usb' = USB-JTAG passthrough (today), 'network' =
+    # the JTAG cable is reached over TCP (Xilinx hw_server / XVC, Intel Quartus jtagd). A network
+    # board carries host/port/protocol/label and no usb id; it never changes the desktop VM config.
+    ('vlab_boards', 'target', "TEXT NOT NULL DEFAULT 'usb'"),
+    ('vlab_boards', 'host', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'port', 'INTEGER'),
+    ('vlab_boards', 'protocol', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'label', "TEXT NOT NULL DEFAULT ''"),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -533,14 +541,18 @@ def get_board(bid):
     return _one('SELECT * FROM vlab_boards WHERE id = ?', (bid,))
 
 
-def save_board(bid, name, cluster_id, node, usb, kind, notes):
+def save_board(bid, name, cluster_id, node, usb, kind, notes, target='usb', host='', port=None, protocol='', label=''):
+    """Register or update a board. target 'usb' keeps the usb id and node (passthrough);
+    target 'network' keeps host/port/protocol/label and no usb id (hw_server / XVC / jtagd)."""
     if bid:
-        db().execute('UPDATE vlab_boards SET name = ?, cluster_id = ?, node = ?, usb = ?, kind = ?, notes = ? WHERE id = ?',
-                     (name, cluster_id, node, usb, kind, notes, bid))
+        db().execute('UPDATE vlab_boards SET name = ?, cluster_id = ?, node = ?, usb = ?, kind = ?, notes = ?, '
+                     'target = ?, host = ?, port = ?, protocol = ?, label = ? WHERE id = ?',
+                     (name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, bid))
     else:
         bid = new_id('brd')
-        db().execute('INSERT INTO vlab_boards (id, name, cluster_id, node, usb, kind, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                     (bid, name, cluster_id, node, usb, kind, notes, now()))
+        db().execute('INSERT INTO vlab_boards (id, name, cluster_id, node, usb, kind, notes, '
+                     'target, host, port, protocol, label, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                     (bid, name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, now()))
     return get_board(bid)
 
 

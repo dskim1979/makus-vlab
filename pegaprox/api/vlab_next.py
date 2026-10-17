@@ -45,8 +45,10 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   /api/vlab/admin/golden-images/<id>/deploy       {pool_id, count, name_prefix, start_vmid?} full clones of the current version  vlab.pool.manage
 
   GET/POST /api/vlab/admin/boards, PUT/DELETE .../<id>   the board lab (JTAG cables)          vlab.pool.view / vlab.accel.manage
-  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough, slot usb4  vlab.accel.manage
+  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough (slot usb4), or a network
+                                                       board's grant (hw_server/XVC/jtagd: no VM change)  vlab.accel.manage
   POST   /api/vlab/admin/boards/<id>/detach                                                    vlab.accel.manage
+  GET    /api/vlab/me/boards                             boards lent to the caller, network ones with host:port  vlab.desk
 
   GET    /api/vlab/admin/buildfarm                       build farm pools: size, in use, load  vlab.pool.view
 
@@ -1163,6 +1165,10 @@ def deploy_golden(gid):
 
 BOARD_SLOT = 'usb4'     # the slot MOAVI Desk owns on a desktop VM (usb0-3 stay the admin's)
 _USB_ID = re.compile(r'^([0-9a-f]{4}:[0-9a-f]{4}|\d+-\d+(\.\d+)*)$')
+_HOSTRE = re.compile(r'^[A-Za-z0-9._-]+$')     # hostname or IPv4; the cable host reached over TCP
+# network JTAG servers the researcher's tool dials: Xilinx hw_server (3121) / Xilinx Virtual Cable,
+# Intel Quartus jtagd (1309). The port the board is shared on is whatever the server listens on.
+BOARD_PROTOCOLS = {'hw_server': 3121, 'xvc': 2542, 'quartus': 1309}
 
 
 def _board_body():
@@ -1170,11 +1176,51 @@ def _board_body():
     cluster_id = str(data.get('cluster_id') or '')
     if not core._can_reach(cluster_id):
         raise LookupError('Cluster not found')
+    target = str(data.get('target') or 'usb').strip().lower()
+    if target not in ('usb', 'network'):
+        raise ValueError("target: 'usb' or 'network'")
+    name = _text(data, 'name', 80, required=True)
+    kind, notes = _text(data, 'kind', 80), _text(data, 'notes', 300)
+    if target == 'network':
+        host = str(data.get('host') or '').strip()
+        if not host or not _HOSTRE.match(host) or len(host) > 255:
+            raise ValueError('host: the cable host MOAVI Desk VMs reach over the network')
+        protocol = str(data.get('protocol') or 'hw_server').strip().lower()
+        if protocol not in BOARD_PROTOCOLS:
+            raise ValueError('protocol: hw_server, xvc or quartus')
+        try:
+            port = int(data.get('port') or BOARD_PROTOCOLS[protocol])
+        except (TypeError, ValueError):
+            raise ValueError('port: 1-65535')
+        if not (1 <= port <= 65535):
+            raise ValueError('port: 1-65535')
+        label = _text(data, 'label', 80)
+        # a network board has no usb id and no node (it is reached by host, not plugged into one)
+        return name, cluster_id, '', '', kind, notes, 'network', host, port, protocol, label
     usb = str(data.get('usb') or '').strip().lower()
     if not _USB_ID.match(usb):
         raise ValueError('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
     node = _text(data, 'node', 64, required=True)
-    return _text(data, 'name', 80, required=True), cluster_id, node, usb, _text(data, 'kind', 80), _text(data, 'notes', 300)
+    return name, cluster_id, node, usb, kind, notes, 'usb', '', None, '', ''
+
+
+def _board_conn(b):
+    """Connection info a researcher's tool dials for a network board: host:port plus a short
+    how-to per protocol. None for a USB board (that one goes through SPICE on the desktop)."""
+    if (b.get('target') or 'usb') != 'network':
+        return None
+    host, port, proto = b.get('host') or '', b.get('port'), b.get('protocol') or 'hw_server'
+    endpoint = f"{host}:{port}" if port else host
+    how = {
+        'hw_server': 'Vivado Hardware Manager > Open Target > Open New Target > Remote server: '
+                     f'{endpoint} (hw_server). Or: connect_hw_server -url {endpoint}',
+        'xvc': f'Vivado Hardware Manager > Open New Target > Add Xilinx Virtual Cable (XVC): {endpoint}. '
+               f'Or: open_hw_target -xvc_url {endpoint}',
+        'quartus': f'Quartus Programmer > Hardware Setup > JTAG Settings > Add Server: {host} (jtagd {endpoint}). '
+                   f'Or: jtagconfig --addserver {host} <password>  (the cable host ran jtagconfig --enableremote).',
+    }
+    return {'target': 'network', 'protocol': proto, 'host': host, 'port': port,
+            'endpoint': endpoint, 'label': b.get('label') or '', 'howto': how.get(proto, '')}
 
 
 @bp.route('/api/vlab/admin/boards', methods=['GET'])
@@ -1185,8 +1231,16 @@ def list_boards():
         if not core._can_reach(b['cluster_id']):
             continue
         desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-        out.append(dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None)))
-    return jsonify({'boards': out, 'slot': BOARD_SLOT})
+        out.append(dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None),
+                        connection=_board_conn(b)))
+    return jsonify({'boards': out, 'slot': BOARD_SLOT, 'protocols': BOARD_PROTOCOLS})
+
+
+def _board_where(b):
+    """'usb 03fd:0008' or 'network hw_server host:3121' for audit lines"""
+    if (b.get('target') or 'usb') == 'network':
+        return f"network {b.get('protocol')} {b.get('host')}:{b.get('port')}"
+    return f"usb {b['usb']}"
 
 
 @bp.route('/api/vlab/admin/boards', methods=['POST'])
@@ -1199,7 +1253,7 @@ def create_board():
     except ValueError as e:
         return _bad(str(e))
     b = catalog.save_board(None, *args)
-    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node']} usb {b['usb']}", get_client_ip())
+    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node'] or '-'} {_board_where(b)}", get_client_ip())
     return jsonify({'board': b}), 201
 
 
@@ -1261,19 +1315,32 @@ def attach_board(bid):
     out, err = lend_board(b, desk, _user(), lease_user, lease_until)
     if err:
         return _bad(err[0], err[1])
-    return jsonify({'board': out})
+    return jsonify({'board': out, 'connection': _board_conn(out)})
 
 
 def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     """Attach board b to the desktop (it must run on the board's node), lent to lease_user until
-    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status))."""
+    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status)).
+
+    A network board (hw_server / XVC / jtagd) changes nothing on the VM: the grant is recorded
+    and the researcher's tool dials host:port from inside the desktop, over any display protocol.
+    The desktop must be able to reach the cable host's port (deploy firewall; see the README)."""
+    if (b.get('target') or 'usb') == 'network':
+        b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
+        log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} ({desk['vm_type']}/{desk['vmid']})"
+                  + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
+        from pegaprox.api.vlab_notices import board_lent
+        board_lent(b, desk['name'], lease_user, lease_until)
+        return b, None
     if desk['vm_type'] != 'qemu':
         return None, ('USB passthrough needs a virtual machine (QEMU)', 400)
     live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
     node = live.get('node') or desk['node']
     if node != b['node']:
         return None, (f"The desktop runs on {node}, the board is on {b['node']} - move the desktop first", 409)
-    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id'] for o in catalog.list_boards()):
+    # only USB boards take the slot; network boards held by the same desktop do not count
+    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id']
+           and (o.get('target') or 'usb') == 'usb' for o in catalog.list_boards()):
         return None, ('Another board is attached to this desktop', 409)
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
@@ -1282,7 +1349,7 @@ def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     if not isinstance(r, dict) or not r.get('success'):
         return None, (f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
     b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
-    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
+    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} (qemu/{desk['vmid']})"
               + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
     from pegaprox.api.vlab_notices import board_lent
     board_lent(b, desk['name'], lease_user, lease_until)
@@ -1298,7 +1365,7 @@ def detach_board(bid):
     if not b['attached_desktop']:
         return _bad('The board is not attached', 409)
     desk = store.get_desktop(b['attached_desktop'])
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board left the VM config alone
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return _bad('Cluster not connected', 503)
@@ -1314,6 +1381,25 @@ def detach_board(bid):
         board_returned(b, lent_to, by=_user())
     return jsonify({'board': b})
 
+
+@bp.route('/api/vlab/me/boards', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_boards():
+    """Boards lent to the caller. A network board carries its connection (host:port, protocol and
+    a how-to): the researcher opens Vivado / Quartus inside the desktop and dials it, so it works
+    over RDP, Warpgate or SPICE alike. A USB board is on the desktop already (connection None)."""
+    me = _user()
+    out = []
+    for b in catalog.list_boards():
+        if not b.get('attached_desktop') or not core._can_reach(b['cluster_id']):
+            continue
+        desk = store.get_desktop(b['attached_desktop'])
+        if (b.get('lease_user') or (desk or {}).get('assigned_user')) != me:
+            continue
+        out.append({'id': b['id'], 'name': b['name'], 'kind': b.get('kind') or '', 'target': b.get('target') or 'usb',
+                    'desktop': ({'id': desk['id'], 'name': desk['name']} if desk else None),
+                    'lease_until': b.get('lease_until'), 'connection': _board_conn(b)})
+    return jsonify({'boards': out})
 
 # --- build farm --------------------------------------------------------------------------
 
@@ -1975,7 +2061,7 @@ def rollout_golden(gid):
 def _detach_board(b):
     """Take the board off its desktop. Returns an error text or None."""
     desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board: only the grant ends
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return 'cluster not connected'

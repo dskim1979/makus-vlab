@@ -55026,6 +55026,41 @@
         ]
       }
     },
+    "/api/vlab/me/boards": {
+      "get": {
+        "operationId": "vlab_next.my_boards_get",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Boards lent to the caller. A network board carries its connection (host:port, protocol and a how-to): the researcher opens Vivado / Quartus inside the desktop and dials it, so it works over RDP, Warpgate or SPICE alike. A USB board is on the desktop already (connection None).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
     "/api/vlab/admin/buildfarm": {
       "get": {
         "operationId": "vlab_next.buildfarm_get",
@@ -55551,6 +55586,51 @@
         "parameters": [
           {
             "name": "eid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/desktops/{desktop_id}/ssh": {
+      "get": {
+        "operationId": "vlab_next.my_desktop_ssh_get",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A browser SSH terminal (Guacamole) for the user's own Linux desktop, when the pool allows it and the desktop answers on port 22. The user types their account password in the terminal; file transfer (SFTP) follows the pool policy.",
+        "parameters": [
+          {
+            "name": "desktop_id",
             "in": "path",
             "required": true,
             "schema": {

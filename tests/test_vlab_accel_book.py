@@ -104,6 +104,24 @@ def test_approval_and_the_minute_loop_lends_and_gives_back(cards, monkeypatch):
     assert returned == ['lease-1'] and ab.get(bid)['finished_at']                  # cancelled while it ran: back now
 
 
+def test_a_network_board_books_from_any_node(cards):
+    (api, mgr, agent, admin, alice, bob, viewer), da, db_ = cards
+    from pegaprox.vlab import catalog
+    usb = catalog.save_board(None, 'ZCU102 USB', CID, 'pve2', '03fd:0008', 'ZCU102', '')
+    net = catalog.save_board(None, 'VCK190 hw_server', CID, '', '', 'VCK190', '', 'network', 'jtag01', 3121, 'hw_server', '')
+    opt = alice.get('/api/vlab/me/accel-bookings/options').get_json()
+    assert {b['name']: b['target'] for b in opt['boards']} == {'ZCU102 USB': 'usb', 'VCK190 hw_server': 'network'}
+    r = _book(alice, da, T(9), T(10), resource=usb['id'], kind='board')
+    assert r.status_code == 409 and r.get_json().get('code') == 'NODE'           # USB: the desktop runs on pve1
+    now = datetime.now().replace(second=0, microsecond=0)
+    r = _book(alice, da, ab.fmt(now + timedelta(minutes=3)), ab.fmt(now + timedelta(hours=2)), resource=net['id'], kind='board')
+    assert r.status_code == 201, r.get_json()
+    calls = mgr.update_vm_config.call_count
+    assert api_ab.booking_tick(now) == (1, 0)
+    assert catalog.get_board(net['id'])['attached_desktop'] == da['id'] and mgr.update_vm_config.call_count == calls
+    assert alice.get('/api/vlab/me/boards').get_json()['boards'][0]['connection']['endpoint'] == 'jtag01:3121'
+
+
 def test_routes_need_the_right_permission(cards):
     (api, mgr, agent, admin, alice, bob, viewer), da, db_ = cards
     assert viewer.get('/api/vlab/me/accel-bookings/options').status_code == 403
