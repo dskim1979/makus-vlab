@@ -103,7 +103,7 @@ jobs:
             -e PUBLIC_KEY_FILE=/keys/wg -v "$WG_DIR/wg_client_keys:/keys/wg:ro" \
             lscr.io/linuxserver/openssh-server:latest
           docker run -d --name rdp-target -p "127.0.0.1:${RDP_TARGET_PORT}:3389" --shm-size=1gb \
-            -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC lscr.io/linuxserver/rdesktop:latest
+            -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC lscr.io/linuxserver/rdesktop:ubuntu-openbox-c5644f3f-ls194   # :latest has no amd64 image
           for p in "$SSH_TARGET_PORT" "$RDP_TARGET_PORT"; do
             for i in $(seq 1 90); do (echo > /dev/tcp/127.0.0.1/$p) 2>/dev/null && { echo "port $p up"; break; }; sleep 2; done
           done
