@@ -36,7 +36,7 @@ SSH_HOST = os.environ.get('SSH_TARGET_HOST', '127.0.0.1')
 SSH_PORT = int(os.environ.get('SSH_TARGET_PORT', '2201'))
 SSH_USER = os.environ.get('SSH_TARGET_USER', 'moavi')
 RDP_HOST = os.environ.get('RDP_TARGET_HOST', '127.0.0.1')
-RDP_PORT = int(os.environ.get('RDP_TARGET_PORT', '3390'))
+RDP_PORT = int(os.environ.get('RDP_TARGET_PORT', '3389'))
 RDP_USER = os.environ.get('RDP_TARGET_USER', 'abc')
 RDP_PASS = os.environ.get('RDP_TARGET_PASSWORD', 'abc')
 RUN = uuid.uuid4().hex[:6]
@@ -184,12 +184,43 @@ def test_scp_through_warpgate(wg, cfg, keypair):
     assert code == 0 and f'moavi-{RUN}' in out, out[-800:]
 
 
-@pytest.mark.live_rdp
-def test_rdp_ticket_sign_in(wg, cfg):
-    """Best effort: drive Warpgate's RDP listener with xfreerdp and read the verdict server-side."""
+def _xfreerdp(args, log_name):
+    """Run xfreerdp (under xvfb-run when headless) for at most 25 s in its own process group, output to
+    a log file - xvfb-run's child would keep a pipe open past a timeout and hang the test."""
     binary = shutil.which('xfreerdp3') or shutil.which('xfreerdp')
     if not binary:
         pytest.skip('xfreerdp not installed')
+    cmd = [binary, *args]
+    if not os.environ.get('DISPLAY') and shutil.which('xvfb-run'):
+        cmd = ['xvfb-run', '-a', *cmd]
+    log = open(os.path.join(os.environ.get('WG_OUT', tempfile.gettempdir()), log_name), 'w')
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        proc.wait(timeout=25)
+    except subprocess.TimeoutExpired:
+        pass   # still connected - fine, the verdict is read server-side
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        log.close()
+
+
+def _sessions_for(wg, cfg, username, timeout=20):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = wg._call(cfg, 'GET', f'/sessions?username={username}')
+        items = data.get('items', []) if isinstance(data, dict) else (data or [])
+        if items:
+            return items
+        time.sleep(0.5)
+    return []
+
+
+@pytest.mark.live_rdp
+def test_rdp_ticket_sign_in(wg, cfg):
+    """Best effort: drive Warpgate's RDP listener with xfreerdp and read the verdict server-side."""
     role = wg.ensure_role(cfg)
     rdp_user = f'{USER}-rdp'
     wg.ensure_user(cfg, rdp_user, role)
@@ -198,31 +229,9 @@ def test_rdp_ticket_sign_in(wg, cfg):
     _ticket, secret = wg.issue_ticket(cfg, rdp_user, target)
     coords = wg.connection_coordinates(cfg, 'rdp', target, secret)
     assert coords['username'] == f'ticket-{secret}' and coords['port'] == WG_RDP
-    cmd = [binary, f'/v:127.0.0.1:{WG_RDP}', f'/u:ticket-{secret}', '/p:x', '/cert:ignore', '/sec:tls', '/log-level:INFO']
-    if not os.environ.get('DISPLAY') and shutil.which('xvfb-run'):
-        cmd = ['xvfb-run', '-a', *cmd]
-    # own process group + a log file, not pipes: xvfb-run's xfreerdp child would keep a pipe open
-    # past the timeout and hang the test; the whole group is killed instead
-    log = open(os.path.join(os.environ.get('WG_OUT', tempfile.gettempdir()), 'xfreerdp.log'), 'w')
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    try:
-        proc.wait(timeout=25)
-    except subprocess.TimeoutExpired:
-        pass   # still connected after 25 s - fine, the verdict is read below
-    finally:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        log.close()
-    deadline = time.monotonic() + 20
-    sessions = []
-    while time.monotonic() < deadline:
-        data = wg._call(cfg, 'GET', f'/sessions?username={rdp_user}')
-        sessions = data.get('items', []) if isinstance(data, dict) else (data or [])
-        if sessions:
-            break
-        time.sleep(0.5)
+    _xfreerdp([f'/v:127.0.0.1:{WG_RDP}', f'/u:ticket-{secret}', '/p:x', '/cert:ignore', '/sec:tls', '/log-level:INFO'],
+              'xfreerdp-ticket.log')
+    sessions = _sessions_for(wg, cfg, rdp_user)
     assert sessions, 'Warpgate recorded no authorized RDP session for the ticket user'
 
 
@@ -261,4 +270,29 @@ def test_web_rdp_desktop_session_for_a_signed_in_user(wg, cfg):
     if isinstance(first, str):
         msg = _json.loads(first)
         assert msg.get('type') != 'error', msg
+
+
+@pytest.mark.live_rdp
+def test_the_engine_made_rdp_file_connects_through_warpgate(wg, cfg, monkeypatch):
+    """The client path: the exact .rdp the connect route hands to the MOAVI Desk client / mstsc when
+    "RDP through Warpgate" is on, opened as a file by xfreerdp - Warpgate address, ticket user name, no
+    password - and Warpgate's verdict read server-side."""
+    from pegaprox.api import vlab_warpgate as api_wg
+    from pegaprox.vlab import policy as pool_policy
+    wg.save_config(URL, WG_SSH, WG_RDP, 5900, False, True, rdp_nla_user=RDP_USER, rdp_nla_password=RDP_PASS,
+                   rdp_via_warpgate=True)
+    monkeypatch.setattr(api_wg, 'get_client_ip', lambda: '127.0.0.1')
+    file_user = f'{USER}-file'
+    desk = {'id': f'it-desk-{RUN}', 'name': f'win-{RUN}'}
+    answer = api_wg.rdp_answer_via_warpgate(desk, file_user, RDP_HOST, pool_policy.effective({}))
+    assert answer and answer['via'] == 'warpgate', answer
+    text = answer['rdp']
+    lines = text.splitlines()
+    assert f'full address:s:127.0.0.1:{WG_RDP}' in lines
+    assert any(x.startswith('username:s:ticket-') for x in lines) and not any(x.startswith('password') for x in lines)
+    path = os.path.join(tempfile.mkdtemp(prefix='wg-rdp-'), answer['filename'])
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+    _xfreerdp([path, '/cert:ignore', '/p:x', '/log-level:INFO'], 'xfreerdp-rdpfile.log')
+    assert _sessions_for(wg, cfg, file_user), 'Warpgate saw no authorized session from the engine-made .rdp'
 

@@ -419,3 +419,61 @@ def test_sync_adopts_an_existing_target_when_the_mapping_is_gone(env, fake_wg):
     uid2, name2 = wg.sync_target(cfg, 'dsk_r', 'restored', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
     assert (uid2, name2) == (uid, name) and wg.get_mapping('dsk_r')['address'] == '10.0.0.8'
     assert any(c[:2] == ('PUT', f'/targets/{uid}') for c in fake_wg.calls)   # brought up to date
+
+
+# --- the client's / mstsc's .rdp through Warpgate ----------------------------------------
+
+def _rdp_on(admin, on=True):
+    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'ssh_port': 2222, 'rdp_port': 3389,
+                                                'vnc_port': 5900, 'enabled': True, 'rdp_via_warpgate': on})
+
+
+def _lines(rdp):
+    return rdp.replace('\r\n', '\n').strip().split('\n')
+
+
+def test_rdp_file_stays_direct_while_the_switch_is_off(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)                                     # Warpgate on, "RDP through Warpgate" off
+    body = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).get_json()
+    assert body.get('via') is None and 'full address:s:10.0.0.31:3389' in _lines(body['rdp'])
+    assert not fake_wg.tickets
+
+
+def test_rdp_file_points_at_warpgate_with_a_single_use_ticket(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)
+    _rdp_on(admin)
+    assert admin.get('/api/vlab/admin/warpgate').get_json()['config']['rdp_via_warpgate'] is True
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    lines = _lines(body['rdp'])
+    assert body['via'] == 'warpgate' and body['filename'] == 'win-01.rdp'
+    assert 'full address:s:wg.example:3389' in lines and 'username:s:ticket-TKT-SECRET-123' in lines
+    assert 'enablecredsspsupport:i:0' in lines and 'prompt for credentials:i:0' in lines
+    assert not any(x.startswith('password') for x in lines)               # nothing to store or leak
+    assert '10.0.0.31' not in body['rdp']                                 # the desktop's address stays hidden
+    assert any(x.startswith('redirectclipboard:i:') for x in lines)       # the pool policy's redirects kept
+    assert 'networkautodetect:i:1' in lines
+    assert [x for x in lines if x.startswith('autoreconnection')] == ['autoreconnection enabled:i:0']
+    t = fake_wg.tickets[-1]
+    assert t['username'] == 'alice' and t['number_of_uses'] == 1
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][-1]
+    assert tgt['options']['kind'] == 'Rdp' and tgt['options']['host'] == '10.0.0.31' and tgt['options']['interactive_logon'] is True
+
+
+def test_rdp_file_falls_back_to_direct_when_warpgate_fails(env, fake_wg, monkeypatch):
+    admin, alice, d = _guac_connect_env(env, monkeypatch)
+    _configure(admin)
+    _rdp_on(admin)
+    monkeypatch.setattr(wg, '_api', lambda *a, **k: (502, 'down'))
+    body = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).get_json()
+    assert body.get('via') is None and 'full address:s:10.0.0.31:3389' in _lines(body['rdp'])
+
+
+def test_rdp_via_warpgate_must_be_a_boolean(env):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    r = admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'rdp_via_warpgate': 'yes'})
+    assert r.status_code == 400

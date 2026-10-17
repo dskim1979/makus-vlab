@@ -45,6 +45,7 @@ _SCHEMA = (
         rdp_nla_user TEXT NOT NULL DEFAULT '',
         rdp_nla_password_encrypted TEXT NOT NULL DEFAULT '',
         web_rdp_provider TEXT NOT NULL DEFAULT 'guac',
+        rdp_via_warpgate INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 0,
         last_check TEXT,
         last_ok INTEGER,
@@ -98,11 +99,13 @@ def config(secret=False):
         return {'base_url': '', 'ssh_port': DEFAULT_PORTS['ssh'], 'rdp_port': DEFAULT_PORTS['rdp'],
                 'vnc_port': DEFAULT_PORTS['vnc'], 'verify_tls': False, 'enabled': False,
                 'rdp_nla_user': '', 'has_nla_password': False, 'web_rdp_provider': 'guac',
+                'rdp_via_warpgate': False,
                 'has_token': False, 'last_check': None, 'last_ok': None, 'last_detail': ''}
     out = {'base_url': r['base_url'], 'ssh_port': r['ssh_port'], 'rdp_port': r['rdp_port'],
            'vnc_port': r['vnc_port'], 'verify_tls': bool(r['verify_tls']), 'enabled': bool(r['enabled']),
            'rdp_nla_user': r['rdp_nla_user'], 'has_nla_password': bool(r['rdp_nla_password_encrypted']),
            'web_rdp_provider': r['web_rdp_provider'] or 'guac',
+           'rdp_via_warpgate': bool(r['rdp_via_warpgate']),
            'has_token': bool(r['admin_token_encrypted']), 'last_check': r['last_check'],
            'last_ok': None if r['last_ok'] is None else bool(r['last_ok']), 'last_detail': r['last_detail']}
     if secret:
@@ -122,15 +125,20 @@ def _unseal(sealed):
 
 
 def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
-                admin_token=None, rdp_nla_user=None, rdp_nla_password=None, web_rdp_provider=None):
+                admin_token=None, rdp_nla_user=None, rdp_nla_password=None, web_rdp_provider=None,
+                rdp_via_warpgate=None):
     """설정 저장. admin_token / rdp_nla_password: None이면 기존값 유지, ''이면 지움, 값이면 봉인해 저장.
-    web_rdp_provider: 'guac'(기본, 항상 작동) 또는 'warpgate'(실클러스터 검증 후 전환)."""
+    web_rdp_provider: 'guac'(기본, 항상 작동) 또는 'warpgate'(실클러스터 검증 후 전환).
+    rdp_via_warpgate: 전용 앱·mstsc용 .rdp를 Warpgate로 향하게 할지(None이면 기존값 유지)."""
     base_url = (base_url or '').strip().rstrip('/')
     r = _row()
     sealed = r['admin_token_encrypted'] if r else ''
     nla_sealed = r['rdp_nla_password_encrypted'] if r else ''
     nla_user = r['rdp_nla_user'] if r else ''
     provider = (r['web_rdp_provider'] if r else 'guac') or 'guac'
+    via = bool(r['rdp_via_warpgate']) if r else False
+    if rdp_via_warpgate is not None:
+        via = bool(rdp_via_warpgate)
     if admin_token is not None or rdp_nla_password is not None:
         from pegaprox.core.db import get_db
         gdb = get_db()
@@ -145,11 +153,11 @@ def save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
     db().execute(
         '''INSERT OR REPLACE INTO vlab_warpgate
            (id, base_url, admin_token_encrypted, ssh_port, rdp_port, vnc_port, verify_tls,
-            rdp_nla_user, rdp_nla_password_encrypted, web_rdp_provider, enabled,
+            rdp_nla_user, rdp_nla_password_encrypted, web_rdp_provider, rdp_via_warpgate, enabled,
             last_check, last_ok, last_detail, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (CONFIG_ID, base_url, sealed, int(ssh_port), int(rdp_port), int(vnc_port),
-         1 if verify_tls else 0, nla_user, nla_sealed, provider, 1 if enabled else 0,
+         1 if verify_tls else 0, nla_user, nla_sealed, provider, 1 if via else 0, 1 if enabled else 0,
          r['last_check'] if r else None, r['last_ok'] if r else None,
          r['last_detail'] if r else '', now()))
     return config()
@@ -248,6 +256,25 @@ def connection_coordinates(cfg, proto, target_name, secret):
         return {'proto': 'vnc', 'host': host, 'port': int(cfg['vnc_port']), 'username': login, 'browser_url': browser}
     return {'proto': 'rdp', 'host': host, 'port': int(cfg['rdp_port']), 'username': login,
             'full_address': f"{host}:{int(cfg['rdp_port'])}", 'browser_url': browser}
+
+
+def rdp_file_text(cfg, secret, redirect_lines=(), network_lines=()):
+    """An .rdp aimed at Warpgate's RDP listener for one single-use ticket (mstsc / the MOAVI Desk
+    client open it unchanged). The ticket is the user name; there is no password to store or send.
+
+    - enablecredsspsupport:i:0: Warpgate's RDP listener is TLS without NLA (it reads the ticket from
+      the user name after the handshake), so mstsc must not ask for CredSSP credentials first.
+    - prompt for credentials:i:0: nothing to type for Warpgate itself; with interactive logon the
+      desktop's own Windows logon screen then asks the user for their own (AD) account.
+    - autoreconnection off: the ticket is spent on the first connect, a silent reconnect would fail -
+      the user reconnects from the client/portal, which issues a new ticket."""
+    host = _host_of(cfg['base_url'])
+    lines = [f"full address:s:{host}:{int(cfg['rdp_port'])}", f'username:s:{ticket_login(secret)}',
+             'prompt for credentials:i:0', 'enablecredsspsupport:i:0', 'authentication level:i:2',
+             'screen mode id:i:2', 'use multimon:i:1', *redirect_lines, 'audiomode:i:0']
+    lines += [x for x in network_lines if not x.startswith('autoreconnection enabled:')]
+    lines.append('autoreconnection enabled:i:0')
+    return '\r\n'.join(lines) + '\r\n'
 
 
 def _host_of(base_url):

@@ -77,9 +77,12 @@ def put_warpgate():
     provider = data.get('web_rdp_provider')
     if provider is not None and provider not in ('guac', 'warpgate'):
         return _bad('web_rdp_provider must be guac or warpgate')
+    via = data.get('rdp_via_warpgate')
+    if via is not None and not isinstance(via, bool):
+        return _bad('rdp_via_warpgate must be true or false')
     cfg = wg.save_config(base_url, ssh_port, rdp_port, vnc_port, verify_tls, enabled,
                          admin_token=token, rdp_nla_user=nla_user, rdp_nla_password=nla_pw,
-                         web_rdp_provider=provider)
+                         web_rdp_provider=provider, rdp_via_warpgate=via)
     log_audit(_user(), 'vlab.warpgate.config', f"Warpgate {base_url or '-'} enabled={enabled}", get_client_ip())
     return jsonify({'config': cfg})
 
@@ -243,6 +246,33 @@ def browser_rdp_via_warpgate(desk, username, ip):
         return None
     log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate (web UI)", get_client_ip())
     return wg.web_ui_url(cfg)
+
+
+def rdp_answer_via_warpgate(desk, username, ip, pol):
+    """The connect route's .rdp for the client / mstsc when "RDP through Warpgate" is on: aimed at
+    Warpgate's RDP listener with a single-use ticket for this user and this desktop, the pool's
+    redirect lines kept. None when the switch is off or Warpgate fails - the caller then writes the
+    direct / RD Gateway .rdp as before (never a state with no RDP at all)."""
+    if not wg.is_enabled():
+        return None
+    cfg = wg.config(secret=True)
+    if not cfg.get('rdp_via_warpgate'):
+        return None
+    from pegaprox.api.vlab_next import RDP_NETWORK, rdp_redirects
+    try:
+        role_id = wg.ensure_role(cfg)
+        wg.ensure_user(cfg, username, role_id)
+        _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
+                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
+        _ticket, secret = wg.issue_ticket(cfg, username, target_name)
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate RDP for {desk.get('name')} failed, direct .rdp instead: {str(e)[:200]}")
+        return None
+    if not secret:
+        return None
+    log_audit(username, 'vlab.warpgate.connect', f"RDP file to '{desk['name']}' via Warpgate", get_client_ip())
+    return {'type': 'rdp', 'via': 'warpgate', 'filename': f"{desk['name']}.rdp",
+            'rdp': wg.rdp_file_text(cfg, secret, rdp_redirects(pol), RDP_NETWORK)}
 
 
 @bp.route('/api/vlab/me/desktops/<desktop_id>/warpgate', methods=['POST'])

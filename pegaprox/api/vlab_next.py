@@ -1831,6 +1831,12 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)
     if protocol == 'rdp':
+        # "RDP through Warpgate" on: an .rdp aimed at Warpgate with a single-use ticket
+        # (pegaprox/api/vlab_warpgate.py); otherwise, or if Warpgate fails, the direct / RD Gateway file
+        from pegaprox.api.vlab_warpgate import rdp_answer_via_warpgate
+        answer = rdp_answer_via_warpgate(desk, username, ip, pol)
+        if answer:
+            return answer, None
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
         return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
     # coexistence: the engine picks who serves browser RDP (pegaprox/api/vlab_warpgate.py) - Warpgate

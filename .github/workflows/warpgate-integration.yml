@@ -29,7 +29,7 @@ env:
   SSH_TARGET_PORT: '2201'
   SSH_TARGET_USER: moavi
   RDP_TARGET_HOST: 127.0.0.1
-  RDP_TARGET_PORT: '3390'
+  RDP_TARGET_PORT: '3389'   # the engine aims Warpgate at the desktop's 3389; Warpgate itself listens on 33389
   RDP_TARGET_USER: abc
   RDP_TARGET_PASSWORD: abc   # the linuxserver/rdesktop image's own default; a throwaway container
 
