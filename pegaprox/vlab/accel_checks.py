@@ -1,4 +1,4 @@
-"""MOAVI Desk: checks for accelerator cards on desktop VMs (GPU · FPGA · NPU > 카드 · 패스스루 점검).
+"""MOAVI Desk: checks for accelerator cards on desktop VMs (가속 자원 > 카드 · 패스스루 점검).
 
 What goes wrong with PCIe passthrough of GPUs, AMD Xilinx Alveo cards and NPUs on Proxmox,
 turned into things the engine can see in a VM's config and in the vLAB catalog:
@@ -83,7 +83,7 @@ def _mig_findings(devs, node, state, policy, ctx):
                               slot=slot, **ctx))
             if mdev and on and not g.get('gpu_instances'):
                 out.append(_f('MIG_NO_INSTANCES', 'warn',
-                              f'{label}가 MIG 모드인데 GPU 인스턴스가 없습니다. MIG-backed vGPU가 올라갈 자리가 없어 VM이 켜지지 않습니다. GPU · FPGA · NPU > GPU · 가속 카드 재고에서 분할을 만드세요.',
+                              f'{label}가 MIG 모드인데 GPU 인스턴스가 없습니다. MIG-backed vGPU가 올라갈 자리가 없어 VM이 켜지지 않습니다. 가속 자원 > GPU · 가속 카드 재고에서 분할을 만드세요.',
                               f'{label} is in MIG mode without GPU instances: a MIG-backed vGPU has nothing to sit on and the VM does not start. Make a layout under Accelerators > GPU and card inventory.',
                               slot=slot, **ctx))
             if mdev and slot == accel.GPU_SLOT and pool_mig and not on:
@@ -162,7 +162,7 @@ def for_vm(mgr, cluster_id, node, vmid, desk=None, raw=None, mappings=None, ha_s
                           'A whole AMD GPU is passed through. AMD GPUs have a known reset problem: after a stop/start or a restart from Proxmox the card may not come back or the node may hang. Install vendor-reset on the node (check the card is supported) and restart from inside the guest.', slot=slot, **ctx))
         if mdev and watched_licence is False:
             out.append(_f('VGPU_LICENSE', 'warn',
-                          'vGPU를 쓰는데 자동 감시하는 라이선스 서버가 없습니다. 라이선스를 못 받은 vGPU는 20분 뒤 15fps로 제한되고 CUDA가 느려지며, 24시간 뒤에는 3fps · CUDA 중지가 됩니다. GPU · FPGA · NPU > 라이선스 서버에 vGPU 라이선스 서버(DLS)를 등록하고 자동 감시를 켜세요.',
+                          'vGPU를 쓰는데 자동 감시하는 라이선스 서버가 없습니다. 라이선스를 못 받은 vGPU는 20분 뒤 15fps로 제한되고 CUDA가 느려지며, 24시간 뒤에는 3fps · CUDA 중지가 됩니다. 가속 자원 > 라이선스 서버에 vGPU 라이선스 서버(DLS)를 등록하고 자동 감시를 켜세요.',
                           'vGPU without a watched licence server. An unlicensed vGPU is cut to 15 fps with slower CUDA after 20 minutes, and to 3 fps with CUDA off after 24 hours. Register the vGPU licence server (DLS) under Accelerators > Licence servers and watch it.', slot=slot, **ctx))
     out += _mig_findings(devs, node, mig_state, gpu_policy, ctx)
     if fpga:

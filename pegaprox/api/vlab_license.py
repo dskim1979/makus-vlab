@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk - licence seats (GPU · FPGA · NPU › 라이선스 서버 › 사용 현황, 운영 > 사용률 보고서 > 라이선스).
+MOAVI Desk - licence seats (가속 자원 › 라이선스 서버 › 사용 현황, 운영 > 사용률 보고서 > 라이선스).
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).
 

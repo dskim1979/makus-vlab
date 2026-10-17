@@ -388,7 +388,7 @@ def reclaim_tick(at=None):
                   f"대여 중인 {card} 의 사용률이 {rc['idle_hours']}시간 동안 {rc['threshold_pct']}% 미만이었습니다. "
                   f"필요하지 않으면 반납해 주세요. 계속 쓰려면 포털에서 '작업 중'을 켜 두세요.{tail}")
             _admins(f"카드 회수 제안: {card}", f"{lease['username']} 님이 대여한 {card} 가 {rc['idle_hours']}시간 동안 "
-                    f"사용률 {rc['threshold_pct']}% 미만입니다. GPU · FPGA · NPU > 카드 대여 현황에서 회수할 수 있습니다.",
+                    f"사용률 {rc['threshold_pct']}% 미만입니다. 가속 자원 > 카드 대여 현황에서 회수할 수 있습니다.",
                     {'kind': 'card_reclaim', 'card': card, 'user': lease['username']})
             continue
         if cur['state'] != 'suggested' or not rc['auto_return']:

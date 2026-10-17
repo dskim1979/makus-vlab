@@ -1,4 +1,4 @@
-"""MOAVI Desk: CI connections (GPU · FPGA · NPU > 빌드 팜 > CI 연동) - GitLab CI, Jenkins or any tool that
+"""MOAVI Desk: CI connections (가속 자원 > 빌드 팜 > CI 연동) - GitLab CI, Jenkins or any tool that
 can call a URL puts a build into the build farm queue and reads its result.
 
 A connection belongs to one build farm pool and runs its jobs as one MOAVI Desk user (the
