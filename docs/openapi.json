@@ -65154,6 +65154,41 @@
         ]
       }
     },
+    "/api/vlab/me/warpgate": {
+      "get": {
+        "operationId": "vlab_warpgate.my_warpgate_status_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
     "/api/vlab/me/desktops/{desktop_id}/warpgate": {
       "post": {
         "operationId": "vlab_warpgate.my_desktop_warpgate_post",

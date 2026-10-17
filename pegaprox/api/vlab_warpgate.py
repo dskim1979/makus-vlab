@@ -97,6 +97,15 @@ def warpgate_sessions():
     return jsonify({'url': wg.recording_url(cfg, request.args.get('session_id'))})
 
 
+# --- portal ------------------------------------------------------------------------------
+
+@bp.route('/api/vlab/me/warpgate', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_warpgate_status():
+    """포털이 Warpgate 연결 버튼을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음)."""
+    return jsonify({'enabled': wg.is_enabled(), 'protocols': list(wg.TARGET_KINDS)})
+
+
 # --- portal connect ----------------------------------------------------------------------
 
 def _desktop_target_options(cfg, proto, ip):

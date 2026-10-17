@@ -198,6 +198,13 @@ def test_connect_ssh_uses_warpgate_public_key(env, fake_wg, monkeypatch):
     assert tgt['options']['kind'] == 'Ssh' and tgt['options']['auth'] == {'kind': 'PublicKey'}
 
 
+def test_portal_status_reflects_enabled(env):
+    _, _, admin, alice, _ = env
+    assert alice.get('/api/vlab/me/warpgate').get_json() == {'enabled': False, 'protocols': ['rdp', 'ssh', 'vnc']}
+    _configure(admin)
+    assert alice.get('/api/vlab/me/warpgate').get_json()['enabled'] is True
+
+
 def test_connect_is_refused_when_warpgate_is_off(env, monkeypatch):
     _, _, admin, alice, _ = env
     _configure(admin, enabled=False)
