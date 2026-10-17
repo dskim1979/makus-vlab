@@ -222,9 +222,13 @@ def _desktop_target_options(cfg, proto, ip):
 
 
 def browser_rdp_via_warpgate(desk, username, ip):
-    """The portal's "브라우저 RDP로 열기" for a pool desktop: a Warpgate browser link when Warpgate is on
-    AND web_rdp_provider is 'warpgate'; otherwise None and the caller keeps Guacamole. Any Warpgate
-    failure also gives None, so browser RDP falls back to Guacamole rather than going dark."""
+    """The portal's "브라우저 RDP로 열기" for a pool desktop: Warpgate's web UI when Warpgate is on AND
+    web_rdp_provider is 'warpgate'; otherwise None and the caller keeps Guacamole. Any Warpgate failure
+    also gives None, so browser RDP falls back to Guacamole rather than going dark.
+
+    Warpgate opens no web session from a ticket for an RDP/SSH target (checked against a live
+    Warpgate), so no ticket here: the user, role and target are synced so the desktop is in the
+    user's Warpgate list, and the user signs in to Warpgate (SSO/LDAP) and opens it there."""
     if not wg.is_enabled():
         return None
     cfg = wg.config(secret=True)
@@ -233,16 +237,12 @@ def browser_rdp_via_warpgate(desk, username, ip):
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
-                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
-        _ticket, secret = wg.issue_ticket(cfg, username, target_name)
+        wg.sync_target(cfg, desk['id'], desk['name'], 'rdp', _desktop_target_options(cfg, 'rdp', ip), role_id)
     except Exception as e:
         logging.warning(f"[VLAB] Warpgate browser RDP for {desk.get('name')} failed, using Guacamole: {str(e)[:200]}")
         return None
-    if not secret:
-        return None
-    log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate", get_client_ip())
-    return wg.connection_coordinates(cfg, 'rdp', target_name, secret)['browser_url']
+    log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate (web UI)", get_client_ip())
+    return wg.web_ui_url(cfg)
 
 
 @bp.route('/api/vlab/me/desktops/<desktop_id>/warpgate', methods=['POST'])

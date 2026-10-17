@@ -18,6 +18,7 @@ Secrets (token, ticket secrets) are never printed.
 """
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -119,18 +120,30 @@ def test_ticket_is_single_use_for_user_and_target(wg, cfg):
     assert ticket.get('uses_left') == 1 and ticket.get('expiry')
 
 
-def test_browser_link_signs_in_with_the_ticket(wg, cfg):
+def test_web_ui_link_answers_and_carries_no_ticket(wg, cfg):
     import requests
     _uid, target = _ssh_target(wg, cfg)
     _ticket, secret = wg.issue_ticket(cfg, USER, target)
     link = wg.connection_coordinates(cfg, 'ssh', target, secret)['browser_url']
-    assert link.startswith(URL.rstrip('/') + '/?warpgate-target=')
+    assert link == URL.rstrip('/') + '/@warpgate#/' and secret not in link
+    r = requests.get(link.split('#')[0], verify=False, timeout=20)
+    assert r.status_code == 200, r.status_code
+
+
+def test_a_ticket_opens_no_web_session_for_an_ssh_target_and_stays_unspent(wg, cfg):
+    """Warpgate behaviour the design relies on: ?warpgate-ticket= signs a browser in only for HTTP
+    targets. For SSH/RDP it opens nothing and does not spend the ticket - so the engine never puts a
+    ticket in a browser link, and that ticket still works in a native client afterwards."""
+    import requests
+    _uid, target = _ssh_target(wg, cfg)
+    _ticket, secret = wg.issue_ticket(cfg, USER, target)
     s = requests.Session()
     s.verify = False
-    r = s.get(link, timeout=20, allow_redirects=True)
-    assert r.status_code < 500, r.status_code
+    s.get(URL.rstrip('/') + f'/?warpgate-ticket={secret}', timeout=20, allow_redirects=False)
     info = s.get(URL.rstrip('/') + '/@warpgate/api/info', timeout=20).json()
-    assert info.get('username') == USER, {k: info.get(k) for k in ('username', 'authorized_via_ticket')}
+    assert info.get('username') is None and not info.get('authorized_via_ticket')
+    code, out = _ssh_ticket(secret, 'echo still-ok')
+    assert code == 0 and 'still-ok' in out, out[-500:].replace(secret, '***')
 
 
 # --- data plane (through Warpgate to the targets) ----------------------------------------
@@ -188,10 +201,20 @@ def test_rdp_ticket_sign_in(wg, cfg):
     cmd = [binary, f'/v:127.0.0.1:{WG_RDP}', f'/u:ticket-{secret}', '/p:x', '/cert:ignore', '/sec:tls', '/log-level:INFO']
     if not os.environ.get('DISPLAY') and shutil.which('xvfb-run'):
         cmd = ['xvfb-run', '-a', *cmd]
+    # own process group + a log file, not pipes: xvfb-run's xfreerdp child would keep a pipe open
+    # past the timeout and hang the test; the whole group is killed instead
+    log = open(os.path.join(os.environ.get('WG_OUT', tempfile.gettempdir()), 'xfreerdp.log'), 'w')
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     try:
-        subprocess.run(cmd, capture_output=True, timeout=25)
+        proc.wait(timeout=25)
     except subprocess.TimeoutExpired:
         pass   # still connected after 25 s - fine, the verdict is read below
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        log.close()
     deadline = time.monotonic() + 20
     sessions = []
     while time.monotonic() < deadline:
@@ -201,3 +224,41 @@ def test_rdp_ticket_sign_in(wg, cfg):
             break
         time.sleep(0.5)
     assert sessions, 'Warpgate recorded no authorized RDP session for the ticket user'
+
+
+@pytest.mark.live_rdp
+def test_web_rdp_desktop_session_for_a_signed_in_user(wg, cfg):
+    """Browser RDP through Warpgate (web-desktop): needs a signed-in Warpgate web session, so in
+    production the user signs in with SSO/LDAP. Here the test user gets a throwaway password just for
+    this sign-in. Starts a web-desktop session to the xrdp target and reads its first stream message."""
+    import json as _json
+    import requests
+    import websocket
+    role = wg.ensure_role(cfg)
+    web_user = f'{USER}-web'
+    uid = wg.ensure_user(cfg, web_user, role)
+    pw = uuid.uuid4().hex
+    wg._call(cfg, 'POST', f'/users/{uid}/credentials/passwords', {'password': pw})
+    opts = wg.rdp_target_options(RDP_HOST, RDP_PORT, RDP_USER, RDP_PASS, interactive_logon=False)
+    tid, _target = wg.sync_target(cfg, 'it-rdp-web', f'rdpweb-{RUN}', 'rdp', opts, role)
+    s = requests.Session()
+    s.verify = False
+    host = URL.split('://', 1)[1].rstrip('/')
+    s.headers['Host'] = host
+    r = s.post(URL.rstrip('/') + '/@warpgate/api/auth/login', json={'username': web_user, 'password': pw}, timeout=20)
+    assert r.status_code // 100 == 2, r.status_code
+    r = s.post(URL.rstrip('/') + '/@warpgate/api/web-desktop/sessions', json={'target_id': tid}, timeout=30)
+    assert r.status_code == 201, (r.status_code, r.text[:300])
+    sid = r.json()['session_id']
+    cookie = '; '.join(f'{c.name}={c.value}' for c in s.cookies)
+    ws = websocket.create_connection(URL.replace('https:', 'wss:').rstrip('/') + f'/@warpgate/api/web-desktop/sessions/{sid}/stream',
+                                     header=[f'Cookie: {cookie}', f'Host: {host}'], sslopt={'cert_reqs': 0}, timeout=30)
+    try:
+        first = ws.recv()
+    finally:
+        ws.close()
+        s.delete(URL.rstrip('/') + f'/@warpgate/api/web-desktop/sessions/{sid}', timeout=20)
+    if isinstance(first, str):
+        msg = _json.loads(first)
+        assert msg.get('type') != 'error', msg
+

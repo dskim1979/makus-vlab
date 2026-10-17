@@ -21,6 +21,7 @@ env:
   WARPGATE_VERSION: v0.29.2
   WARPGATE_SHA256: 0f7dfc9a27cce4d51b5213d52f5ded91f65ac61db9dd0427821c19503ebd1efe
   WG_DIR: ${{ github.workspace }}/.wg
+  WG_OUT: ${{ github.workspace }}/out   # the RDP test writes xfreerdp.log here
   WG_HTTP_PORT: '8888'
   WG_SSH_PORT: '2222'
   WG_RDP_PORT: '33389'

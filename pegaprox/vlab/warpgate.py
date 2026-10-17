@@ -225,12 +225,22 @@ def ticket_login(secret):
     return f'ticket-{secret}'
 
 
+def web_ui_url(cfg):
+    """Warpgate 웹 UI(로그인 뒤 대상 목록에서 브라우저 RDP/SSH를 연다).
+
+    실제 Warpgate(v0.29.2)로 확인: `?warpgate-ticket=` 은 HTTP 대상에만 웹 세션을 열고, RDP/SSH
+    대상의 티켓으로는 세션을 열지 않으며 티켓도 쓰지 않는다(Warpgate 자체 테스트
+    test_non_http_ticket_opens_no_session). 그래서 브라우저 경로는 티켓 없이 Warpgate 웹 UI로
+    보내고 사용자는 SSO/LDAP으로 로그인한다(비밀번호를 우리가 저장하지 않음). 티켓은 native 전용."""
+    return cfg['base_url'].rstrip('/') + '/@warpgate#/'
+
+
 def connection_coordinates(cfg, proto, target_name, secret):
-    """티켓 secret으로 접속할 좌표. 엔진은 secret을 저장하지 않고 이 응답에만 싣는다."""
+    """티켓 secret으로 접속할 native 좌표 + 브라우저용 Warpgate 웹 UI 주소(티켓 없음).
+    엔진은 secret을 저장하지 않고 이 응답에만 싣는다."""
     host = _host_of(cfg['base_url'])
     login = ticket_login(secret)
-    base = cfg['base_url'].rstrip('/')
-    browser = f"{base}/?warpgate-target={target_name}&warpgate-ticket={secret}"
+    browser = web_ui_url(cfg)
     if proto == 'ssh':
         return {'proto': 'ssh', 'host': host, 'port': int(cfg['ssh_port']),
                 'username': login, 'ssh': f"ssh {login}@{host} -p {int(cfg['ssh_port'])}", 'browser_url': browser}
@@ -313,9 +323,12 @@ def ensure_user(cfg, username, role_id=None):
         uid = created['id']
     if role_id:
         try:
-            _call(cfg, 'POST', f'/users/{uid}/roles/{role_id}')
-        except WarpgateError:
-            pass  # 이미 붙어 있으면 무시
+            # the API wants a JSON body here (AddUserRoleRequest, optional expires_at) - without one
+            # it refuses the request (found against a live Warpgate)
+            _call(cfg, 'POST', f'/users/{uid}/roles/{role_id}', {})
+        except WarpgateError as e:
+            if e.status != 409:   # 409 = already has the role; anything else is a real failure
+                raise
     return uid
 
 
@@ -349,8 +362,9 @@ def sync_target(cfg, ref, label, proto, options, role_id=None):
         if role_id:
             try:
                 _call(cfg, 'POST', f'/targets/{uuid_val}/roles/{role_id}')
-            except WarpgateError:
-                pass
+            except WarpgateError as e:
+                if e.status != 409:   # 409 = the role is already on the target
+                    raise
     save_mapping(ref, 'desktop', uuid_val, name, proto, options.get('host', ''), options.get('port', 0))
     return uuid_val, name
 

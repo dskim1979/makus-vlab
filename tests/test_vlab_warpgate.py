@@ -33,7 +33,9 @@ def test_ticket_login_and_coordinates():
     cfg = {'base_url': 'https://wg.example:443', 'ssh_port': 2222, 'rdp_port': 3389, 'vnc_port': 5900}
     c = wg.connection_coordinates(cfg, 'rdp', 'moavi-x', 'SEC')
     assert c['username'] == 'ticket-SEC' and c['full_address'] == 'wg.example:3389'
-    assert c['browser_url'] == 'https://wg.example:443/?warpgate-target=moavi-x&warpgate-ticket=SEC'
+    # browser = Warpgate's web UI, never the ticket (Warpgate opens no web session from a ticket
+    # for an RDP/SSH target - checked against a live Warpgate)
+    assert c['browser_url'] == 'https://wg.example:443/@warpgate#/' and 'SEC' not in c['browser_url']
     assert wg.connection_coordinates(cfg, 'ssh', 'moavi-x', 'SEC')['ssh'] == 'ssh ticket-SEC@wg.example -p 2222'
 
 
@@ -79,6 +81,8 @@ class FakeWarpgate:
                 return 409, 'Name already exists'
             uid = self.targets[body['name']] = self._id('tgt')
             return 201, {'id': uid, 'name': body['name']}
+        if method == 'POST' and re.match(r'^/users/[^/]+/roles/[^/]+$', path) and body is None:
+            return 400, 'ExpectContentType'                # the real API wants a JSON body here
         if method == 'POST' and path.endswith('/roles') or '/roles/' in path:
             return 201, {}
         if method == 'POST' and path == '/tickets':
@@ -195,11 +199,11 @@ def test_connect_issues_a_single_use_ticket_scoped_to_user_and_target(env, fake_
     conn = r.get_json()['connection']
     assert conn['proto'] == 'rdp' and conn['username'] == 'ticket-TKT-SECRET-123'
     assert conn['host'] == 'wg.example' and conn['port'] == 3389
-    assert 'warpgate-ticket=TKT-SECRET-123' in conn['browser_url']
+    assert conn['browser_url'] == 'https://wg.example/@warpgate#/' and 'TKT' not in conn['browser_url']
     # 티켓은 그 사용자+그 대상, 1회용, 만료시간
     t = fake_wg.tickets[-1]
     assert t['username'] == 'alice' and t['number_of_uses'] == 1 and t['expiry']
-    assert t['target_name'].startswith('moavi-win-01-') and t['target_name'] == conn['browser_url'].split('warpgate-target=')[1].split('&')[0]
+    assert t['target_name'].startswith('moavi-win-01-') and t['target_name'] == wg.get_mapping(d['id'])['target_name']
     # 대상 동기화 매핑이 저장됐다
     assert wg.get_mapping(d['id'])['proto'] == 'rdp'
     # RDP 대상에 사용자 비번은 없다(interactive_logon + NLA 서비스 계정만)
@@ -373,8 +377,9 @@ def test_browser_rdp_goes_through_warpgate_once_switched(env, fake_wg, monkeypat
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
     assert r.status_code == 200, r.get_json()
     body = r.get_json()
-    assert body['via'] == 'warpgate' and body['url'].startswith('https://wg.example/?warpgate-target=')
-    assert fake_wg.tickets[-1]['number_of_uses'] == 1 and fake_wg.tickets[-1]['username'] == 'alice'
+    assert body['via'] == 'warpgate' and body['url'] == 'https://wg.example/@warpgate#/'
+    assert not fake_wg.tickets                           # no ticket for the browser path
+    assert wg.get_mapping(d['id'])['proto'] == 'rdp'     # the desktop is in the user's Warpgate list
 
 
 def test_browser_rdp_falls_back_to_guacamole_when_warpgate_fails(env, fake_wg, monkeypatch):
