@@ -162,6 +162,26 @@ def test_windows_sign_in_script_maps_drives_in_the_users_session():
     assert 'exit 15' in nas.windows_script(_cfg(), users)
 
 
+def test_office_folders_go_to_the_home_drive_and_c_is_hidden_only_with_them():
+    cfg = _cfg(kind='smb', share='office')
+    users = {'alice': nas.folders_for(cfg, 'alice')}
+    assert 'User Shell Folders' not in nas.windows_logon_script(cfg, users)
+    ps = nas.windows_script(cfg, users)
+    assert "Remove-ItemProperty -Path $pk -Name $n" in ps and 'if ($v -eq 4)' in ps    # takes back only its own value
+    cfg = dict(cfg, win_redirect=True, win_block_local=True)
+    logon = nas.windows_logon_script(cfg, users)
+    assert '/v "Personal" /t REG_EXPAND_SZ /d "H:\\Documents"' in logon and 'mkdir "H:\\Desktop"' in logon
+    assert '{374DE290-123F-4565-9164-39C4925E467B}' in logon                        # 다운로드
+    ps = nas.windows_script(cfg, users)
+    assert "Set-ItemProperty -Path $pk -Name $n -Value 4 -Type DWord" in ps and 'NoViewOnDrive' in ps
+    base = dict(nas.DEFAULTS, enabled=True, kind='smb', server='nas.lab', share='office')
+    assert 'needs win_redirect' in nas.validate(dict(base, win_block_local=True), {})[2]
+    no_home = dict(base, win_redirect=True, folders={'home': {'enabled': False}})
+    assert 'needs the home folder' in nas.validate(no_home, {})[2]
+    out, _, err = nas.validate(dict(base, win_redirect=True, win_block_local=True), {})
+    assert err is None and out['win_redirect'] and out['win_block_local']
+
+
 def test_setting_is_saved_and_the_password_never_read_back(env):
     _, _, admin, alice, _ = env
     pool = _pool(admin)

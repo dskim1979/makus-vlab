@@ -921,9 +921,19 @@ def my_external():
     return jsonify({'desktops': [{k: e[k] for k in ('id', 'name', 'address', 'port', 'notes')} for e in catalog.list_external(_user())]})
 
 
-def rdp_file(ext, username):
+def rdp_redirects(pol):
+    """The .rdp lines a pool policy sets (pegaprox/vlab/policy.py); None = an external desktop,
+    whose own RDP host decides."""
+    if pol is None:
+        return ['redirectclipboard:i:1']
+    return [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
+            f"redirectprinters:i:{1 if pol['client_printers'] else 0}",
+            f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
+
+
+def rdp_file(ext, username, pol=None):
     lines = [f"full address:s:{ext['address']}:{ext['port']}", f'username:s:{username}', 'prompt for credentials:i:1',
-             'screen mode id:i:2', 'use multimon:i:1', 'redirectclipboard:i:1', 'audiomode:i:0', 'authentication level:i:2']
+             'screen mode id:i:2', 'use multimon:i:1', *rdp_redirects(pol), 'audiomode:i:0', 'authentication level:i:2']
     gw = catalog.get_gateway(ext['gateway_id']) if ext.get('gateway_id') else None
     if gw and gw['enabled'] and gw['kind'] in ('rdpgw', 'msrdgw'):
         lines += [f"gatewayhostname:s:{gw['address']}:{gw['port']}", 'gatewayusagemethod:i:1', 'gatewaycredentialssource:i:4',
@@ -1682,7 +1692,17 @@ def _guac_gateway(pool=None):
     return None
 
 
-def guac_link(gw, username, name, host, port, minutes=5):
+def guac_params(pol):
+    """Browser RDP parameters a pool policy sets: the clipboard each way and printing (to a PDF
+    the browser downloads). No drive: Guacamole's drive is a folder on the gateway."""
+    if pol is None:
+        return {}
+    return {'disable-copy': 'false' if pol['clipboard'] in ('both', 'from_desktop') else 'true',
+            'disable-paste': 'false' if pol['clipboard'] in ('both', 'to_desktop') else 'true',
+            'enable-printing': 'true' if pol['client_printers'] else 'false'}
+
+
+def guac_link(gw, username, name, host, port, minutes=5, pol=None):
     """A guacamole-auth-json login link: the JSON (one RDP connection) signed with HMAC-SHA256 and
     encrypted with AES-128-CBC (zero IV) under the gateway's 128-bit key, base64 in ?data=."""
     from cryptography.hazmat.primitives import padding
@@ -1691,7 +1711,8 @@ def guac_link(gw, username, name, host, port, minutes=5):
     payload = _json.dumps({'username': username, 'expires': int((time.time() + minutes * 60) * 1000),
                            'connections': {name: {'protocol': 'rdp', 'parameters': {
                                'hostname': host, 'port': str(port), 'username': username,
-                               'ignore-cert': 'true', 'security': 'any', 'resize-method': 'display-update'}}}},
+                               'ignore-cert': 'true', 'security': 'any', 'resize-method': 'display-update',
+                               **guac_params(pol)}}}},
                           separators=(',', ':')).encode()
     signed = hmac.new(key, payload, hashlib.sha256).digest() + payload
     padder = padding.PKCS7(128).padder()
@@ -1714,13 +1735,14 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     if not ip:
         return None, (jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409)
     port = 3389
+    pol = core.pool_policy.effective((pool or {}).get('settings'))
     if protocol == 'rdp':
         ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
-        return {'type': 'rdp', 'rdp': rdp_file(ext, username), 'filename': f"{desk['name']}.rdp"}, None
+        return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
     gw = _guac_gateway(pool)
     if not gw:
         return None, (jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409)
-    return {'type': 'guac', 'url': guac_link(gw, username, desk['name'], ip, port)}, None
+    return {'type': 'guac', 'url': guac_link(gw, username, desk['name'], ip, port, pol=pol)}, None
 
 
 @bp.route('/api/vlab/me/external/<eid>/guac', methods=['GET'])

@@ -43,6 +43,17 @@ Who makes a user's folder - never root on the VM (NFS root_squash makes it nobod
             SSSD reports them). At the first connect, and when a pool grant names a user whose ids
             the engine has seen.
 
+Office desktops (Windows, SMB with a home folder):
+
+  win_redirect      the sign-in script also points the user's 바탕 화면 · 문서 · 다운로드 · 사진
+                    (HKCU User Shell Folders) at the home drive, so files land on the NAS; Explorer
+                    reads it at the next sign-in. With AD a GPO folder redirection does the same.
+  win_block_local   the engine (as SYSTEM) sets the Explorer policies NoDrives / NoViewOnDrive for
+                    C: (HKLM, every account on the VM): C: is hidden and refused in Explorer and in
+                    the open / save dialogs, programs still run. Only with win_redirect - the
+                    folders a user saves to are then on the NAS. Turned off, the engine removes
+                    the two values when they are still its own (4 = C:).
+
 Project folders are the team's: the admin makes them with the team's group on the NAS; the engine
 only says when one is missing (PROJECT_MISSING, a warning).
 
@@ -88,8 +99,16 @@ DEFAULTS = {
     'smb_auth': 'kerberos',
     'smb_domain': '',
     'smb_user': '',
+    'win_redirect': False,   # Windows: 바탕 화면 · 문서 · 다운로드 · 사진 on the home drive
+    'win_block_local': False,  # Windows: hide and refuse C: in Explorer and the file dialogs
     'folders': FOLDER_DEFAULTS,
 }
+
+# the user's folders redirected to the home drive: (HKCU User Shell Folders value, folder)
+REDIRECTS = (('Desktop', 'Desktop'), ('Personal', 'Documents'), ('{374DE290-123F-4565-9164-39C4925E467B}', 'Downloads'),
+             ('My Pictures', 'Pictures'))
+EXPLORER_POLICY = r'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+DRIVE_C = 4   # the NoDrives / NoViewOnDrive bit of C:
 
 # exit status of the guest scripts
 CODES = {0: 'OK', 10: 'MOUNT_FAILED', 11: 'FOLDER_DENIED', 12: 'NO_USER', 13: 'NO_CLIENT',
@@ -330,6 +349,10 @@ def validate(data, current):
                 return None, None, 'create_by engine is for NFS; SMB folders are made by the user (FSLogix rights)'
             if not out['admin_path']:
                 return None, None, 'create_by engine needs admin_path (the export mounted on the engine host)'
+        if out['win_redirect'] and not folders['home']['enabled']:
+            return None, None, 'win_redirect needs the home folder (the drive the folders go to)'
+        if out['win_block_local'] and not out['win_redirect']:
+            return None, None, 'win_block_local needs win_redirect - the folders users save to must be on the NAS first'
         if out['kind'] == 'smb' and out['smb_auth'] == 'service':
             have = current.get('has_password') if new_password is None else bool(new_password)
             if not out['smb_user'] or not have:
@@ -562,6 +585,13 @@ def windows_logon_script(cfg, users):
         if key != 'project':
             out.append(f'if defined {var} if not exist "{share}\\%{var}%" mkdir "{share}\\%{var}%" >nul 2>&1')
         out.append(f'if defined {var} (net use {f["drive"]}: /delete /y >nul 2>&1 & net use {f["drive"]}: "{share}\\%{var}%" /persistent:no >nul)')
+    if cfg.get('win_redirect') and cfg['folders']['home']['enabled']:
+        h = cfg['folders']['home']['drive']
+        key = r'HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+        out.append('rem 바탕 화면 · 문서 · 다운로드 · 사진 on the home drive (Explorer reads it at the next sign-in)')
+        for value, folder in REDIRECTS:
+            out.append(f'if defined HOME if exist {h}:\\ ((if not exist "{h}:\\{folder}" mkdir "{h}:\\{folder}" >nul 2>&1) & '
+                       f'reg add "{key}" /v "{value}" /t REG_EXPAND_SZ /d "{h}:\\{folder}" /f >nul 2>&1)')
     return '\r\n'.join(out) + '\r\n'
 
 
@@ -578,7 +608,20 @@ def windows_script(cfg, users, extra=()):
         "$path = '" + LOGON_SCRIPT.replace("'", "''") + "'",
         '$have = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { $null }',
         'if ($have -ne $want) { [IO.File]::WriteAllText($path, $want, (New-Object Text.UTF8Encoding $false)); $changed = 1 }',
-        *extra, '"changed=$changed"', 'exit 0']) + '\n'
+        *block_local_lines(cfg), *extra, '"changed=$changed"', 'exit 0']) + '\n'
+
+
+def block_local_lines(cfg):
+    """PowerShell (as SYSTEM): C: hidden and refused in Explorer and the file dialogs, or the
+    engine's own values taken away again."""
+    pk = EXPLORER_POLICY
+    if cfg.get('win_block_local') and cfg.get('win_redirect'):
+        return [f"$pk = '{pk}'", 'if (-not (Test-Path $pk)) { New-Item -Path $pk -Force | Out-Null }',
+                "foreach ($n in 'NoDrives', 'NoViewOnDrive') { $v = (Get-ItemProperty -Path $pk -Name $n -ErrorAction SilentlyContinue).$n; "
+                f"if ($v -ne {DRIVE_C}) {{ Set-ItemProperty -Path $pk -Name $n -Value {DRIVE_C} -Type DWord; $changed = 1 }} }}"]
+    return [f"$pk = '{pk}'",
+            "foreach ($n in 'NoDrives', 'NoViewOnDrive') { $v = (Get-ItemProperty -Path $pk -Name $n -ErrorAction SilentlyContinue).$n; "
+            f"if ($v -eq {DRIVE_C}) {{ Remove-ItemProperty -Path $pk -Name $n; $changed = 1 }} }}"]
 
 
 # --- create_by engine: folders made on the engine host -------------------------------------

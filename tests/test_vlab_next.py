@@ -462,7 +462,14 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     assert r.status_code == 409 and r.get_json()['code'] == 'NO_IP'
     mgr._fetch_qemu_ips.return_value = ['127.0.0.1', '10.0.0.9', 'fe80::1']
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
-    assert r.status_code == 200 and 'full address:s:10.0.0.9:3389' in r.get_json()['rdp']
+    rdp = r.get_json()['rdp']
+    assert r.status_code == 200 and 'full address:s:10.0.0.9:3389' in rdp
+    # the pool policy: clipboard both, the PC's printers on, its drives off (the defaults)
+    assert 'redirectclipboard:i:1' in rdp and 'redirectprinters:i:1' in rdp and 'drivestoredirect:s:\r\n' in rdp
+    store.set_pool_settings(pool['id'], {'protocols': ['vnc', 'rdp', 'guac'],
+                                         'policy': {'clipboard': 'to_desktop', 'client_drives': True, 'client_printers': False}})
+    rdp = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'}).get_json()['rdp']
+    assert 'redirectclipboard:i:0' in rdp and 'redirectprinters:i:0' in rdp and 'drivestoredirect:s:*' in rdp
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
     assert r.status_code == 409 and r.get_json()['code'] == 'NO_GATEWAY'
     key = '00112233445566778899aabbccddeeff'
@@ -477,6 +484,7 @@ def test_rdp_file_and_browser_rdp_for_a_desktop(env, monkeypatch):
     data = _decrypt_guac(url, key)
     conn = data['connections']['win-01']
     assert data['username'] == 'alice' and conn['protocol'] == 'rdp' and conn['parameters']['hostname'] == '10.0.0.9'
+    assert (conn['parameters']['disable-copy'], conn['parameters']['disable-paste'], conn['parameters']['enable-printing']) == ('true', 'false', 'false')
 
     ext = admin.post('/api/vlab/admin/external-desktops', json={'name': '측정실 PC', 'address': '10.30.5.21', 'assigned_user': 'alice'}).get_json()['desktop']
     r = alice.get(f"/api/vlab/me/external/{ext['id']}/guac")

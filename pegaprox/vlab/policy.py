@@ -5,8 +5,13 @@ vLAB pool policy (MAKUS): how the desktops of a pool are reached and kept.
 Kept in vlab_pools.settings['policy']; a pool without one gets DEFAULTS. Where each setting
 takes effect:
   protocols, spice_fullscreen  connect route (allowed protocols, the .vv file)
-  clipboard                    the browser console (noVNC) - SPICE leaves it to the guest agent
+  clipboard                    the browser console (noVNC), the .rdp file (on only for both -
+                               mstsc has no one-way switch) and browser RDP (disable-copy / -paste);
+                               SPICE leaves it to the guest agent
   usb_redirect, usb_autoshare  the .vv file (SPICE USB redirection)
+  client_drives                the .rdp file: the user's own PC drives in the desktop (off = files
+                               cannot be carried in or out that way)
+  client_printers              the .rdp file (the PC's printers) and browser RDP (print to PDF)
   start_on_connect             connect route: a stopped desktop is started, the user retries
   idle_shutdown_min            background tick: shut down after that long without a session
   reset_on_logout              session end: back to the base (reset and scheduled pools only)
@@ -33,6 +38,8 @@ DEFAULTS = {
     'clipboard': 'both',
     'usb_redirect': True,
     'usb_autoshare': False,
+    'client_drives': False,
+    'client_printers': True,
     'start_on_connect': True,
     'idle_shutdown_min': 0,
     'reset_on_logout': False,
@@ -46,8 +53,8 @@ DEFAULTS = {
     'web_ide_idle_min': 240,
 }
 
-_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'start_on_connect', 'reset_on_logout', 'allow_power',
-          'defer_when_busy')
+_BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'start_on_connect',
+          'reset_on_logout', 'allow_power', 'defer_when_busy')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080)}
