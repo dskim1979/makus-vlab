@@ -206,7 +206,9 @@ def my_ssh_config():
     host_alias_prefix = 'moavi-'
     entries = []
     for d in _my_ssh_desktops(username):
-        target = wg.target_name_for(d['id'], d['name'])
+        # the desktop's SSH target (its own, next to the RDP one); a synced one keeps its Warpgate name
+        mp = wg.get_mapping(wg.target_ref(d['id'], 'ssh'))
+        target = (mp or {}).get('target_name') or wg.target_name_for(wg.target_ref(d['id'], 'ssh'), d['name'])
         alias = host_alias_prefix + re.sub(r'[^A-Za-z0-9._-]+', '-', d['name']).strip('-').lower()
         e = wg.ssh_config_entry(cfg, alias, username, target)
         e['desktop_id'] = d['id']
@@ -263,11 +265,12 @@ def browser_rdp_via_warpgate(desk, username, ip):
     try:
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
-        wg.sync_target(cfg, desk['id'], desk['name'], 'rdp', _desktop_target_options(cfg, 'rdp', ip), role_id)
+        target_uuid, _name = wg.sync_target(cfg, desk['id'], desk['name'], 'rdp',
+                                            _desktop_target_options(cfg, 'rdp', ip), role_id)
     except Exception as e:
         return _wg_down(cfg, 'browser RDP', desk, e)
     log_audit(username, 'vlab.warpgate.connect', f"browser RDP to '{desk['name']}' via Warpgate (web UI)", get_client_ip())
-    return wg.web_ui_url(cfg), None
+    return wg.web_ui_url(cfg, 'rdp', target_uuid), None
 
 
 def rdp_answer_via_warpgate(desk, username, ip, pol):
@@ -348,14 +351,15 @@ def my_desktop_warpgate(desktop_id):
         role_id = wg.ensure_role(cfg)
         wg.ensure_user(cfg, username, role_id)
         options = _desktop_target_options(cfg, proto, ip)
-        _uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], proto, options, role_id)
+        target_uuid, target_name = wg.sync_target(cfg, desk['id'], desk['name'], proto, options, role_id)
         _ticket, secret = wg.issue_ticket(cfg, username, target_name)
     except wg.WarpgateError as e:
         return jsonify({'error': str(e), 'code': 'WG_API'}), 502
-    except Exception as e:  # 네트워크/TLS
-        return jsonify({'error': str(e)[:200], 'code': 'WG_UNREACHABLE'}), 502
+    except Exception as e:  # network/TLS: the detail (internal URL) goes to the log only
+        logging.warning(f"[VLAB] Warpgate {proto} connect for {desk.get('name')} failed: {str(e)[:200]}")
+        return jsonify({'error': WG_DOWN_TEXT, 'code': 'WG_DOWN'}), 503
     if not secret:
         return jsonify({'error': '보안 게이트웨이 응답 오류', 'code': 'WG_API'}), 502
 
     log_audit(username, 'vlab.warpgate.connect', f"{proto.upper()} to '{desk['name']}' via Warpgate", get_client_ip())
-    return jsonify({'type': 'warpgate', 'connection': wg.connection_coordinates(cfg, proto, target_name, secret)})
+    return jsonify({'type': 'warpgate', 'connection': wg.connection_coordinates(cfg, proto, target_name, secret, target_uuid)})

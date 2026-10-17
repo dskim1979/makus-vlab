@@ -19,6 +19,8 @@ HTTP 호출은 _api() 한 곳으로 모아 테스트에서 가로채기 쉽게 �
 """
 
 import json
+import logging
+import os
 import re
 import threading
 
@@ -78,8 +80,24 @@ def db():
             if not getattr(d, '_vlab_warpgate', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                _migrate_target_refs(d)
                 d._vlab_warpgate = True
     return d
+
+
+def _migrate_target_refs(d):
+    """Older engines kept one mapping per desktop (ref = desktop id) whatever its protocol, so a
+    desktop first opened over SSH could never get an RDP target. SSH/VNC mappings now live under
+    target_ref(ref, proto); move old ones there (the Warpgate target itself is kept and renamed on its
+    next sync). Idempotent."""
+    d.execute("""UPDATE vlab_warpgate_targets SET ref = ref || '-' || proto
+                 WHERE proto IN ('ssh', 'vnc') AND ref NOT LIKE '%-' || proto""")
+
+
+def target_ref(ref, proto):
+    """Mapping key of a desktop's Warpgate target for one protocol: Warpgate cannot change a target's
+    kind, so each protocol gets its own target. RDP keeps the plain ref (existing targets stay valid)."""
+    return ref if proto == 'rdp' else f'{ref}-{proto}'
 
 
 # --- config ------------------------------------------------------------------------------
@@ -204,7 +222,9 @@ def delete_mapping(ref):
 def target_name_for(ref, label):
     """Warpgate 대상 이름: MOAVI Desk ref를 넣어 충돌 없이 되찾을 수 있게 한다."""
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', str(label or '')).strip('-').lower() or 'desktop'
-    return f'moavi-{safe}-{ref}'[:63]
+    # cut the label, never the ref: two protocol targets of one desktop differ only at the end
+    head = f'moavi-{safe}'[:max(6, 62 - len(str(ref)))].rstrip('-')
+    return f'{head}-{ref}'
 
 
 def ssh_target_options(host, port, username):
@@ -239,22 +259,27 @@ def ticket_login(secret):
     return f'ticket-{secret}'
 
 
-def web_ui_url(cfg):
+def web_ui_url(cfg, proto=None, target_uuid=None):
     """Warpgate 웹 UI(로그인 뒤 대상 목록에서 브라우저 RDP/SSH를 연다).
 
     실제 Warpgate(v0.29.2)로 확인: `?warpgate-ticket=` 은 HTTP 대상에만 웹 세션을 열고, RDP/SSH
     대상의 티켓으로는 세션을 열지 않으며 티켓도 쓰지 않는다(Warpgate 자체 테스트
     test_non_http_ticket_opens_no_session). 그래서 브라우저 경로는 티켓 없이 Warpgate 웹 UI로
-    보내고 사용자는 SSO/LDAP으로 로그인한다(비밀번호를 우리가 저장하지 않음). 티켓은 native 전용."""
-    return cfg['base_url'].rstrip('/') + '/@warpgate#/'
+    보내고 사용자는 SSO/LDAP으로 로그인한다(비밀번호를 우리가 저장하지 않음). 티켓은 native 전용.
+    With a target, the link opens that desktop directly (Warpgate 0.29.2 web UI routes:
+    #/web-desktop/start/<uuid> for RDP/VNC, #/web-ssh/start/<uuid> for SSH) once signed in."""
+    base = cfg['base_url'].rstrip('/') + '/@warpgate#/'
+    if target_uuid and proto in TARGET_KINDS:
+        return base + ('web-ssh' if proto == 'ssh' else 'web-desktop') + f'/start/{target_uuid}'
+    return base
 
 
-def connection_coordinates(cfg, proto, target_name, secret):
+def connection_coordinates(cfg, proto, target_name, secret, target_uuid=None):
     """티켓 secret으로 접속할 native 좌표 + 브라우저용 Warpgate 웹 UI 주소(티켓 없음).
     엔진은 secret을 저장하지 않고 이 응답에만 싣는다."""
     host = _host_of(cfg['base_url'])
     login = ticket_login(secret)
-    browser = web_ui_url(cfg)
+    browser = web_ui_url(cfg, proto, target_uuid)
     if proto == 'ssh':
         return {'proto': 'ssh', 'host': host, 'port': int(cfg['ssh_port']),
                 'username': login, 'ssh': f"ssh {login}@{host} -p {int(cfg['ssh_port'])}", 'browser_url': browser}
@@ -366,8 +391,10 @@ def ensure_user(cfg, username, role_id=None):
 
 
 def sync_target(cfg, ref, label, proto, options, role_id=None):
-    """데스크톱 1개에 대응하는 Warpgate 대상을 보장(없으면 생성)하고 매핑을 저장한다.
-    options는 *_target_options()가 만든 dict. role_id가 있으면 대상에 역할을 연결."""
+    """데스크톱 1개·프로토콜 1개에 대응하는 Warpgate 대상을 보장(없으면 생성)하고 매핑을 저장한다.
+    options는 *_target_options()가 만든 dict. role_id가 있으면 대상에 역할을 연결.
+    SSH 대상이면 대상의 호스트 키를 Warpgate known hosts에 올린다(실패해도 동기화는 계속)."""
+    ref = target_ref(ref, proto)
     name = target_name_for(ref, label)
     mp = get_mapping(ref)
     body = {'name': name, 'options': options, 'ticket_requests_disabled': False,
@@ -390,8 +417,15 @@ def sync_target(cfg, ref, label, proto, options, role_id=None):
             found = [t for t in (_call(cfg, 'GET', '/targets') or []) if isinstance(t, dict) and t.get('name') == name]
             if not found:
                 raise
-            uuid_val = found[0]['id']
-            _call(cfg, 'PUT', f'/targets/{uuid_val}', body)
+            owner = _mapping_of_target(found[0]['id'])
+            if owner and owner['ref'] != ref:
+                # the desktop's target for another protocol still has this name (an older engine used one
+                # name per desktop): give it its own name, then create ours
+                _rename_target(cfg, owner, target_name_for(owner['ref'], label))
+                uuid_val = _call(cfg, 'POST', '/targets', body)['id']
+            else:
+                uuid_val = found[0]['id']
+                _call(cfg, 'PUT', f'/targets/{uuid_val}', body)
         if role_id:
             try:
                 _call(cfg, 'POST', f'/targets/{uuid_val}/roles/{role_id}')
@@ -399,12 +433,96 @@ def sync_target(cfg, ref, label, proto, options, role_id=None):
                 if e.status != 409:   # 409 = the role is already on the target
                     raise
     save_mapping(ref, 'desktop', uuid_val, name, proto, options.get('host', ''), options.get('port', 0))
+    if proto == 'ssh':
+        try:
+            trust_ssh_host(cfg, options.get('host', ''), options.get('port', 22))
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate: SSH host key of {name} not added to known hosts: {str(e)[:200]}")
     return uuid_val, name
 
 
-def remove_target(cfg, ref):
+def _mapping_of_target(target_uuid):
+    r = db().query_one('SELECT * FROM vlab_warpgate_targets WHERE target_uuid = ?', (target_uuid,))
+    return dict(r) if r else None
+
+
+def _rename_target(cfg, mapping, new_name):
+    """Rename a mapped Warpgate target, keeping its options as Warpgate has them."""
+    t = _call(cfg, 'GET', f"/targets/{mapping['target_uuid']}") or {}
+    body = {'name': new_name, 'options': t.get('options')}
+    if t.get('description'):
+        body['description'] = t['description']
+    _call(cfg, 'PUT', f"/targets/{mapping['target_uuid']}", body)
+    db().execute('UPDATE vlab_warpgate_targets SET target_name = ? WHERE ref = ?', (new_name, mapping['ref']))
+
+
+# --- SSH host keys (Warpgate trusts a target's key only once it is in its known hosts) -------
+
+def scan_host_keys(host, port=22, timeout=5):
+    """ssh-keyscan: the target's SSH host keys as [(key_type, key_base64)], one per key type it offers."""
+    import socket
+    import paramiko
+    out = []
+    for alg in ('ssh-ed25519', 'ecdsa-sha2-nistp256', 'rsa-sha2-512'):
+        sock = t = None
+        try:
+            sock = socket.create_connection((host, int(port)), timeout=timeout)
+            t = paramiko.Transport(sock)
+            t.get_security_options().key_types = (alg,)
+            t.start_client(timeout=timeout)
+            k = t.get_remote_server_key()
+            pair = (k.get_name(), k.get_base64())
+            if pair not in out:
+                out.append(pair)
+        except Exception:
+            pass   # the host does not offer this key type
+        finally:
+            if t:
+                t.close()
+            elif sock:
+                sock.close()
+    return out
+
+
+def trust_ssh_host(cfg, host, port=22):
+    """Put the target's current SSH host keys into Warpgate's known hosts (POST /ssh/known-hosts), so
+    exec/scp/VS Code work on the first connect instead of waiting for someone to accept the key
+    interactively. A stale key of the same type for this host:port (an address reused by a rebuilt
+    desktop) is replaced. Returns how many keys were added."""
+    keys = scan_host_keys(host, port)
+    if not keys:
+        raise WarpgateError(f'no SSH host key from {host}:{port}')
+    known = [k for k in (_call(cfg, 'GET', '/ssh/known-hosts') or [])
+             if isinstance(k, dict) and k.get('host') == host and int(k.get('port') or 0) == int(port)]
+    added = 0
+    for key_type, b64 in keys:
+        same = [k for k in known if k.get('key_type') == key_type]
+        if any(k.get('key_base64') == b64 for k in same):
+            continue
+        for k in same:
+            _call(cfg, 'DELETE', f"/ssh/known-hosts/{k['id']}")
+            logging.info(f'[VLAB] Warpgate: replaced the old {key_type} host key of {host}:{port}')
+        _call(cfg, 'POST', '/ssh/known-hosts',
+              {'host': host, 'port': int(port), 'key_type': key_type, 'key_base64': b64})
+        added += 1
+    return added
+
+
+def remove_target(cfg, ref, proto=None):
     """데스크톱이 없어질 때 그 Warpgate 대상과 매핑을 지운다. 이미 없으면(404) 매핑만 지운다.
-    반환: 지운 대상 UUID 또는 None."""
+    proto=None: every protocol's target of the desktop; returns the removed UUIDs (list).
+    proto given: that one target; returns its UUID or None."""
+    if proto is None:
+        removed, err = [], None
+        for p in TARGET_KINDS:
+            try:
+                removed.append(remove_target(cfg, ref, p))
+            except WarpgateError as e:   # try the others, then report
+                err = e
+        if err:
+            raise err
+        return [u for u in removed if u]
+    ref = target_ref(ref, proto)
     mp = get_mapping(ref)
     if not mp:
         return None
@@ -415,6 +533,26 @@ def remove_target(cfg, ref):
             raise WarpgateError(f"Warpgate API DELETE /targets/{mp['target_uuid']} -> {code}: {str(data)[:200]}")
     delete_mapping(ref)
     return mp['target_uuid'] or None
+
+
+def forget_desktop(desktop_id, background=True):
+    """A desktop was deleted or taken from its user: remove its Warpgate targets (every protocol) so
+    they do not pile up and nobody keeps a way in. Best effort, off the request thread; failures are
+    logged and the mappings stay for the next try."""
+    if not any(get_mapping(target_ref(desktop_id, p)) for p in TARGET_KINDS) or not is_enabled():
+        return
+    cfg = config(secret=True)
+
+    def run():
+        try:
+            remove_target(cfg, desktop_id)
+        except Exception as e:
+            logging.warning(f'[VLAB] Warpgate: targets of {desktop_id} not removed: {str(e)[:200]}')
+
+    if background:
+        threading.Thread(target=run, name='vlab-wg-forget', daemon=True).start()
+    else:
+        run()
 
 
 def issue_ticket(cfg, username, target_name, ttl_seconds=TICKET_TTL_SECONDS):
@@ -497,3 +635,96 @@ def recording_url(cfg, session_id=None):
     if session_id:
         return f'{base}/@warpgate/admin/sessions/{session_id}'
     return f'{base}/@warpgate/admin/sessions'
+
+
+# --- first start: connect the bundled Warpgate by itself ---------------------------------
+
+AUTO_TOKEN_LABEL = 'moavi-desk-engine'
+AUTO_TOKEN_DAYS = 365
+_auto_lock = threading.Lock()
+
+
+def _env_on(name):
+    return os.environ.get(name, '').strip().lower() not in ('', '0', 'false', 'no', 'off')
+
+
+def _env_port(name, default):
+    v = os.environ.get(name, '').strip()
+    return int(v) if v.isdigit() and 1 <= int(v) <= 65535 else default
+
+
+def _is_unconfigured():
+    r = _row()
+    return not r or not (r['base_url'] or r['admin_token_encrypted'])
+
+
+def _mint_api_token(base_url, username, password, verify_tls=False, timeout=15):
+    """Log in to Warpgate as its admin and create an admin API token (~1 year), as the CI workflow
+    does. Returns the token secret; the password is only sent to Warpgate, never kept."""
+    import requests
+    from datetime import datetime, timedelta, timezone
+    api = base_url.rstrip('/') + '/@warpgate/api'
+    s = requests.Session()
+    s.verify = bool(verify_tls)
+    r = s.post(api + '/auth/login', json={'username': username, 'password': password},
+               timeout=timeout, allow_redirects=False)
+    if r.status_code >= 300:
+        raise WarpgateError(f'Warpgate login -> {r.status_code}', r.status_code)
+    expiry = (datetime.now(timezone.utc) + timedelta(days=AUTO_TOKEN_DAYS)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    r = s.post(api + '/profile/api-tokens', json={'label': AUTO_TOKEN_LABEL, 'expiry': expiry},
+               timeout=timeout, allow_redirects=False)
+    if r.status_code >= 300:
+        raise WarpgateError(f'Warpgate API token -> {r.status_code}', r.status_code)
+    secret = (r.json() or {}).get('secret')
+    if not secret:
+        raise WarpgateError('Warpgate returned no API token')
+    return secret
+
+
+def auto_connect():
+    """VLAB_WARPGATE=1 with VLAB_WARPGATE_URL and VLAB_WARPGATE_ADMIN_PASSWORD set, and nothing configured
+    yet: log in to Warpgate, mint an admin API token, seal it and save the connection (web RDP stays on
+    Guacamole). Never touches an existing configuration. Returns True when it saved one, False when it
+    had nothing to do; raises when Warpgate could not be reached (the caller retries)."""
+    if not _env_on('VLAB_WARPGATE'):
+        return False
+    base_url = os.environ.get('VLAB_WARPGATE_URL', '').strip().rstrip('/')
+    password = os.environ.get('VLAB_WARPGATE_ADMIN_PASSWORD', '')
+    if not base_url.startswith(('http://', 'https://')) or not password or not _is_unconfigured():
+        return False
+    verify = _env_on('VLAB_WARPGATE_VERIFY_TLS')
+    token = _mint_api_token(base_url, os.environ.get('VLAB_WARPGATE_ADMIN_USER', '').strip() or 'admin',
+                            password, verify)
+    with _auto_lock:
+        if not _is_unconfigured():   # someone saved a configuration meanwhile - theirs wins
+            return False
+        save_config(base_url, _env_port('VLAB_WARPGATE_SSH_PORT', DEFAULT_PORTS['ssh']),
+                    _env_port('VLAB_WARPGATE_RDP_PORT', DEFAULT_PORTS['rdp']),
+                    _env_port('VLAB_WARPGATE_VNC_PORT', DEFAULT_PORTS['vnc']),
+                    verify, True, admin_token=token, web_rdp_provider='guac')
+    ok, detail = test_connection(config(secret=True))
+    mark_check(ok, detail)
+    logging.info(f'[VLAB] Warpgate connected at first start: {base_url} ({"ok" if ok else "check failed"})')
+    return True
+
+
+def start_auto_connect(attempts=30, wait=10):
+    """auto_connect() off the start-up path, retried while Warpgate is still starting."""
+    if not _env_on('VLAB_WARPGATE'):
+        return None
+
+    def run():
+        import time
+        for _ in range(attempts):
+            try:
+                auto_connect()
+                return
+            except Exception as e:
+                # the message carries no token or password (status codes only)
+                logging.info(f'[VLAB] Warpgate not connected yet: {str(e)[:120]}')
+            time.sleep(wait)
+        logging.warning('[VLAB] Warpgate auto-connect gave up; set it in the console (플랫폼 설정 > 보안 게이트웨이)')
+
+    t = threading.Thread(target=run, name='vlab-wg-autoconnect', daemon=True)
+    t.start()
+    return t

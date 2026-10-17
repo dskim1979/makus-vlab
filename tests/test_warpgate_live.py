@@ -98,10 +98,19 @@ def test_target_sync_create_update_remove(wg, cfg):
     # same desktop, new address: updated in place, same target
     uid2, _ = wg.sync_target(cfg, 'it-sync', f'sync-{RUN}', 'ssh', wg.ssh_target_options(SSH_HOST, SSH_PORT + 1, SSH_USER), role)
     assert uid2 == uid and wg._call(cfg, 'GET', f'/targets/{uid}')['options']['port'] == SSH_PORT + 1
-    assert wg.remove_target(cfg, 'it-sync') == uid
+    # the SSH target's host key went into Warpgate's known hosts (the real API takes our key_type)
+    keys = {(k['key_type'], k['key_base64']) for k in wg._call(cfg, 'GET', '/ssh/known-hosts')
+            if k['host'] == SSH_HOST and k['port'] == SSH_PORT}
+    assert keys and set(wg.scan_host_keys(SSH_HOST, SSH_PORT)) <= keys
+    # the same desktop over RDP gets a target of its own (Warpgate cannot change a target's kind)
+    rdp_uid, rdp_name = wg.sync_target(cfg, 'it-sync', f'sync-{RUN}', 'rdp',
+                                       wg.rdp_target_options(SSH_HOST, 3389, 'svc', 'x'), role)
+    assert rdp_uid != uid and rdp_name != name
+    assert wg.remove_target(cfg, 'it-sync', 'rdp') == rdp_uid
+    assert wg.remove_target(cfg, 'it-sync', 'ssh') == uid
     with pytest.raises(wg.WarpgateError):
         wg._call(cfg, 'GET', f'/targets/{uid}')
-    assert wg.get_mapping('it-sync') is None
+    assert wg.get_mapping(wg.target_ref('it-sync', 'ssh')) is None and wg.get_mapping('it-sync') is None
 
 
 def test_user_and_public_key_registration(wg, cfg, keypair):

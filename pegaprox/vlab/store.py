@@ -9,6 +9,7 @@ grants, loans and sessions; the other tables of the design arrive with their fea
 
 import json
 import threading
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -258,11 +259,24 @@ def open_session_desktops():
 
 
 def set_assignment(desktop_id, username):
+    prev = db().query_one('SELECT assigned_user FROM vlab_desktops WHERE id = ?', (desktop_id,))
     db().execute('UPDATE vlab_desktops SET assigned_user = ? WHERE id = ?', (username, desktop_id))
+    if prev and prev['assigned_user'] and prev['assigned_user'] != username:
+        _forget_warpgate(desktop_id)   # the old user keeps no way in through Warpgate
 
 
 def remove_desktop(desktop_id):
     db().execute('DELETE FROM vlab_desktops WHERE id = ?', (desktop_id,))
+    _forget_warpgate(desktop_id)
+
+
+def _forget_warpgate(desktop_id):
+    """Remove the desktop's Warpgate targets (best effort, in the background; pegaprox/vlab/warpgate.py)."""
+    try:
+        from pegaprox.vlab.warpgate import forget_desktop
+        forget_desktop(desktop_id)
+    except Exception as e:
+        logging.warning(f'[VLAB] Warpgate cleanup for {desktop_id} skipped: {str(e)[:200]}')
 
 
 def desktops_of_user(username):

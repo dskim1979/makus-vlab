@@ -205,6 +205,24 @@ SSH는 Warpgate 자체 키 + 대상 사용자명)으로 대상에 붙는다. 사
   사용자명을 배정된 사용자의 디렉터리 계정으로 하고 Warpgate 클라이언트 공개키를 그 계정(AD/sssd의
   authorized keys 또는 게스트 에이전트)으로 신뢰시키면 본인 계정으로 들어간다 — 후속 작업.
 
+## 4-5. 실환경(VM 117) 테스트 뒤 고친 것
+
+- **프로토콜마다 대상 1개**: Warpgate는 대상 종류(Ssh↔Rdp)를 바꿀 수 없다. 매핑 키는 `target_ref(ref, proto)` —
+  RDP는 데스크톱 id 그대로, SSH/VNC는 `<id>-ssh` / `<id>-vnc`. 예전 엔진의 SSH 매핑(데스크톱 id 그대로)은
+  시작할 때 `<id>-ssh`로 옮기고, 그 대상이 RDP가 쓸 이름을 갖고 있으면 다음 동기화 때 SSH 이름으로 바꾼 뒤
+  RDP 대상을 새로 만든다(손으로 정리할 필요 없음).
+- **SSH 호스트 키**: SSH 대상을 동기화할 때 엔진이 데스크톱 22번의 호스트 키를 읽어(ssh-keyscan과 같음)
+  `POST /ssh/known-hosts`에 올린다. 같은 주소·같은 종류의 옛 키는 바꾼다. 실패해도 동기화는 계속(로그만).
+- **대상 정리**: 데스크톱을 지우거나 사용자 배정이 풀리면 그 데스크톱의 모든 Warpgate 대상을 지운다(백그라운드).
+- **웹 링크**: `#/web-desktop/start/<uuid>`(RDP/VNC), `#/web-ssh/start/<uuid>`(SSH) — 로그인 뒤 그 데스크톱으로 바로.
+- **Warpgate 연결 실패**: 사용자에게는 `WG_DOWN`(503)과 짧은 문구만, 내부 주소가 든 원인은 서버 로그에만.
+- **첫 기동 자동 연결**: `VLAB_WARPGATE=1`, `VLAB_WARPGATE_URL`(예: `https://<host>:8888`, 사용자에게 보이는 주소),
+  `VLAB_WARPGATE_ADMIN_PASSWORD`가 있고 설정이 비어 있으면 엔진이 Warpgate 관리자로 로그인해 1년짜리 API 토큰을
+  만들고 봉인해 저장한다(포트: SSH `VLAB_WARPGATE_SSH_PORT`=2222, RDP `VLAB_WARPGATE_RDP_PORT`=3389,
+  VNC `VLAB_WARPGATE_VNC_PORT`=5900; 웹 RDP는 guac 유지). 선택: `VLAB_WARPGATE_ADMIN_USER`(admin),
+  `VLAB_WARPGATE_VERIFY_TLS`. 기존 설정은 절대 덮어쓰지 않고, 토큰·비밀번호는 로그에 남기지 않는다.
+  Warpgate가 늦게 뜨면 10초 간격으로 30번 다시 시도한다.
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.

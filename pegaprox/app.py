@@ -1673,6 +1673,13 @@ def main(debug_mode=False):
     except Exception as e:
         print(f"Built-in Guacamole gateway not set up: {e}")
 
+    # MOAVI Desk - the bundled Warpgate connects itself at first start (VLAB_WARPGATE=1, nothing configured yet)
+    try:
+        from pegaprox.vlab.warpgate import start_auto_connect
+        start_auto_connect()
+    except Exception as e:
+        print(f"Warpgate auto-connect not started: {e}")
+
     start_cross_cluster_lb_thread()
     print("Started cross-cluster load balancer thread")
 

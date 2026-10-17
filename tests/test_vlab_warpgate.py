@@ -56,6 +56,8 @@ class FakeWarpgate:
         self.next = 1
         self.tickets = []
         self.keys = {}      # uid -> [ {id,label,openssh_public_key} ]
+        self.kinds = {}     # target uuid -> options.kind
+        self.known_hosts = []
 
     def _id(self, p):
         self.next += 1
@@ -80,6 +82,7 @@ class FakeWarpgate:
             if body['name'] in self.targets:          # like the real API
                 return 409, 'Name already exists'
             uid = self.targets[body['name']] = self._id('tgt')
+            self.kinds[uid] = body['options']['kind']
             return 201, {'id': uid, 'name': body['name']}
         if method == 'POST' and re.match(r'^/users/[^/]+/roles/[^/]+$', path) and body is None:
             return 400, 'ExpectContentType'                # the real API wants a JSON body here
@@ -89,8 +92,29 @@ class FakeWarpgate:
             self.tickets.append(body)
             return 201, {'ticket': {'id': self._id('tk'), 'username': body['username']},
                          'secret': 'TKT-SECRET-123'}
+        if method == 'GET' and path.startswith('/targets/'):
+            uid = path.rsplit('/', 1)[1]
+            names = [k for k, v in self.targets.items() if v == uid]
+            if not names:
+                return 404, 'not found'
+            return 200, {'id': uid, 'name': names[0], 'options': {'kind': self.kinds.get(uid, 'Ssh'), 'host': 'h'}}
         if method == 'PUT' and path.startswith('/targets/'):
+            uid = path.rsplit('/', 1)[1]
+            if self.kinds.get(uid, body['options']['kind']) != body['options']['kind']:
+                return 400, 'cannot change the target kind'     # like the real API
+            self.kinds[uid] = body['options']['kind']
+            self.targets = {(body['name'] if v == uid else k): v for k, v in self.targets.items()}
             return 200, {}
+        if path == '/ssh/known-hosts' and method == 'GET':
+            return 200, list(self.known_hosts)
+        if path == '/ssh/known-hosts' and method == 'POST':
+            row = dict(body, id=self._id('kh'))
+            self.known_hosts.append(row)
+            return 200, row
+        if path.startswith('/ssh/known-hosts/') and method == 'DELETE':
+            kid = path.rsplit('/', 1)[1]
+            self.known_hosts = [k for k in self.known_hosts if k['id'] != kid]
+            return 204, ''
         if method == 'DELETE' and path.startswith('/targets/'):
             uid = path.rsplit('/', 1)[1]
             if uid not in self.targets.values():
@@ -119,6 +143,22 @@ def fake_wg(monkeypatch):
     fake = FakeWarpgate()
     monkeypatch.setattr(wg, '_api', fake)
     return fake
+
+
+REAL_SCAN = wg.scan_host_keys
+HOST_KEY = ('ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAIHostKeyOfTheDesktop')
+
+
+@pytest.fixture(autouse=True)
+def no_keyscan(monkeypatch):
+    """ssh-keyscan of a desktop: no network in tests."""
+    scans = []
+
+    def scan(host, port=22, timeout=5):
+        scans.append((host, port))
+        return [HOST_KEY]
+    monkeypatch.setattr(wg, 'scan_host_keys', scan)
+    return scans
 
 
 @pytest.fixture
@@ -199,7 +239,9 @@ def test_connect_issues_a_single_use_ticket_scoped_to_user_and_target(env, fake_
     conn = r.get_json()['connection']
     assert conn['proto'] == 'rdp' and conn['username'] == 'ticket-TKT-SECRET-123'
     assert conn['host'] == 'wg.example' and conn['port'] == 3389
-    assert conn['browser_url'] == 'https://wg.example/@warpgate#/' and 'TKT' not in conn['browser_url']
+    # the web link opens this desktop in Warpgate's web UI (sign-in there), never with the ticket
+    assert conn['browser_url'] == f"https://wg.example/@warpgate#/web-desktop/start/{wg.get_mapping(d['id'])['target_uuid']}"
+    assert 'TKT' not in conn['browser_url']
     # 티켓은 그 사용자+그 대상, 1회용, 만료시간
     t = fake_wg.tickets[-1]
     assert t['username'] == 'alice' and t['number_of_uses'] == 1 and t['expiry']
@@ -325,7 +367,7 @@ def test_ssh_config_lists_researcher_ssh_desktops(env, fake_wg):
     assert r['enabled'] is True and r['warpgate_host'] == 'wg.example' and r['login'] == 'alice' and r['ssh_port'] == 2222
     assert len(r['entries']) == 1
     e = r['entries'][0]
-    assert e['user'].startswith('alice:moavi-ai-box-') and e['hostname'] == 'wg.example'
+    assert e['user'] == f"alice:moavi-ai-box-{d['id']}-ssh" and e['hostname'] == 'wg.example'
     assert 'User alice:moavi-ai-box-' in r['managed_block'] and 'ProxyJump' not in r['managed_block']
 
 
@@ -382,7 +424,8 @@ def test_browser_rdp_goes_through_warpgate_once_switched(env, fake_wg, monkeypat
     r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'guac'})
     assert r.status_code == 200, r.get_json()
     body = r.get_json()
-    assert body['via'] == 'warpgate' and body['url'] == 'https://wg.example/@warpgate#/'
+    assert body['via'] == 'warpgate'
+    assert body['url'] == f"https://wg.example/@warpgate#/web-desktop/start/{wg.get_mapping(d['id'])['target_uuid']}"
     assert not fake_wg.tickets                           # no ticket for the browser path
     assert wg.get_mapping(d['id'])['proto'] == 'rdp'     # the desktop is in the user's Warpgate list
 
@@ -416,14 +459,14 @@ def test_remove_target_deletes_it_and_forgets_the_mapping(env, fake_wg):
     _configure(admin)
     cfg = wg.config(secret=True)
     uid, _name = wg.sync_target(cfg, 'dsk_x', 'gone-soon', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
-    assert wg.remove_target(cfg, 'dsk_x') == uid
+    assert wg.remove_target(cfg, 'dsk_x', 'ssh') == uid
     assert ('DELETE', f'/targets/{uid}', None) in fake_wg.calls and uid not in fake_wg.targets.values()
-    assert wg.get_mapping('dsk_x') is None
-    assert wg.remove_target(cfg, 'dsk_x') is None          # nothing left to remove
+    assert wg.get_mapping(wg.target_ref('dsk_x', 'ssh')) is None
+    assert wg.remove_target(cfg, 'dsk_x', 'ssh') is None   # nothing left to remove
     # already gone on the Warpgate side (404): the stale mapping is still dropped
     uid2, _ = wg.sync_target(cfg, 'dsk_y', 'stale', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
     fake_wg.targets = {}
-    assert wg.remove_target(cfg, 'dsk_y') == uid2 and wg.get_mapping('dsk_y') is None
+    assert wg.remove_target(cfg, 'dsk_y', 'ssh') == uid2 and wg.get_mapping(wg.target_ref('dsk_y', 'ssh')) is None
 
 
 def test_sync_adopts_an_existing_target_when_the_mapping_is_gone(env, fake_wg):
@@ -433,9 +476,9 @@ def test_sync_adopts_an_existing_target_when_the_mapping_is_gone(env, fake_wg):
     _configure(admin)
     cfg = wg.config(secret=True)
     uid, name = wg.sync_target(cfg, 'dsk_r', 'restored', 'ssh', wg.ssh_target_options('10.0.0.7', 22, 'moavi'))
-    wg.delete_mapping('dsk_r')
+    wg.delete_mapping(wg.target_ref('dsk_r', 'ssh'))
     uid2, name2 = wg.sync_target(cfg, 'dsk_r', 'restored', 'ssh', wg.ssh_target_options('10.0.0.8', 22, 'moavi'))
-    assert (uid2, name2) == (uid, name) and wg.get_mapping('dsk_r')['address'] == '10.0.0.8'
+    assert (uid2, name2) == (uid, name) and wg.get_mapping(wg.target_ref('dsk_r', 'ssh'))['address'] == '10.0.0.8'
     assert any(c[:2] == ('PUT', f'/targets/{uid}') for c in fake_wg.calls)   # brought up to date
 
 
@@ -516,3 +559,329 @@ def test_rdp_via_warpgate_must_be_a_boolean(env):
     _configure(admin)
     r = admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://wg.example', 'rdp_via_warpgate': 'yes'})
     assert r.status_code == 400
+
+
+# --- found on the real cluster (VM 117) -------------------------------------------------
+
+def test_b_target_ref_and_names_keep_the_protocol():
+    assert wg.target_ref('dsk_1', 'rdp') == 'dsk_1'
+    assert wg.target_ref('dsk_1', 'ssh') == 'dsk_1-ssh' and wg.target_ref('dsk_1', 'vnc') == 'dsk_1-vnc'
+    # a long label is cut, never the ref: the RDP and SSH targets of one desktop stay apart
+    long = 'x' * 80
+    rdp, ssh = wg.target_name_for('dsk_0123456789ab', long), wg.target_name_for('dsk_0123456789ab-ssh', long)
+    assert rdp.endswith('-dsk_0123456789ab') and ssh.endswith('-dsk_0123456789ab-ssh') and rdp != ssh
+    assert len(rdp) <= 63 and len(ssh) <= 63
+
+
+def test_one_desktop_gets_an_rdp_and_an_ssh_target(env, fake_wg, monkeypatch):
+    """B: one target per desktop meant PUT ssh->rdp (400 from Warpgate) and then a misleading WG_DOWN."""
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'}).status_code == 200
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    assert r.status_code == 200, r.get_json()
+    ssh, rdp = wg.get_mapping(wg.target_ref(d['id'], 'ssh')), wg.get_mapping(d['id'])
+    assert ssh['proto'] == 'ssh' and rdp['proto'] == 'rdp' and ssh['target_uuid'] != rdp['target_uuid']
+    assert fake_wg.kinds[ssh['target_uuid']] == 'Ssh' and fake_wg.kinds[rdp['target_uuid']] == 'Rdp'
+    assert fake_wg.tickets[-1]['target_name'] == rdp['target_name']
+    assert r.get_json()['connection']['browser_url'].endswith(f"#/web-desktop/start/{rdp['target_uuid']}")
+
+
+def test_b_old_mixed_mappings_move_to_their_protocol_ref(env, fake_wg):
+    """An old engine kept the SSH target under the plain desktop id; it moves to <id>-ssh and the next
+    RDP sync makes a new target instead of trying to turn the SSH one into RDP."""
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    wg.save_mapping('dsk_old', 'desktop', 'tgt-old', 'moavi-old-dsk_old', 'ssh', '10.0.0.4', 22)
+    wg.save_mapping('dsk_rdp', 'desktop', 'tgt-rdp', 'moavi-r-dsk_rdp', 'rdp', '10.0.0.5', 3389)
+    d = wg.db()
+    wg._migrate_target_refs(d)
+    wg._migrate_target_refs(d)          # idempotent
+    assert wg.get_mapping('dsk_old') is None
+    assert wg.get_mapping('dsk_old-ssh')['target_uuid'] == 'tgt-old'
+    assert wg.get_mapping('dsk_rdp')['target_uuid'] == 'tgt-rdp'
+    fake_wg.targets['moavi-old-dsk_old'] = 'tgt-old'
+    fake_wg.kinds['tgt-old'] = 'Ssh'
+    uid, name = wg.sync_target(cfg, 'dsk_old', 'old', 'rdp', wg.rdp_target_options('10.0.0.4', 3389, 'svc', 'pw'))
+    assert uid != 'tgt-old' and wg.get_mapping('dsk_old')['proto'] == 'rdp' and name == 'moavi-old-dsk_old'
+    # the old SSH target gave the name up: renamed to its own, options kept
+    assert fake_wg.targets['moavi-old-dsk_old-ssh'] == 'tgt-old' and fake_wg.kinds['tgt-old'] == 'Ssh'
+    assert wg.get_mapping('dsk_old-ssh')['target_name'] == 'moavi-old-dsk_old-ssh'
+    # the SSH target is still found under its new ref and is updated in place
+    uid2, name2 = wg.sync_target(cfg, 'dsk_old', 'old', 'ssh', wg.ssh_target_options('10.0.0.4', 22, 'moavi'))
+    assert uid2 == 'tgt-old' and name2.endswith('-dsk_old-ssh')
+
+
+def test_b_ssh_config_uses_the_synced_ssh_target_name(env, fake_wg):
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool = store.create_pool('연구실', 'dedicated', CID)
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'ai-box')
+    store.set_assignment(d['id'], 'alice')
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'researcher_ssh': True})
+    # migrated from an old engine: the Warpgate target keeps its old name until its next sync
+    wg.save_mapping(wg.target_ref(d['id'], 'ssh'), 'desktop', 'tgt-1', f"moavi-ai-box-{d['id']}", 'ssh', '10.0.0.4', 22)
+    e = alice.get('/api/vlab/me/ssh-config').get_json()['entries'][0]
+    assert e['user'] == f"alice:moavi-ai-box-{d['id']}"
+
+
+def test_c_ssh_sync_puts_the_host_key_into_warpgate_known_hosts(env, fake_wg, no_keyscan):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    wg.sync_target(cfg, 'dsk_k', 'keys', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
+    assert no_keyscan == [('10.0.0.9', 22)]
+    assert [(k['host'], k['port'], k['key_type'], k['key_base64']) for k in fake_wg.known_hosts] == [('10.0.0.9', 22, *HOST_KEY)]
+    wg.sync_target(cfg, 'dsk_k', 'keys', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
+    assert len(fake_wg.known_hosts) == 1                  # already trusted: not added twice
+    # a stale key of the same type on a reused address is replaced
+    fake_wg.known_hosts[0]['key_base64'] = 'AAAAold'
+    wg.sync_target(cfg, 'dsk_k', 'keys', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
+    assert [k['key_base64'] for k in fake_wg.known_hosts] == [HOST_KEY[1]]
+    # RDP targets need no host key
+    wg.sync_target(cfg, 'dsk_k', 'keys', 'rdp', wg.rdp_target_options('10.0.0.9', 3389, 'svc', 'pw'))
+    assert len(no_keyscan) == 3
+
+
+def test_c_host_key_failure_does_not_break_the_sync(env, fake_wg, monkeypatch, caplog):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+
+    def boom(*a, **k):
+        raise OSError('connection refused')
+    monkeypatch.setattr(wg, 'scan_host_keys', boom)
+    uid, _ = wg.sync_target(cfg, 'dsk_n', 'nokey', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))
+    assert uid and wg.get_mapping('dsk_n-ssh')['target_uuid'] == uid
+    assert 'not added to known hosts' in caplog.text
+    monkeypatch.setattr(wg, 'scan_host_keys', lambda *a, **k: [])
+    assert wg.sync_target(cfg, 'dsk_n', 'nokey', 'ssh', wg.ssh_target_options('10.0.0.9', 22, 'moavi'))[0] == uid
+
+
+def test_c_scan_host_keys_reads_each_key_type(monkeypatch):
+    """The real keyscan (paramiko) over a fake transport: one key per offered type, no duplicates."""
+    import paramiko
+    import socket
+
+    class Key:
+        def __init__(self, name):
+            self.name = name
+
+        def get_name(self):
+            return self.name
+
+        def get_base64(self):
+            return 'B64-' + self.name
+
+    class Opts:
+        key_types = ()
+
+    class T:
+        def __init__(self, sock):
+            self.opts = Opts()
+
+        def get_security_options(self):
+            return self.opts
+
+        def start_client(self, timeout=None):
+            if self.opts.key_types == ('ecdsa-sha2-nistp256',):
+                raise paramiko.SSHException('no matching host key type')
+
+        def get_remote_server_key(self):
+            alg = self.opts.key_types[0]
+            return Key('ssh-rsa' if alg.startswith('rsa-') else alg)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, 'create_connection', lambda addr, timeout=None: object())
+    monkeypatch.setattr(paramiko, 'Transport', T)
+    assert REAL_SCAN('10.0.0.9') == [('ssh-ed25519', 'B64-ssh-ed25519'), ('ssh-rsa', 'B64-ssh-rsa')]
+
+
+def test_d_unreachable_warpgate_answers_wg_down_without_the_internal_url(env, fake_wg, monkeypatch, caplog):
+    import pegaprox.api.vlab_next as nxt
+    from pegaprox.api.vlab_warpgate import WG_DOWN_TEXT
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    _pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+
+    def down(*a, **k):
+        raise ConnectionError("HTTPSConnectionPool(host='warpgate.internal', port=8888): Max retries exceeded")
+    monkeypatch.setattr(wg, '_api', down)
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    assert r.status_code == 503 and r.get_json() == {'error': WG_DOWN_TEXT, 'code': 'WG_DOWN'}
+    assert 'warpgate.internal' in caplog.text          # the detail is in the server log only
+
+
+def test_e_deleting_or_unassigning_a_desktop_removes_its_targets(env, fake_wg, monkeypatch):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    real = wg.forget_desktop
+    monkeypatch.setattr(wg, 'forget_desktop', lambda did, background=True: real(did, background=False))
+    cfg = wg.config(secret=True)
+    _pool, d = _assign()
+    rdp, _ = wg.sync_target(cfg, d['id'], d['name'], 'rdp', wg.rdp_target_options('10.0.0.3', 3389, 'svc', 'pw'))
+    ssh, _ = wg.sync_target(cfg, d['id'], d['name'], 'ssh', wg.ssh_target_options('10.0.0.3', 22, 'moavi'))
+    store.set_assignment(d['id'], 'alice')              # same user: nothing to do
+    assert {rdp, ssh} <= set(fake_wg.targets.values())
+    store.set_assignment(d['id'], None)                 # taken from alice
+    assert not ({rdp, ssh} & set(fake_wg.targets.values()))
+    assert wg.get_mapping(d['id']) is None and wg.get_mapping(wg.target_ref(d['id'], 'ssh')) is None
+    vnc, _ = wg.sync_target(cfg, d['id'], d['name'], 'vnc', wg.vnc_target_options('10.0.0.3', 5900))
+    store.remove_desktop(d['id'])
+    assert vnc not in fake_wg.targets.values() and wg.list_mappings() == []
+
+
+def test_e_forget_runs_off_the_request_thread_and_skips_when_off(env, fake_wg, monkeypatch):
+    _, _, admin, _, _ = env
+    _configure(admin, enabled=False)
+    wg.save_mapping('dsk_z', 'desktop', 'tgt-z', 'n', 'rdp', '', 0)
+    started = []
+
+    class NoThread:
+        def __init__(self, **k):
+            started.append(k)
+
+        def start(self):
+            pass
+    monkeypatch.setattr(wg.threading, 'Thread', NoThread)
+    wg.forget_desktop('dsk_z')
+    assert started == [] and wg.get_mapping('dsk_z')   # Warpgate off: left alone
+    _configure(admin)
+    wg.forget_desktop('dsk_z')
+    assert len(started) == 1 and started[0]['daemon'] is True
+
+
+def _alerts_env(api, seed, monkeypatch, saved):
+    from pegaprox.api import alerts as alerts_api
+    monkeypatch.setattr(alerts_api, 'load_cluster_alerts', lambda: saved)
+    monkeypatch.setattr(alerts_api, 'save_cluster_alerts', lambda a: None)
+    api.set_manager(CID, api.make_fake_manager(CID))
+    return api.as_user(seed.user('root', role='admin'))
+
+
+@pytest.mark.parametrize('sev', ['auto', 'critical', 'warning', 'info'])
+def test_g_alert_rule_accepts_known_severities(api, seed, sev, monkeypatch):
+    admin = _alerts_env(api, seed, monkeypatch, {})
+    r = admin.post(f'/api/clusters/{CID}/alerts', json={'name': 'cpu', 'metric': 'cpu', 'threshold': 90, 'severity': sev})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()['alert']['severity'] == sev
+
+
+def test_g_alert_rule_refuses_an_unknown_severity(api, seed, monkeypatch):
+    saved = {CID: [{'id': 'a1', 'name': 'cpu', 'metric': 'cpu', 'operator': '>', 'threshold': 90, 'severity': 'info',
+                    'cluster_id': CID, 'target_type': 'cluster', 'channels': [], 'enabled': True}]}
+    admin = _alerts_env(api, seed, monkeypatch, saved)
+    for bad in ('panic', '<script>', 3, None):
+        r = admin.post(f'/api/clusters/{CID}/alerts', json={'name': 'x', 'metric': 'cpu', 'severity': bad})
+        assert r.status_code == 400 and 'severity' in r.get_json()['error']
+        r = admin.put(f'/api/clusters/{CID}/alerts/a1', json={'severity': bad})
+        assert r.status_code == 400
+    assert saved[CID][0]['severity'] == 'info'
+    assert admin.put(f'/api/clusters/{CID}/alerts/a1', json={'severity': 'critical'}).status_code == 200
+
+
+# --- first start: auto-connect -----------------------------------------------------------
+
+class FakeSession:
+    instances = []
+
+    def __init__(self):
+        self.verify = True
+        self.posts = []
+        FakeSession.instances.append(self)
+
+    def post(self, url, json=None, timeout=None, allow_redirects=None):
+        self.posts.append((url, json))
+
+        class R:
+            status_code = 201
+        r = R()
+        r.json = lambda: {'secret': 'secret-admin-token'} if url.endswith('/api-tokens') else {}
+        if url.endswith('/auth/login') and json['password'] != 'wg-admin-pw':
+            r.status_code = 401
+        return r
+
+
+@pytest.fixture
+def wg_env(monkeypatch):
+    import requests
+    FakeSession.instances = []
+    monkeypatch.setattr(requests, 'Session', FakeSession)
+    for k, v in {'VLAB_WARPGATE': '1', 'VLAB_WARPGATE_URL': 'https://wg.example/',
+                 'VLAB_WARPGATE_ADMIN_PASSWORD': 'wg-admin-pw', 'VLAB_WARPGATE_RDP_PORT': '13389'}.items():
+        monkeypatch.setenv(k, v)
+    return monkeypatch
+
+
+def test_auto_connect_at_first_start(env, fake_wg, wg_env, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG)
+    assert wg.auto_connect() is True
+    cfg = wg.config()
+    assert cfg['base_url'] == 'https://wg.example' and cfg['enabled'] and cfg['has_token']
+    assert (cfg['ssh_port'], cfg['rdp_port'], cfg['vnc_port']) == (2222, 13389, 5900)
+    assert cfg['web_rdp_provider'] == 'guac' and cfg['last_ok'] is True
+    s = FakeSession.instances[0]
+    assert s.verify is False
+    assert s.posts[0] == ('https://wg.example/@warpgate/api/auth/login', {'username': 'admin', 'password': 'wg-admin-pw'})
+    url, body = s.posts[1]
+    assert url == 'https://wg.example/@warpgate/api/profile/api-tokens' and body['label'] and body['expiry'] > '2027'
+    # sealed in the DB, never logged
+    row = wg._row()
+    assert row['admin_token_encrypted'] and 'secret-admin-token' not in row['admin_token_encrypted']
+    assert wg.config(secret=True)['admin_token'] == 'secret-admin-token'
+    assert 'secret-admin-token' not in caplog.text and 'wg-admin-pw' not in caplog.text
+    assert wg.auto_connect() is False and len(FakeSession.instances) == 1   # second start: nothing
+
+
+def test_auto_connect_never_overwrites_and_needs_the_switch(env, fake_wg, wg_env):
+    _, _, admin, _, _ = env
+    wg_env.setenv('VLAB_WARPGATE', '0')
+    assert wg.auto_connect() is False and wg._row() is None          # Warpgate off: nothing
+    assert wg.start_auto_connect() is None
+    wg_env.setenv('VLAB_WARPGATE', '1')
+    wg_env.delenv('VLAB_WARPGATE_ADMIN_PASSWORD')
+    assert wg.auto_connect() is False and wg._row() is None          # no password: nothing
+    wg_env.setenv('VLAB_WARPGATE_ADMIN_PASSWORD', 'wg-admin-pw')
+    admin.put('/api/vlab/admin/warpgate', json={'base_url': 'https://mine.example', 'admin_token': 'mine',
+                                                'ssh_port': 22, 'rdp_port': 3389, 'vnc_port': 5900, 'enabled': False})
+    assert wg.auto_connect() is False and FakeSession.instances == []
+    assert wg.config()['base_url'] == 'https://mine.example' and wg.config(secret=True)['admin_token'] == 'mine'
+
+
+def test_auto_connect_bad_password_raises_without_saving(env, wg_env):
+    wg_env.setenv('VLAB_WARPGATE_ADMIN_PASSWORD', 'wrong')
+    with pytest.raises(wg.WarpgateError) as e:
+        wg.auto_connect()
+    assert 'wrong' not in str(e.value) and wg._row() is None
+
+
+def test_web_ui_links_per_protocol():
+    cfg = {'base_url': 'https://wg.example/'}
+    assert wg.web_ui_url(cfg) == 'https://wg.example/@warpgate#/'
+    assert wg.web_ui_url(cfg, 'rdp', 'u1') == 'https://wg.example/@warpgate#/web-desktop/start/u1'
+    assert wg.web_ui_url(cfg, 'vnc', 'u1') == 'https://wg.example/@warpgate#/web-desktop/start/u1'
+    assert wg.web_ui_url(cfg, 'ssh', 'u1') == 'https://wg.example/@warpgate#/web-ssh/start/u1'
+    assert wg.web_ui_url(cfg, 'ssh') == 'https://wg.example/@warpgate#/'
+
+
+def test_remove_target_without_a_protocol_removes_every_target_of_the_desktop(env, fake_wg):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    a, _ = wg.sync_target(cfg, 'dsk_all', 'all', 'rdp', wg.rdp_target_options('10.0.0.2', 3389, 'svc', 'pw'))
+    b, _ = wg.sync_target(cfg, 'dsk_all', 'all', 'ssh', wg.ssh_target_options('10.0.0.2', 22, 'moavi'))
+    assert sorted(wg.remove_target(cfg, 'dsk_all')) == sorted([a, b])
+    assert wg.list_mappings() == [] and not ({a, b} & set(fake_wg.targets.values()))
+    assert wg.remove_target(cfg, 'dsk_all') == []
