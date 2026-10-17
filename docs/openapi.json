@@ -65301,6 +65301,61 @@
         ]
       }
     },
+    "/api/vlab/admin/desktops/{desktop_id}/warpgate-nla/rotate": {
+      "post": {
+        "operationId": "vlab_warpgate.rotate_desktop_nla_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A new NLA service account password for this Windows desktop, now: set in the VM through the guest agent and put on its Warpgate RDP target. A stopped desktop gets it on its next connect (the old one keeps working in the VM until then). The password is never in the answer.",
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
     "/api/vlab/me/desktops/{desktop_id}/warpgate": {
       "post": {
         "operationId": "vlab_warpgate.my_desktop_warpgate_post",

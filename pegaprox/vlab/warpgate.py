@@ -894,13 +894,15 @@ def nla_account_script():
     logon screen. Skips a domain controller (no local accounts there). Prints nla=ok / nla=dc."""
     return '\n'.join([
         "$ErrorActionPreference = 'Stop'",
+        # the agent hands stdout/stderr back as bytes; UTF-8 so a Korean Windows' errors stay readable
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
         "if ((Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4) { 'nla=dc'; exit 0 }",
         "$pw = [Console]::In.ReadToEnd().Trim()",
         "if (-not $pw) { 'nla=nopassword'; exit 2 }",
         "$sec = ConvertTo-SecureString $pw -AsPlainText -Force",
         f"$u = Get-LocalUser -Name '{NLA_USER}' -ErrorAction SilentlyContinue",
         f"if (-not $u) {{ New-LocalUser -Name '{NLA_USER}' -Password $sec -PasswordNeverExpires -AccountNeverExpires "
-        "-UserMayNotChangePassword -Description 'MOAVI Desk security gateway (NLA only, no sign-in)' | Out-Null }",
+        "-UserMayNotChangePassword -Description 'MOAVI Desk gateway NLA (no sign-in)' | Out-Null }",
         f"else {{ Set-LocalUser -Name '{NLA_USER}' -Password $sec -PasswordNeverExpires $true; Enable-LocalUser -Name '{NLA_USER}' }}",
         f"$sid = (Get-LocalUser -Name '{NLA_USER}').SID.Value",
         f"$m = @(Get-LocalGroupMember -SID '{RDP_USERS_SID}' -ErrorAction SilentlyContinue | Where-Object {{ $_.SID.Value -eq $sid }})",

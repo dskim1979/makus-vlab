@@ -12,6 +12,7 @@ MOAVI Desk - Warpgate 접근 게이트웨이(bastion) API (pegaprox/vlab/warpgat
   GET  /api/vlab/admin/warpgate/sessions     관리자 세션/녹화 페이지 링크                      vlab.pool.view
   POST /api/vlab/me/desktops/<id>/warpgate   {protocol: rdp|ssh|vnc} 티켓 발급 + 접속 좌표     vlab.desk
   /api/vlab/oidc/...                         Warpgate 로그인을 MOAVI Desk 세션으로(OIDC 공급자, wg_oidc.py)
+  POST /api/vlab/admin/desktops/<id>/warpgate-nla/rotate  그 Windows 데스크톱 NLA 서비스 계정 비번 교체  vlab.pool.manage
 """
 
 import logging
@@ -262,18 +263,53 @@ def prepare_windows_nla(desk, mgr, node, wait=25):
     from pegaprox.api.vlab_next import _agent_run
     pw = wg.nla_password(desk['id'], desk['vmid'])
     try:
-        code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
-                                        '-ExecutionPolicy', 'Bypass', '-Command', wg.nla_account_script()],
-                                        stdin=pw + '\n', wait=wait)
+        code, out, err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                       '-ExecutionPolicy', 'Bypass', '-Command', wg.nla_account_script()],
+                                       stdin=pw + '\n', wait=wait)
     except Exception as ex:
-        code, out, e = None, '', str(ex)[:200]
+        code, out, err, e = None, '', '', str(ex)[:200]
     if code == 0 and 'nla=ok' in (out or ''):
         wg.nla_mark_applied(desk['id'])
         log_audit('system', 'vlab.warpgate.nla', f"{desk['name']}: RDP NLA service account {wg.NLA_USER} set", '')
         return True
-    logging.warning(f"[VLAB] Warpgate NLA account on {desk.get('name')} not set: "
-                    f"{e or (out or '').strip()[:80] or f'exit {code}'}")
+    # Windows' own words (the script asks for UTF-8 output); the password never echoed back
+    detail = e or ' '.join(x for x in ((out or '').strip()[:80], (err or '').replace(pw, '***').strip()[:300]) if x)
+    logging.warning(f"[VLAB] Warpgate NLA account on {desk.get('name')} not set (exit {code}): {detail}")
     return False
+
+
+@bp.route('/api/vlab/admin/desktops/<desktop_id>/warpgate-nla/rotate', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def rotate_desktop_nla(desktop_id):
+    """A new NLA service account password for this Windows desktop, now: set in the VM through the
+    guest agent and put on its Warpgate RDP target. A stopped desktop gets it on its next connect
+    (the old one keeps working in the VM until then). The password is never in the answer."""
+    from pegaprox.api.vlab_next import _guest_ipv4, _guest_os
+    desk = store.get_desktop(desktop_id)
+    if not desk:
+        return _bad('Desktop not found', 404)
+    if not wg.is_enabled():
+        return jsonify({'error': '보안 게이트웨이가 꺼져 있습니다', 'code': 'WG_OFF'}), 409
+    wg.nla_forget(desk['id'])
+    applied = synced = False
+    mgr = cluster_managers.get(desk['cluster_id'])
+    live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {} if mgr else {}
+    node = live.get('node') or desk['node']
+    if mgr and getattr(mgr, 'is_connected', False) and live.get('status') == 'running' \
+            and _guest_os(mgr, node, int(desk['vmid'])) == 'windows':
+        applied = prepare_windows_nla(desk, mgr, node)
+        ip = _guest_ipv4(mgr, node, int(desk['vmid'])) if applied else None
+        if ip and wg.get_mapping(desk['id']):
+            try:
+                cfg = wg.config(secret=True)
+                wg.sync_target(cfg, desk['id'], desk['name'], 'rdp', _desktop_target_options(cfg, 'rdp', ip, desk))
+                synced = True
+            except Exception as e:
+                logging.warning(f"[VLAB] Warpgate target of {desk['name']} not updated after NLA rotation: {str(e)[:200]}")
+    log_audit(_user(), 'vlab.warpgate.nla_rotate',
+              f"'{desk['name']}': NLA service account password rotated (in VM: {applied}, Warpgate: {synced})",
+              get_client_ip())
+    return jsonify({'rotated': True, 'applied': applied, 'target_updated': synced})
 
 
 WG_DOWN_TEXT = '보안 게이트웨이에 연결할 수 없습니다. 잠시 뒤 다시 시도하세요.'

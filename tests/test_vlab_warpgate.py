@@ -1257,3 +1257,58 @@ def test_reset_and_delete_drop_the_nla_password(env, fake_wg, agent, monkeypatch
     assert wg.nla_password(d['id'], d['vmid']) != first
     store.remove_desktop(d['id'])
     assert wg.db().query_one('SELECT * FROM vlab_warpgate_nla WHERE desktop_id = ?', (d['id'],)) is None
+
+
+def test_nla_script_fits_windows_limits():
+    """Found live on VM 116: New-LocalUser refuses a description over 48 characters."""
+    s = wg.nla_account_script()
+    desc = re.search(r"-Description '([^']*)'", s).group(1)
+    assert len(desc) <= 48
+    assert '[Console]::OutputEncoding = [Text.Encoding]::UTF8' in s.split('\n')[1]
+
+
+def test_a_failed_nla_setup_logs_windows_words_but_not_the_password(env, fake_wg, agent, caplog):
+    from pegaprox.api import vlab_warpgate as api_wg
+    runs, reply = agent
+    _, mgr, admin, _, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    pw = wg.nla_password(d['id'], d['vmid'])
+    reply['value'] = (1, '', f"New-LocalUser : 'Description' too long (48) {pw}", '')
+    assert api_wg.prepare_windows_nla(d, mgr, 'pve1') is False
+    assert "'Description' too long (48)" in caplog.text and '(exit 1)' in caplog.text
+    assert pw not in caplog.text
+
+
+def test_an_admin_rotates_a_desktops_nla_password(env, fake_wg, agent, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    runs, _reply = agent
+    _, _, admin, alice, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
+    old = wg.nla_password(d['id'], d['vmid'])
+    r = admin.post(f"/api/vlab/admin/desktops/{d['id']}/warpgate-nla/rotate")
+    assert r.status_code == 200 and r.get_json() == {'rotated': True, 'applied': True, 'target_updated': True}
+    new = wg.nla_password(d['id'], d['vmid'])
+    assert new != old and runs[-1]['stdin'].strip() == new
+    put = [b for (m, p, b) in fake_wg.calls if m == 'PUT' and p.startswith('/targets/')][-1]
+    assert put['options']['auth']['password'] == new and put['options']['username'] == 'moavi-nla'
+    assert old not in r.get_data(as_text=True) and new not in r.get_data(as_text=True)
+    # users may not
+    assert alice.post(f"/api/vlab/admin/desktops/{d['id']}/warpgate-nla/rotate").status_code == 403
+
+
+def test_rotating_a_stopped_desktop_waits_for_its_next_connect(env, fake_wg, agent):
+    runs, _reply = agent
+    api, mgr, admin, _, _ = env
+    _configure_no_nla(admin)
+    _pool, d = _assign()
+    wg.nla_password(d['id'], d['vmid'])
+    wg.nla_mark_applied(d['id'])
+    mgr.get_vm_resources.return_value = [dict(RES[0], status='stopped')]
+    r = admin.post(f"/api/vlab/admin/desktops/{d['id']}/warpgate-nla/rotate")
+    assert r.get_json() == {'rotated': True, 'applied': False, 'target_updated': False} and runs == []
+    assert wg.nla_applied_credentials(d['id'], d['vmid']) is None and wg.nla_needs_apply(d['id'], d['vmid'])
