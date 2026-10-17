@@ -4708,62 +4708,146 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     # same blank-guard as screendump — a genuinely-off display shouldn't render a black tile
     ex = img.getextrema()
     if max(hi for _lo, hi in ex) <= 10:
-        raise IOError("blank framebuffer (display likely off)")
+        raise vnc_grab.BlankFrame("blank framebuffer (display likely off)")
     return vnc_grab.to_png_thumbnail(img, max_width=max_width)
 
 
-def grab_vm_frame(mgr, node, vm_type, vmid, max_width=480):
-    """One PNG of a guest's display: screendump first, one RFB frame when that gives nothing.
-    Raises when neither does. The console tile and the boot screenshots of a DR test
-    failover (background/sr_boot_shots.py) both take theirs here. MK Oct 2026"""
+# MK Oct 2026 - which of the two grabs gave the last picture of a guest. A Windows guest
+# on virtio-gpu/QXL dumps black every time, and the portal card waited the whole screendump
+# (an SSH round trip) before the RFB frame that works for it; now it goes there first, and
+# back to screendump only when that stops working.
+_vm_grab_method = {}               # {f"{cluster}:{vmid}": 'screendump' | 'rfb'}
+
+
+def grab_vm_frame(mgr, node, vm_type, vmid, max_width=480, timeouts=(20, 10)):
+    """One PNG of a guest's display: screendump first, one RFB frame when that gives nothing
+    (the other way round when RFB is what worked last time for this guest). Raises when
+    neither does - vnc_grab.BlankFrame when the display is there but black. The console tile,
+    the portal card and the boot screenshots of a DR test failover
+    (background/sr_boot_shots.py) all take theirs here. timeouts = (screendump, RFB) seconds."""
     from pegaprox.utils import vnc_grab
-    try:
-        return vnc_grab.screendump_to_png(mgr, node, vmid, max_width=max_width, timeout=20)
-    except Exception as e:
-        # screendump came back empty/blank, or can't run (API-token-only / no SSH).
-        # The common one is Windows on virtio-gpu/QXL - qm monitor screendump renders
-        # nothing there, so the tile only ever showed the icon. Fall back to a one-off
-        # RFB frame off the vncproxy (guest-GPU-independent) before giving up.
-        logging.info(f"[Screenshot] screendump failed {vm_type}/{vmid}@{node}: {e} - trying RFB")
-    try:
-        return _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=max_width, timeout=10)
-    except Exception as e2:
-        logging.info(f"[Screenshot] RFB fallback also failed {vm_type}/{vmid}@{node}: {e2}")
-        raise
+    key = f"{getattr(mgr, 'id', '')}:{vmid}"
+    order = ['screendump', 'rfb']
+    if _vm_grab_method.get(key) == 'rfb':
+        order.reverse()
+    blank, last = None, None
+    for method in order:
+        try:
+            if method == 'screendump':
+                png = vnc_grab.screendump_to_png(mgr, node, vmid, max_width=max_width, timeout=timeouts[0])
+            else:
+                png = _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=max_width, timeout=timeouts[1])
+        except vnc_grab.BlankFrame as e:
+            # screendump renders nothing for Windows on virtio-gpu/QXL - the other grab may
+            blank = e
+            logging.info(f"[Screenshot] {method} blank {vm_type}/{vmid}@{node} - trying the other")
+            continue
+        except Exception as e:
+            # can't run (API-token-only / no SSH), timed out, or the RFB leg failed
+            last = e
+            logging.info(f"[Screenshot] {method} failed {vm_type}/{vmid}@{node}: {e}")
+            continue
+        _vm_grab_method[key] = method
+        return png
+    # black on one and nothing on the other is a display that is off, not a broken grab
+    raise blank or last
 
 
-def cached_vm_frame(mgr, cluster_id, node, vm_type, vmid, fresh=False):
-    """grab_vm_frame behind the tile cache: (png, 'hit'|'miss') or (None, why). A failure is
-    remembered for _VM_SCREENSHOT_FAIL_TTL and answered as (None, 'failed-cached') without
-    touching the cluster. The console tile and the portal's desktop card (api/vlab.py) share
-    one cache, so the two never grab the same guest twice a minute. MK Oct 2026"""
-    cache_key = f"{cluster_id}:{vmid}"
-    now = time.monotonic()
-    if not fresh:
-        with _vm_screenshot_lock:
-            hit = _vm_screenshot_cache.get(cache_key)
-        # a remembered failure short-circuits before we touch the cluster at all
-        if hit and hit[1] is None and (now - hit[0]) < _VM_SCREENSHOT_FAIL_TTL:
-            return None, 'failed-cached'
-        if hit and hit[1] is not None and (now - hit[0]) < _VM_SCREENSHOT_TTL:
-            return hit[1], 'hit'
+# MK Oct 2026 - the portal card. The last good picture is kept for stale-while-revalidate:
+# past its TTL it is still answered at once while a background grab replaces it. One grab
+# per guest at a time (a second caller waits for the first), at most _GRAB_SLOTS at once
+# across the engine, so a wall of cards never becomes a wall of SSH sessions on the nodes.
+_vm_screenshot_good = {}           # {key: (mono_ts, png)} the last picture that worked
+_vm_screenshot_blank = set()       # keys whose last attempt saw a black display
+_vm_screenshot_inflight = {}       # {key: threading.Event} a grab running now
+_VM_SCREENSHOT_STALE_MAX = 300.0   # an older picture is not shown any more
+_GRAB_SLOTS = threading.BoundedSemaphore(4)
+_GRAB_WAIT = 30.0                  # longest a caller waits for a slot or for another caller's grab
 
-    # screendump via qm monitor — no vncproxy, so no "console opened" PVE task
-    try:
-        png = grab_vm_frame(mgr, node, vm_type, vmid, max_width=480)
-    except Exception as e2:
-        with _vm_screenshot_lock:
-            _vm_screenshot_cache[cache_key] = (time.monotonic(), None)
-        return None, str(e2) or 'failed'
 
+def _grab_into_cache(mgr, key, node, vm_type, vmid, timeouts):
+    """One grab for key into the cache, or wait for the one already running."""
     with _vm_screenshot_lock:
-        _vm_screenshot_cache[cache_key] = (time.monotonic(), png)
-        # keep the cache from growing unbounded on big estates
-        if len(_vm_screenshot_cache) > 512:
-            oldest = sorted(_vm_screenshot_cache.items(), key=lambda kv: kv[1][0])[:128]
-            for k, _ in oldest:
-                _vm_screenshot_cache.pop(k, None)
-    return png, 'miss'
+        ev = _vm_screenshot_inflight.get(key)
+        owner = ev is None
+        if owner:
+            ev = _vm_screenshot_inflight[key] = threading.Event()
+    if not owner:
+        ev.wait(_GRAB_WAIT)
+        return
+    try:
+        if not _GRAB_SLOTS.acquire(timeout=_GRAB_WAIT):
+            return   # the engine is busy grabbing - nothing cached, the next look tries again
+        try:
+            png, blank = grab_vm_frame(mgr, node, vm_type, vmid, max_width=480, timeouts=timeouts), False
+        except Exception as e:
+            from pegaprox.utils import vnc_grab
+            png, blank = None, isinstance(e, vnc_grab.BlankFrame)
+        finally:
+            _GRAB_SLOTS.release()
+        now = time.monotonic()
+        with _vm_screenshot_lock:
+            _vm_screenshot_cache[key] = (now, png)
+            if png is not None:
+                _vm_screenshot_good[key] = (now, png)
+            if blank:
+                _vm_screenshot_blank.add(key)
+                _vm_screenshot_good.pop(key, None)
+            else:
+                _vm_screenshot_blank.discard(key)
+            # keep the cache from growing unbounded on big estates
+            if len(_vm_screenshot_cache) > 512:
+                oldest = sorted(_vm_screenshot_cache.items(), key=lambda kv: kv[1][0])[:128]
+                for k, _ in oldest:
+                    _vm_screenshot_cache.pop(k, None)
+                    _vm_screenshot_good.pop(k, None)
+                    _vm_screenshot_blank.discard(k)
+    finally:
+        with _vm_screenshot_lock:
+            _vm_screenshot_inflight.pop(key, None)
+        ev.set()
+
+
+def _grab_in_background(mgr, key, node, vm_type, vmid, timeouts):
+    with _vm_screenshot_lock:
+        if key in _vm_screenshot_inflight:
+            return
+    threading.Thread(target=_grab_into_cache, args=(mgr, key, node, vm_type, vmid, timeouts),
+                     daemon=True, name=f'screenshot-{key}').start()
+
+
+def cached_vm_frame(mgr, cluster_id, node, vm_type, vmid, fresh=False, ttl=_VM_SCREENSHOT_TTL,
+                    fail_ttl=_VM_SCREENSHOT_FAIL_TTL, stale=False, wait=True, timeouts=(20, 10)):
+    """grab_vm_frame behind the tile cache: (png, 'hit'|'miss'|'stale') or (None, why), why
+    being 'off' (a black display), 'failed-cached' (a remembered failure), 'failed' or
+    'pending' (wait=False: the grab runs in the background). stale=True answers a picture past
+    its TTL at once and refreshes it in the background. The console tile and the portal's
+    desktop card (api/vlab.py) share one cache, so the two never grab the same guest at once."""
+    key = f"{cluster_id}:{vmid}"
+    now = time.monotonic()
+    with _vm_screenshot_lock:
+        hit = _vm_screenshot_cache.get(key)
+        good = _vm_screenshot_good.get(key)
+        blank = key in _vm_screenshot_blank
+    if not (stale and good and now - good[0] < _VM_SCREENSHOT_STALE_MAX):
+        good = None
+    if not fresh and hit:
+        if hit[1] is not None and (now - hit[0]) < ttl:
+            return hit[1], 'hit'
+        # a remembered failure short-circuits before we touch the cluster at all
+        if hit[1] is None and (now - hit[0]) < fail_ttl:
+            return (None, 'off') if blank else (good[1], 'stale') if good else (None, 'failed-cached')
+    if (good and not fresh) or not wait:
+        _grab_in_background(mgr, key, node, vm_type, vmid, timeouts)
+        return (good[1], 'stale') if good and not fresh else (None, 'pending')
+
+    _grab_into_cache(mgr, key, node, vm_type, vmid, timeouts)
+    with _vm_screenshot_lock:
+        hit = _vm_screenshot_cache.get(key)
+        blank = key in _vm_screenshot_blank
+    if hit and hit[1] is not None:
+        return hit[1], 'miss'
+    return None, 'off' if blank else 'failed'
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/screenshot', methods=['GET'])

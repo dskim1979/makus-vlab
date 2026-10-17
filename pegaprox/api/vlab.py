@@ -116,6 +116,7 @@ able to reach that cluster (tenant scope) to see or change it. docs/vlab-design.
 import json
 from datetime import datetime
 import re
+import time
 import logging
 
 from flask import Blueprint, current_app, jsonify, request
@@ -339,6 +340,9 @@ def my_desktops():
             v['storage'] = dict(paths, ok=got['ok'] if got else None, code=got['code'] if got else '',
                                 warnings=got['warnings'] if got else [])
         out.append(v)
+    from pegaprox.api.ha import standby_console_refusal
+    if standby_console_refusal() is None:
+        warm_screens(rows, live)
     return jsonify({'desktops': out})
 
 
@@ -545,7 +549,8 @@ def desktop_screenshot(desktop_id):
     """The portal card's picture of a running desktop: the console tile's grab (screendump, one
     shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache.
     The assigned user (vlab.desk) or an admin with vlab.pool.view. 204 when there is no picture
-    (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo.
+    (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo;
+    with X-Screen: off the display is there but black and the card says so.
     It is the VM's console, so a Windows desktop used over RDP shows its lock screen."""
     from pegaprox.api.ha import standby_console_refusal
     from pegaprox.api.vms import cached_vm_frame
@@ -570,13 +575,45 @@ def desktop_screenshot(desktop_id):
     vm = _vm_states(desk['cluster_id']).get(int(desk['vmid']))
     if not vm or vm.get('status') != 'running':
         return none
-    png, state = cached_vm_frame(mgr, desk['cluster_id'], vm.get('node') or desk['node'], 'qemu', int(desk['vmid']))
+    started = time.monotonic()
+    png, state = cached_vm_frame(mgr, desk['cluster_id'], vm.get('node') or desk['node'], 'qemu', int(desk['vmid']),
+                                 **SHOT_OPTS)
+    timing = f"grab;desc={state};dur={int((time.monotonic() - started) * 1000)}"
     if png is None:
-        return none
+        # the display is there but black: the card says 화면 꺼짐 instead of drawing the OS
+        return '', 204, ({'X-Screen': 'off', 'Server-Timing': timing} if state == 'off' else {'Server-Timing': timing})
     resp = current_app.response_class(png, mimetype='image/png')
-    resp.headers['Cache-Control'] = 'private, max-age=60'
+    resp.headers['Cache-Control'] = f"private, max-age={int(SHOT_OPTS['ttl'])}"
     resp.headers['X-Screenshot-Cache'] = state
+    resp.headers['Server-Timing'] = timing
     return resp
+
+
+# The portal card's grab (api/vms.py cached_vm_frame): a picture is fresh for 20 s, a failure
+# is retried after 15 s (a desktop that just started shows up within one card refresh), an
+# older picture is answered at once while a new one is taken, and the two grabs get short
+# timeouts - a card that waits half a minute is worse than one that keeps its drawing.
+SHOT_OPTS = {'ttl': 20.0, 'fail_ttl': 15.0, 'stale': True, 'timeouts': (8, 6)}
+
+
+def warm_screens(desks, live):
+    """Start the grabs of the caller's running desktops in the background while the portal
+    lists them, so the cards' first look finds a picture (or the grab already under way)."""
+    from pegaprox.api.vms import cached_vm_frame
+    for d in desks:
+        if d.get('vm_type') != 'qemu':
+            continue
+        vm = (live.get(d['cluster_id']) or {}).get(int(d['vmid'])) or {}
+        mgr = cluster_managers.get(d['cluster_id'])
+        if (vm.get('status') != 'running' or not mgr or not getattr(mgr, 'is_connected', False)
+                or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox'
+                or not pool_policy.effective(_settings_of(d))['screen_thumbnail']):
+            continue
+        try:
+            cached_vm_frame(mgr, d['cluster_id'], vm.get('node') or d['node'], 'qemu', int(d['vmid']),
+                            wait=False, **SHOT_OPTS)
+        except Exception as e:
+            logging.debug(f"[vLAB] screen warm-up {d['id']}: {e}")
 
 
 # --- admin: session log ------------------------------------------------------------

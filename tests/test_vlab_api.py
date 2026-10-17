@@ -520,7 +520,7 @@ def test_a_failed_power_action_is_reported(connectable):
 
 # --- screen thumbnail -------------------------------------------------------------
 
-PNG = b'\x89PNG\r\n\x1a\nfake'
+SHOT = b'\x89PNG\r\n\x1a\nfake'
 
 
 @pytest.fixture
@@ -531,14 +531,16 @@ def grabs(monkeypatch):
         pass
     calls = Calls()
 
-    def grab(mgr, node, vm_type, vmid, max_width=480):
+    def grab(mgr, node, vm_type, vmid, max_width=480, timeouts=(20, 10)):
         calls.append((node, vm_type, vmid))
         if grab.fail:
-            raise IOError('blank framebuffer')
-        return PNG
-    grab.fail = False
+            raise grab.fail
+        return SHOT
+    grab.fail = None
     monkeypatch.setattr(vms, 'grab_vm_frame', grab)
-    monkeypatch.setattr(vms, '_vm_screenshot_cache', {})
+    for name in ('_vm_screenshot_cache', '_vm_screenshot_good', '_vm_screenshot_inflight', '_vm_grab_method'):
+        monkeypatch.setattr(vms, name, {})
+    monkeypatch.setattr(vms, '_vm_screenshot_blank', set())
     calls.grab = grab
     return calls
 
@@ -546,8 +548,8 @@ def grabs(monkeypatch):
 def test_the_assigned_user_sees_their_running_desktop(connectable, grabs):
     _, alice, _, _, desk, _ = connectable
     r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
-    assert r.status_code == 200 and r.mimetype == 'image/png' and r.data == PNG
-    assert r.headers['Cache-Control'] == 'private, max-age=60' and r.headers['X-Screenshot-Cache'] == 'miss'
+    assert r.status_code == 200 and r.mimetype == 'image/png' and r.data == SHOT
+    assert r.headers['Cache-Control'] == 'private, max-age=20' and r.headers['X-Screenshot-Cache'] == 'miss'
     # the second look comes out of the cache the console tile shares
     assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").headers['X-Screenshot-Cache'] == 'hit'
     assert grabs == [('pve1', 'qemu', 300)]
@@ -557,9 +559,9 @@ def test_only_the_assigned_user_and_admins_see_the_screen(connectable, grabs):
     admin, _, bob, viewer, desk, _ = connectable
     for who in (bob, viewer):
         r = who.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
-        assert r.status_code == 404 and r.data[:4] != PNG[:4]
+        assert r.status_code == 404 and r.data[:4] != SHOT[:4]
     assert admin.get('/api/vlab/desktops/nope/screenshot').status_code == 404
-    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == PNG
+    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
     assert grabs == [('pve1', 'qemu', 300)]
 
 
@@ -567,9 +569,9 @@ def test_no_picture_is_204_without_a_reason(connectable, grabs):
     _, alice, _, _, desk, stopped = connectable
     r = alice.get(f"/api/vlab/desktops/{stopped['id']}/screenshot")
     assert r.status_code == 204 and r.data == b''
-    grabs.grab.fail = True
+    grabs.grab.fail = IOError('vncproxy refused: HTTP 500')
     r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
-    assert r.status_code == 204 and r.data == b''
+    assert r.status_code == 204 and r.data == b'' and 'X-Screen' not in r.headers
     # the failure is remembered: no second grab until it runs out
     assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
     assert grabs == [('pve1', 'qemu', 300)]
@@ -585,6 +587,104 @@ def test_the_pool_policy_turns_the_picture_off(connectable, grabs):
     (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
     assert mine['policy']['screen_thumbnail'] is False
     assert grabs == []
+
+
+def test_a_black_display_says_off(connectable, grabs):
+    from pegaprox.utils import vnc_grab
+    _, alice, _, _, desk, _ = connectable
+    grabs.grab.fail = vnc_grab.BlankFrame('blank framebuffer (display likely off)')
+    for _ in range(2):   # the second answer comes out of the cache
+        r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+        assert r.status_code == 204 and r.data == b'' and r.headers['X-Screen'] == 'off'
+    assert len(grabs) == 1
+
+
+def test_an_old_picture_is_answered_at_once_and_replaced_behind(connectable, grabs):
+    import time
+    import pegaprox.api.vms as vms
+    _, alice, _, _, desk, _ = connectable
+    old = b'old-png'
+    then = time.monotonic() - 60      # past the card's 20 s, inside the 5 min it may still show
+    vms._vm_screenshot_cache[f'{CID}:300'] = (then, old)
+    vms._vm_screenshot_good[f'{CID}:300'] = (then, old)
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 200 and r.data == old and r.headers['X-Screenshot-Cache'] == 'stale'
+    _settle(vms)
+    assert grabs == [('pve1', 'qemu', 300)]
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.data == SHOT and r.headers['X-Screenshot-Cache'] == 'hit'
+
+
+def _settle(vms, key=f'{CID}:300'):
+    """Wait for a background grab to land in the cache."""
+    import time
+    for _ in range(200):
+        if key not in vms._vm_screenshot_inflight and key in vms._vm_screenshot_cache \
+                and vms._vm_screenshot_cache[key][1] != b'old-png':
+            return
+        time.sleep(0.01)
+
+
+def test_listing_the_desktops_starts_their_grabs(connectable, grabs):
+    import pegaprox.api.vms as vms
+    _, alice, _, _, desk, _ = connectable
+    assert alice.get('/api/vlab/me/desktops').status_code == 200
+    _settle(vms)
+    # only the running one (301 is stopped); the card's first look finds it cached
+    assert grabs == [('pve1', 'qemu', 300)]
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").headers['X-Screenshot-Cache'] == 'hit'
+
+
+def test_the_grab_that_worked_goes_first_next_time(monkeypatch):
+    import pegaprox.api.vms as vms
+    from pegaprox.utils import vnc_grab
+    monkeypatch.setattr(vms, '_vm_grab_method', {})
+    seen = []
+
+    def dump(*a, **k):
+        seen.append('screendump')
+        raise vnc_grab.BlankFrame('blank framebuffer')   # Windows on QXL: the dump is black
+
+    def rfb(*a, **k):
+        seen.append('rfb')
+        return SHOT
+    monkeypatch.setattr(vnc_grab, 'screendump_to_png', dump)
+    monkeypatch.setattr(vms, '_screenshot_via_rfb', rfb)
+    mgr = type('M', (), {'id': CID})()
+    assert vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300) == SHOT
+    assert vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300) == SHOT
+    assert seen == ['screendump', 'rfb', 'rfb']
+    # black on both is a display that is off
+    monkeypatch.setattr(vms, '_screenshot_via_rfb', dump)
+    with pytest.raises(vnc_grab.BlankFrame):
+        vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300)
+
+
+def test_one_guest_is_grabbed_once_at_a_time(monkeypatch):
+    import threading
+    import pegaprox.api.vms as vms
+    for name in ('_vm_screenshot_cache', '_vm_screenshot_good', '_vm_screenshot_inflight'):
+        monkeypatch.setattr(vms, name, {})
+    gate, calls = threading.Event(), []
+
+    def grab(*a, **k):
+        calls.append(1)
+        gate.wait(5)
+        return SHOT
+    monkeypatch.setattr(vms, 'grab_vm_frame', grab)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(vms.cached_vm_frame(None, CID, 'pve1', 'qemu', 300)))
+          for _ in range(3)]
+    for t in ts:
+        t.start()
+    for _ in range(100):
+        if calls:
+            break
+        threading.Event().wait(0.01)
+    gate.set()
+    for t in ts:
+        t.join(5)
+    assert len(calls) == 1 and sorted(o[1] for o in out) == ['miss', 'miss', 'miss'] and all(o[0] == SHOT for o in out)
 
 
 # --- session log -----------------------------------------------------------------
