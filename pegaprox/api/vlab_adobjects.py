@@ -133,11 +133,6 @@ def ad_create_user():
     pw = d.get('password') or None
     if pw is not None and not isinstance(pw, str):
         return _bad('password must be text')
-    if pw:
-        from pegaprox.utils.auth import validate_password_policy
-        ok, why = validate_password_policy(pw)
-        if not ok:
-            return _bad(why)
     try:
         v = adobjects.create_user(_src(d.get('source')), d.get('parent_dn'), d.get('sam'), str(d.get('display_name') or ''),
                                   str(d.get('given_name') or ''), str(d.get('surname') or ''), str(d.get('mail') or ''),
@@ -186,10 +181,6 @@ def ad_password():
     pw = d.get('password')
     if not isinstance(pw, str) or not pw:
         return _bad('password is needed')
-    from pegaprox.utils.auth import validate_password_policy
-    ok, why = validate_password_policy(pw)
-    if not ok:
-        return _bad(why)
     try:
         adobjects.set_password(_src(d.get('source')), d.get('dn'), pw)
     except adobjects.Error as e:

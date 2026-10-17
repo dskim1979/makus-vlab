@@ -374,6 +374,8 @@ def create_user(source, parent_dn, sam, display_name='', given_name='', surname=
         realm = '.'.join(p.split('=', 1)[1] for p in s.base.split(',') if p.strip().upper().startswith('DC='))
         cn = (display_name or sam).strip()[:64]
         _checked_name(cn, 'name')
+        if password:
+            _check_password(s, password, sam, display_name or ' '.join(x for x in (given_name, surname) if x))
         dn = f'CN={escape_rdn(cn)},{parent}'
         attrs = {'sAMAccountName': sam, 'userPrincipalName': f'{sam}@{realm}' if realm else sam,
                  'userAccountControl': str(directory.UAC_NORMAL | directory.UAC_DISABLED)}
@@ -428,10 +430,25 @@ def set_password(source, dn, password):
     with session(source) as s:
         dn = _inside(s, dn)
         _guard(s, dn, 'password')
-        if _view(_get(s, dn))['kind'] != 'user':
+        v = _view(_get(s, dn))
+        if v['kind'] != 'user':
             raise Error('NOT_A_USER', 'only a user has a password')
+        _check_password(s, password, v.get('sam') or '', v.get('display_name') or v['name'])
         directory._set_password_dn(s.conn, dn, password, 'password')
         return True
+
+
+def _check_password(s, password, sam, display_name):
+    """Before the directory sees it: the portal's rule, and on the bundled DC the DC's own (its
+    length and complexity - no account name in it). A refusal names what is missing."""
+    if s.source == 'bundled':
+        why = directory.policy_error(password, sam.lower(), display_name)
+    else:
+        from pegaprox.utils.auth import validate_password_policy
+        ok, why = validate_password_policy(password)
+        why = None if ok else why
+    if why:
+        raise Error('PASSWORD_POLICY', why)
 
 
 def delete_object(source, dn):

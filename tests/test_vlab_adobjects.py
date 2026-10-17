@@ -135,3 +135,21 @@ def test_a_regular_user_cannot_and_the_sites_ad_is_a_source(env, monkeypatch):
     # on the site's own AD nothing is held back for the portal
     assert _ad(admin, 'put', 'object', json={'source': 'ldap', 'dn': out['object']['dn'], 'changes': {'description': 'x'}})[0] == 200
     assert _ad(admin, 'get', 'tree?source=nope')[1]['code'] == 'BAD_SOURCE'
+
+
+def test_ad_page_passwords_meet_the_dc_rule_before_the_dc_sees_them(env):
+    api, seed, admin, dc, _ = env
+    dc.conn().modify(BASE, {'pwdProperties': [(MODIFY_REPLACE, ['1'])]})      # Samba's default: complexity on
+    directory._policy_cache.update(at=0.0, dc=None)
+    assert api.anon().get('/api/vlab/password-policy').get_json()['policy']['complexity'] is True
+    for bad in ('abc', 'kiosk1-Pass9', 'Lobby-Desk9-x'):                      # short; the account name; the full name
+        code, out = _ad(admin, 'post', 'users', json={'source': 'bundled', 'parent_dn': OU, 'sam': 'kiosk1',
+                                                       'display_name': 'Lobby Desk', 'password': bad})
+        assert code == 400 and out['code'] == 'PASSWORD_POLICY', bad
+    assert _ad(admin, 'get', 'objects?source=bundled&kind=users&q=kiosk1')[1]['objects'] == []   # nothing half made
+    code, out = _ad(admin, 'post', 'users', json={'source': 'bundled', 'parent_dn': OU, 'sam': 'kiosk1',
+                                                   'display_name': 'Lobby Desk', 'password': 'Front-Hall-42'})
+    assert code == 201
+    udn = out['object']['dn']
+    code, out = _ad(admin, 'put', 'object/password', json={'source': 'bundled', 'dn': udn, 'password': 'kiosk1kiosk1'})
+    assert code == 400 and out['code'] == 'PASSWORD_POLICY' and dc.has_password(udn, 'Front-Hall-42')
