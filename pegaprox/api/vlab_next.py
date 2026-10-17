@@ -1736,10 +1736,12 @@ def guac_link(gw, username, name, host, port, minutes=5, pol=None):
 
 # Windows, as SYSTEM through the guest agent: RDP on (and its firewall rules, by their fixed
 # names - the display group is translated), and the RDS policies for H.264/AVC 444, hardware
-# encoding (a GPU / vGPU desktop), the GPU for every session, UDP and TCP. Says changed=0/1.
+# encoding (a GPU / vGPU desktop), the GPU for every session, UDP and TCP; off a domain, the VM's
+# own accounts in Remote Desktop Users. Says changed=0/1.
 RDP_TS = r'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
 RDP_TUNE = (('AVC444ModePreferred', 1), ('AVCHardwareEncodePreferred', 1), ('bEnumerateHWBeforeSW', 1), ('SelectTransport', 0))
 RDP_RULES = ('RemoteDesktop-UserMode-In-TCP', 'RemoteDesktop-UserMode-In-UDP')
+RDP_USERS, AUTH_USERS = 'S-1-5-32-555', 'S-1-5-11'   # Remote Desktop Users, Authenticated Users
 RDP_TUNE_EVERY = 6 * 3600
 _rdp_tuned = {}   # desktop id -> (vmid, when)
 
@@ -1756,6 +1758,11 @@ def rdp_prepare_script():
         f"foreach ($r in @({rules})) {{ $f = Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue; "
         "if ($f -and $f.Enabled -ne 'True') { Enable-NetFirewallRule -Name $r; $changed = 1 } }",
         f"$ts = '{RDP_TS}'", 'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+        # no AD: the VM's own accounts may sign in over RDP (Authenticated Users in Remote Desktop
+        # Users); a domain member is left to its GPO - there that would be every domain account
+        "try { if (-not (Get-CimInstance Win32_ComputerSystem).PartOfDomain) { "
+        f"$m = @(Get-LocalGroupMember -SID '{RDP_USERS}' -ErrorAction SilentlyContinue | Where-Object {{ $_.SID.Value -eq '{AUTH_USERS}' }}); "
+        f"if ($m.Count -eq 0) {{ Add-LocalGroupMember -SID '{RDP_USERS}' -Member '{AUTH_USERS}'; $changed = 1 }} }} }} catch {{ }}",
         '"changed=$changed"', 'exit 0']) + '\n'
 
 

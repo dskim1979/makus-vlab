@@ -512,7 +512,7 @@ def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monk
     assert r.status_code == 200, r.get_json()
     rdp = r.get_json()['rdp']
     assert 'networkautodetect:i:1' in rdp and 'connection type:i:7' in rdp
-    assert len(ran) == 1 and 'fDenyTSConnections' in ran[0] and 'AVC444ModePreferred' in ran[0] and 'SelectTransport' in ran[0]
+    assert len(ran) == 1 and 'fDenyTSConnections' in ran[0] and 'AVC444ModePreferred' in ran[0] and 'SelectTransport' in ran[0] and 'PartOfDomain' in ran[0] and 'S-1-5-11' in ran[0]
     alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
     assert len(ran) == 1                                          # once, not at every connect
     os_kind['v'] = 'linux'
