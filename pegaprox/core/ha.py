@@ -347,7 +347,7 @@ SYNC_TABLES = (
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
-    'vlab_warpgate', 'vlab_warpgate_targets',
+    'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state',
     # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
     'vlab_wg_oidc',
 )

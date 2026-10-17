@@ -66,9 +66,11 @@ _SCHEMA = (
         port INTEGER NOT NULL DEFAULT 0,
         synced_at TEXT
     )''',
+    # one-off upgrade steps that went through (migrate_legacy_users)
+    '''CREATE TABLE IF NOT EXISTS vlab_warpgate_state (key TEXT PRIMARY KEY, value TEXT)''',
 )
 
-TABLES = ('vlab_warpgate', 'vlab_warpgate_targets')
+TABLES = ('vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state')
 
 _lock = threading.Lock()
 
@@ -368,17 +370,35 @@ def ensure_role(cfg, name='moavi-desk'):
     return created['id']
 
 
+# Warpgate users the engine makes carry this prefix and this description: a portal account named like
+# one of Warpgate's own (its superadmin 'admin') must never become that account.
+USER_PREFIX = 'moavi-'
+MANAGED_DESC = 'MOAVI Desk managed user'
+
+
+def wg_user_name(username):
+    """The Warpgate user name of a portal user (reserved prefix, never one of Warpgate's own accounts)."""
+    return f'{USER_PREFIX}{username}'
+
+
 def ensure_user(cfg, username, role_id=None):
-    """포털 사용자명과 같은 Warpgate 사용자를 보장한다(비밀번호 자격 없이; 인증은 SSO/LDAP/티켓).
-    role_id가 있으면 그 역할을 붙인다. UUID 반환."""
+    """포털 사용자 username의 Warpgate 사용자(moavi-<username>)를 보장한다(비밀번호 자격 없이; 인증은
+    SSO/티켓/공개키). role_id가 있으면 그 역할을 붙인다. UUID 반환.
+    엔진이 만든 사용자(MANAGED_DESC)가 아니거나 Warpgate 관리자 역할이 있는 사용자에게는 자격·역할을
+    붙이지 않고 거부한다."""
+    name = wg_user_name(username)
     uid = None
     for u in _call(cfg, 'GET', '/users') or []:
-        if isinstance(u, dict) and u.get('username') == username:
+        if isinstance(u, dict) and u.get('username') == name:
+            if not str(u.get('description') or '').startswith(MANAGED_DESC):
+                raise WarpgateError(f'Warpgate user {name} is not managed by MOAVI Desk', 409)
             uid = u['id']
             break
     if uid is None:
-        created = _call(cfg, 'POST', '/users', {'username': username})
+        created = _call(cfg, 'POST', '/users', {'username': name, 'description': f'{MANAGED_DESC} ({username})'})
         uid = created['id']
+    if _call(cfg, 'GET', f'/users/{uid}/admin-roles'):
+        raise WarpgateError(f'Warpgate user {name} has an admin role; MOAVI Desk leaves it alone', 409)
     _ensure_sso_credential(cfg, uid, username)
     if role_id:
         try:
@@ -575,7 +595,7 @@ def issue_ticket(cfg, username, target_name, ttl_seconds=TICKET_TTL_SECONDS):
     반환: (ticket_dict, secret). secret은 저장하지 말고 응답에만 싣는다."""
     from datetime import datetime, timedelta, timezone
     expiry = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
-    body = {'username': username, 'target_name': target_name, 'number_of_uses': 1,
+    body = {'username': wg_user_name(username), 'target_name': target_name, 'number_of_uses': 1,
             'expiry': expiry, 'description': f'MOAVI Desk connect: {username} -> {target_name}'}
     data = _call(cfg, 'POST', '/tickets', body)
     return data.get('ticket'), data.get('secret')
@@ -623,8 +643,8 @@ def delete_user_key(cfg, username, key_id):
 
 def ssh_username(username, target_name):
     """Warpgate SSH는 점프 호스트가 아니라, 사용자 이름에 대상을 넣어 대상을 고른다(README: specifically
-    formatted credentials). 그래서 ProxyJump가 아니라 `User <wguser>:<target>` 형식을 쓴다."""
-    return f'{username}:{target_name}'
+    formatted credentials). 그래서 ProxyJump가 아니라 `User moavi-<user>:<target>` 형식을 쓴다."""
+    return f'{wg_user_name(username)}:{target_name}'
 
 
 def ssh_config_entry(cfg, host_alias, username, target_name):
@@ -657,6 +677,46 @@ def recording_url(cfg, session_id=None):
 AUTO_TOKEN_LABEL = 'moavi-desk-engine'
 AUTO_TOKEN_DAYS = 365
 _auto_lock = threading.Lock()
+
+
+def migrate_legacy_users(cfg):
+    """Engines before the moavi- prefix synced a portal user onto the Warpgate user of the same name -
+    for the portal's 'admin' that was Warpgate's own superadmin. On every Warpgate user without the
+    prefix, take back only what the engine put there: the moavi-desk SSO credential with that user's
+    MOAVI Desk e-mail, and the moavi-desk access role. Runs until it went through once (state row).
+    Returns (credentials removed, roles removed)."""
+    from pegaprox.vlab import wg_oidc
+    if _state('legacy_users_cleaned'):
+        return 0, 0
+    role_ids = {r['id'] for r in (_call(cfg, 'GET', '/roles') or [])
+                if isinstance(r, dict) and r.get('name') == 'moavi-desk'}
+    creds = roles = 0
+    for u in _call(cfg, 'GET', '/users') or []:
+        if not isinstance(u, dict) or str(u.get('username', '')).startswith(USER_PREFIX):
+            continue
+        uid, name = u['id'], u['username']
+        ours = wg_oidc.sso_email(name)
+        for c in _call(cfg, 'GET', f'/users/{uid}/credentials/sso') or []:
+            if isinstance(c, dict) and c.get('provider') == wg_oidc.PROVIDER_NAME and c.get('email') == ours:
+                _call(cfg, 'DELETE', f"/users/{uid}/credentials/sso/{c['id']}")
+                creds += 1
+                logging.warning(f'[VLAB] Warpgate: removed the MOAVI Desk sign-in the engine had put on user {name}')
+        for r in _call(cfg, 'GET', f'/users/{uid}/roles') or []:
+            if isinstance(r, dict) and r.get('id') in role_ids:
+                _call(cfg, 'DELETE', f"/users/{uid}/roles/{r['id']}")
+                roles += 1
+                logging.warning(f'[VLAB] Warpgate: removed the moavi-desk role the engine had given user {name}')
+    _set_state('legacy_users_cleaned', now())
+    return creds, roles
+
+
+def _state(key):
+    r = db().query_one('SELECT value FROM vlab_warpgate_state WHERE key = ?', (key,))
+    return r['value'] if r else None
+
+
+def _set_state(key, value):
+    db().execute('INSERT OR REPLACE INTO vlab_warpgate_state (key, value) VALUES (?, ?)', (key, value))
 
 
 def _env_on(name):
@@ -733,6 +793,8 @@ def start_auto_connect(attempts=30, wait=10):
         for _ in range(attempts):
             try:
                 auto_connect()
+                if is_enabled():
+                    migrate_legacy_users(config(secret=True))
                 return
             except Exception as e:
                 # the message carries no token or password (status codes only)

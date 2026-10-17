@@ -112,14 +112,14 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 - **Warpgate는 점프 호스트가 아니다.** 저장소 README: "Not a jump host — forwards connection
   straight to the target ... receives connections with specifically formatted credentials."
   즉 `ssh -J`(ProxyJump)가 아니라 **SSH 사용자 이름에 대상을 넣어** 대상을 고른다:
-  `User <wguser>:<target>` + `HostName <warpgate>` + `Port <ssh_port>`. 그래서 대상 IP가 드러나지
+  `User moavi-<아이디>:<target>` + `HostName <warpgate>` + `Port <ssh_port>`. 그래서 대상 IP가 드러나지
   않는다. (처음 피어 지시의 ProxyJump 대신 이 형식을 쓴 이유 — Warpgate가 그렇게 동작한다.)
 - **공개키 등록(비밀번호·개인키 비저장)**: 사용자가 포털 "내 계정" 또는 MOAVI Desk 클라이언트로
   자기 **공개키**를 올리면 엔진이 Warpgate `POST /users/<id>/credentials/public-keys`
   (`NewPublicKeyCredential{label, openssh_public_key}`)로 등록한다. 엔진은 개인키처럼 보이면
   거부하고(`PRIVATE KEY`), 공개키를 자기 DB에 저장하지 않는다(보관은 Warpgate).
 - **클라이언트 자동 구성**: `GET /api/vlab/me/ssh-config` 가 Warpgate host/port/login과 researcher_ssh
-  데스크톱별 `~/.ssh/config` 항목(`Host moavi-<name>` 한 개 = `User <wguser>:<target>`)을 준다.
+  데스크톱별 `~/.ssh/config` 항목(`Host moavi-<name>` 한 개 = `User moavi-<아이디>:<target>`)을 준다.
   MOAVI Desk Windows 클라이언트가 이를 `%USERPROFILE%\.ssh\config` 의 **관리 블록(BEGIN/END MOAVI)**
   안에만 써 넣어, PuTTY/WinSCP/VS Code가 데스크톱 이름만 고르면 바로 붙는다(블록 밖은 건드리지 않음).
 - **파일 전송(scp/SFTP)**은 브라우저 SSH와 같은 `ssh_files`류 정책을 따르고 Warpgate가 기록한다.
@@ -251,6 +251,17 @@ Warpgate 0.29.2는 RDP/SSH 대상 티켓으로 웹 세션을 열지 않으므로
 - 한계: Warpgate 로그인 화면은 처음 들어올 때 SSO를 스스로 시작하지 않는다(사용자 이름 입력 뒤에만). 그래서
   첫 접속엔 **MOAVI Desk** 버튼 한 번이 남는다. 완전 무클릭은 Warpgate를 콘솔과 같은 출처(`/@warpgate/`)로
   프록시하고 콘솔 페이지가 `/@warpgate/api/sso/providers/moavi-desk/start`를 불러야 가능(후속).
+
+## 4-7. 엔진이 만드는 Warpgate 사용자 (`moavi-<아이디>`)
+
+실환경에서 발견: 포털 `admin`이 Warpgate 자체 슈퍼관리자 `admin`에 붙고, SSO 자격까지 달려 MOAVI Desk 로그인이
+Warpgate 관리자 권한이 됐다. 지금은:
+- 엔진이 만드는 Warpgate 사용자는 항상 `moavi-<포털 아이디>`이고 설명이 `MOAVI Desk managed user`로 시작한다.
+  티켓·SSH 사용자 이름(`moavi-<아이디>:<대상>`)·공개키·SSO 자격 모두 이 사용자에게만 간다.
+- 같은 이름이라도 엔진이 만들지 않은 사용자이거나 Warpgate 관리자 역할이 있으면 자격·역할을 붙이지 않고 거부한다.
+- 업그레이드 때 한 번(`vlab_warpgate_state`): 접두어 없는 Warpgate 사용자에게서 엔진이 붙였던 것만 뗀다 —
+  provider `moavi-desk` + `<그 이름>@moavi-desk.invalid` SSO 자격, `moavi-desk` 역할. 그 사용자들에 등록했던 공개키는
+  남지만 역할이 없어 어떤 대상에도 못 붙는다. 연구자는 포털에서 공개키를 다시 등록한다(`moavi-<아이디>`로 감).
 
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),

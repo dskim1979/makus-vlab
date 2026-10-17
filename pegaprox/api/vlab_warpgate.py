@@ -218,7 +218,7 @@ def my_ssh_config():
         entries.append(e)
     managed = ''.join(e['config_snippet'] + '\n' for e in entries)
     return jsonify({'enabled': True, 'warpgate_host': wg._host_of(cfg['base_url']), 'ssh_port': cfg['ssh_port'],
-                    'login': username, 'entries': entries, 'managed_block': managed.strip()})
+                    'login': wg.wg_user_name(username), 'entries': entries, 'managed_block': managed.strip()})
 
 
 # --- portal connect ----------------------------------------------------------------------

@@ -59,6 +59,9 @@ class FakeWarpgate:
         self.kinds = {}     # target uuid -> options.kind
         self.known_hosts = []
         self.sso = {}       # uid -> [ {id, provider, email} ]
+        self.user_desc = {}     # uid -> description
+        self.admin_roles = {}   # uid -> [ {id, name} ]
+        self.user_roles = {}    # uid -> [role uuid]
 
     def _id(self, p):
         self.next += 1
@@ -72,12 +75,34 @@ class FakeWarpgate:
         if method == 'GET' and path == '/roles':
             return 200, [{'id': v, 'name': k} for k, v in self.roles.items()]
         if method == 'GET' and path == '/users':
-            return 200, [{'id': v, 'username': k} for k, v in self.users.items()]
+            return 200, [{'id': v, 'username': k, 'description': self.user_desc.get(v, '')}
+                         for k, v in self.users.items()]
+        m = re.match(r'^/users/([^/]+)/admin-roles$', path)
+        if m and method == 'GET':
+            return 200, list(self.admin_roles.get(m.group(1), []))
+        m = re.match(r'^/users/([^/]+)/roles(?:/([^/]+))?$', path)
+        if m:
+            uid, rid = m.group(1), m.group(2)
+            have = self.user_roles.setdefault(uid, [])
+            if method == 'GET' and not rid:
+                return 200, [{'id': r, 'name': next((k for k, v in self.roles.items() if v == r), '')} for r in have]
+            if method == 'POST':
+                if body is None:
+                    return 400, 'ExpectContentType'        # the real API wants a JSON body here
+                if rid not in have:
+                    have.append(rid)
+                return 201, {}
+            if method == 'DELETE':
+                self.user_roles[uid] = [r for r in have if r != rid]
+                return 204, ''
         if method == 'POST' and path == '/roles':
             uid = self.roles.setdefault(body['name'], self._id('role'))
             return 201, {'id': uid, 'name': body['name']}
         if method == 'POST' and path == '/users':
-            uid = self.users.setdefault(body['username'], self._id('user'))
+            if body['username'] in self.users:
+                return 409, 'exists'
+            uid = self.users[body['username']] = self._id('user')
+            self.user_desc[uid] = body.get('description', '')
             return 201, {'id': uid, 'username': body['username']}
         if method == 'POST' and path == '/targets':
             if body['name'] in self.targets:          # like the real API
@@ -121,6 +146,10 @@ class FakeWarpgate:
             if uid not in self.targets.values():
                 return 404, 'not found'
             self.targets = {k: v for k, v in self.targets.items() if v != uid}
+            return 204, ''
+        m = re.match(r'^/users/([^/]+)/credentials/sso/([^/]+)$', path)
+        if m and method == 'DELETE':
+            self.sso[m.group(1)] = [c for c in self.sso.get(m.group(1), []) if c['id'] != m.group(2)]
             return 204, ''
         m = re.match(r'^/users/([^/]+)/credentials/sso$', path)
         if m:
@@ -253,7 +282,7 @@ def test_connect_issues_a_single_use_ticket_scoped_to_user_and_target(env, fake_
     assert 'TKT' not in conn['browser_url']
     # 티켓은 그 사용자+그 대상, 1회용, 만료시간
     t = fake_wg.tickets[-1]
-    assert t['username'] == 'alice' and t['number_of_uses'] == 1 and t['expiry']
+    assert t['username'] == 'moavi-alice' and t['number_of_uses'] == 1 and t['expiry']
     assert t['target_name'].startswith('moavi-win-01-') and t['target_name'] == wg.get_mapping(d['id'])['target_name']
     # 대상 동기화 매핑이 저장됐다
     assert wg.get_mapping(d['id'])['proto'] == 'rdp'
@@ -337,10 +366,10 @@ def test_public_key_validation_rejects_private_keys():
 
 def test_ssh_username_and_config_entry_use_warpgate_not_proxyjump():
     cfg = {'base_url': 'https://wg.example:8888', 'ssh_port': 2222}
-    assert wg.ssh_username('alice', 'moavi-x') == 'alice:moavi-x'
+    assert wg.ssh_username('alice', 'moavi-x') == 'moavi-alice:moavi-x'
     e = wg.ssh_config_entry(cfg, 'moavi-pc', 'alice', 'moavi-x')
-    assert e['hostname'] == 'wg.example' and e['port'] == 2222 and e['user'] == 'alice:moavi-x'
-    assert 'ProxyJump' not in e['config_snippet'] and 'User alice:moavi-x' in e['config_snippet']
+    assert e['hostname'] == 'wg.example' and e['port'] == 2222 and e['user'] == 'moavi-alice:moavi-x'
+    assert 'ProxyJump' not in e['config_snippet'] and 'User moavi-alice:moavi-x' in e['config_snippet']
     assert e['ssh_command'] == 'ssh moavi-pc'
 
 
@@ -373,11 +402,11 @@ def test_ssh_config_lists_researcher_ssh_desktops(env, fake_wg):
     store.set_assignment(d['id'], 'alice')
     admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'researcher_ssh': True})
     r = alice.get('/api/vlab/me/ssh-config').get_json()
-    assert r['enabled'] is True and r['warpgate_host'] == 'wg.example' and r['login'] == 'alice' and r['ssh_port'] == 2222
+    assert r['enabled'] is True and r['warpgate_host'] == 'wg.example' and r['login'] == 'moavi-alice' and r['ssh_port'] == 2222
     assert len(r['entries']) == 1
     e = r['entries'][0]
-    assert e['user'] == f"alice:moavi-ai-box-{d['id']}-ssh" and e['hostname'] == 'wg.example'
-    assert 'User alice:moavi-ai-box-' in r['managed_block'] and 'ProxyJump' not in r['managed_block']
+    assert e['user'] == f"moavi-alice:moavi-ai-box-{d['id']}-ssh" and e['hostname'] == 'wg.example'
+    assert 'User moavi-alice:moavi-ai-box-' in r['managed_block'] and 'ProxyJump' not in r['managed_block']
 
 
 def test_policy_has_researcher_ssh_toggle():
@@ -528,7 +557,7 @@ def test_rdp_file_points_at_warpgate_with_a_single_use_ticket(env, fake_wg, monk
     assert 'networkautodetect:i:1' in lines
     assert [x for x in lines if x.startswith('autoreconnection')] == ['autoreconnection enabled:i:0']
     t = fake_wg.tickets[-1]
-    assert t['username'] == 'alice' and t['number_of_uses'] == 1
+    assert t['username'] == 'moavi-alice' and t['number_of_uses'] == 1
     tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][-1]
     assert tgt['options']['kind'] == 'Rdp' and tgt['options']['host'] == '10.0.0.31' and tgt['options']['interactive_logon'] is True
 
@@ -638,7 +667,7 @@ def test_b_ssh_config_uses_the_synced_ssh_target_name(env, fake_wg):
     # migrated from an old engine: the Warpgate target keeps its old name until its next sync
     wg.save_mapping(wg.target_ref(d['id'], 'ssh'), 'desktop', 'tgt-1', f"moavi-ai-box-{d['id']}", 'ssh', '10.0.0.4', 22)
     e = alice.get('/api/vlab/me/ssh-config').get_json()['entries'][0]
-    assert e['user'] == f"alice:moavi-ai-box-{d['id']}"
+    assert e['user'] == f"moavi-alice:moavi-ai-box-{d['id']}"
 
 
 def test_c_ssh_sync_puts_the_host_key_into_warpgate_known_hosts(env, fake_wg, no_keyscan):
@@ -954,7 +983,7 @@ def test_warpgate_signs_a_portal_user_in_without_a_password(env, fake_wg, oidc_o
     q = parse_qs(loc.query)
     assert q['state'] == ['st-1'] and q['code'][0]
     # Warpgate knows alice by her MOAVI Desk SSO credential - no password anywhere
-    uid = fake_wg.users['alice']
+    uid = fake_wg.users['moavi-alice']
     assert [(c['provider'], c['email']) for c in fake_wg.sso[uid]] == [('moavi-desk', 'alice@moavi-desk.invalid')]
     # Warpgate (no portal session, no browser headers) trades the code
     anon = api.anon()
@@ -1026,3 +1055,98 @@ def test_warpgate_yaml_snippet_carries_no_secret(oidc_on):
     snip = wg_oidc.warpgate_yaml_snippet()
     assert 'oidc-client-secret' not in snip and 'name: moavi-desk' in snip and 'type: custom' in snip
     assert 'issuer_url: http://vlab-engine:5000/api/vlab/oidc' in snip
+
+
+# --- engine users never become Warpgate's own accounts (found live: portal 'admin' -> Warpgate superadmin) ---
+
+def test_a_portal_user_gets_a_prefixed_managed_warpgate_user(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    fake_wg.users['admin'] = 'wg-superadmin'                       # Warpgate's own superadmin
+    fake_wg.admin_roles['wg-superadmin'] = [{'id': 'ar-1', 'name': 'warpgate:admin'}]
+    uid = wg.ensure_user(cfg, 'admin', wg.ensure_role(cfg))
+    assert uid != 'wg-superadmin' and fake_wg.users['moavi-admin'] == uid
+    assert fake_wg.user_desc[uid].startswith(wg.MANAGED_DESC)
+    # nothing was put on Warpgate's own admin
+    assert fake_wg.sso.get('wg-superadmin', []) == [] and fake_wg.user_roles.get('wg-superadmin', []) == []
+    assert [c['email'] for c in fake_wg.sso[uid]] == ['admin@moavi-desk.invalid']
+    # keys of the portal 'admin' go to moavi-admin too
+    wg.add_user_key(cfg, 'admin', 'pc', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey admin@pc')
+    assert uid in fake_wg.keys and 'wg-superadmin' not in fake_wg.keys
+
+
+def test_ensure_user_refuses_a_warpgate_user_the_engine_did_not_make(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    fake_wg.users['moavi-bob'] = 'hand-made'                        # made by hand in Warpgate
+    with pytest.raises(wg.WarpgateError):
+        wg.ensure_user(cfg, 'bob', wg.ensure_role(cfg))
+    assert fake_wg.sso.get('hand-made', []) == [] and fake_wg.user_roles.get('hand-made', []) == []
+    with pytest.raises(wg.WarpgateError):
+        wg.add_user_key(cfg, 'bob', 'pc', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey bob@pc')
+    assert 'hand-made' not in fake_wg.keys
+
+
+def test_ensure_user_refuses_a_managed_user_that_got_an_admin_role(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    uid = wg.ensure_user(cfg, 'carol')
+    fake_wg.admin_roles[uid] = [{'id': 'ar-1', 'name': 'warpgate:admin'}]
+    fake_wg.sso[uid] = []
+    with pytest.raises(wg.WarpgateError):
+        wg.ensure_user(cfg, 'carol', wg.ensure_role(cfg))
+    assert fake_wg.sso[uid] == []
+
+
+def test_portal_connect_refuses_when_the_warpgate_user_is_not_ours(env, fake_wg, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    _pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    fake_wg.users['moavi-alice'] = 'hand-made'
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    assert r.status_code == 502 and fake_wg.tickets == []
+
+
+def test_oidc_sign_in_never_lands_on_a_warpgate_admin(env, fake_wg, oidc_on, seed):
+    """The portal 'admin' signs in through MOAVI Desk: the SSO credential goes on moavi-admin, never on
+    Warpgate's superadmin 'admin'."""
+    api, _, root, _, _ = env
+    _configure(root)
+    admin = api.as_user(seed.user('admin', role='admin'))
+    fake_wg.users['admin'] = 'wg-superadmin'
+    fake_wg.admin_roles['wg-superadmin'] = [{'id': 'ar-1', 'name': 'warpgate:admin'}]
+    r = _authorize(admin, _pkce()[1])
+    assert r.status_code == 302 and 'code=' in r.headers['Location']
+    assert fake_wg.sso.get('wg-superadmin', []) == []
+    assert [c['email'] for c in fake_wg.sso[fake_wg.users['moavi-admin']]] == ['admin@moavi-desk.invalid']
+
+
+def test_migration_takes_back_only_what_the_engine_put_on_old_users(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    role = wg.ensure_role(cfg)
+    other_role = fake_wg.roles['ops'] = 'role-ops'
+    # what 5216bdb and earlier left: the superadmin 'admin' and an old unprefixed 'alice'
+    fake_wg.users.update({'admin': 'wg-superadmin', 'alice': 'old-alice'})
+    fake_wg.sso['wg-superadmin'] = [{'id': 'c1', 'provider': 'moavi-desk', 'email': 'admin@moavi-desk.invalid'},
+                                    {'id': 'c2', 'provider': 'google', 'email': 'boss@example.com'}]
+    fake_wg.sso['old-alice'] = [{'id': 'c3', 'provider': 'moavi-desk', 'email': 'alice@moavi-desk.invalid'}]
+    fake_wg.user_roles['wg-superadmin'] = [role, other_role]
+    fake_wg.user_roles['old-alice'] = [role]
+    # a managed user keeps everything
+    keep = wg.ensure_user(cfg, 'dave', role)
+    assert wg.migrate_legacy_users(cfg) == (2, 2)
+    assert [c['id'] for c in fake_wg.sso['wg-superadmin']] == ['c2']          # only the one the engine added
+    assert fake_wg.sso['old-alice'] == []
+    assert fake_wg.user_roles['wg-superadmin'] == [other_role] and fake_wg.user_roles['old-alice'] == []
+    assert fake_wg.user_roles[keep] == [role] and len(fake_wg.sso[keep]) == 1
+    # once is enough
+    fake_wg.sso['old-alice'] = [{'id': 'c9', 'provider': 'moavi-desk', 'email': 'alice@moavi-desk.invalid'}]
+    assert wg.migrate_legacy_users(cfg) == (0, 0)

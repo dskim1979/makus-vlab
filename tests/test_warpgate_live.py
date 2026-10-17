@@ -113,6 +113,20 @@ def test_target_sync_create_update_remove(wg, cfg):
     assert wg.get_mapping(wg.target_ref('it-sync', 'ssh')) is None and wg.get_mapping('it-sync') is None
 
 
+def test_a_portal_admin_never_becomes_warpgates_own_admin(wg, cfg):
+    """Found live: the portal 'admin' was synced onto Warpgate's superadmin 'admin'. Now it gets its own
+    managed moavi-admin; Warpgate's admin keeps its roles and gets no credential from us."""
+    users = {u['username']: u for u in wg._call(cfg, 'GET', '/users')}
+    real = users['admin']['id']
+    before_roles = wg._call(cfg, 'GET', f'/users/{real}/roles')
+    before_sso = wg._call(cfg, 'GET', f'/users/{real}/credentials/sso')
+    assert wg._call(cfg, 'GET', f'/users/{real}/admin-roles')          # the real API answers this
+    uid = wg.ensure_user(cfg, 'admin', wg.ensure_role(cfg))
+    assert uid != real and wg._call(cfg, 'GET', f'/users/{uid}')['username'] == 'moavi-admin'
+    assert wg._call(cfg, 'GET', f'/users/{real}/roles') == before_roles
+    assert wg._call(cfg, 'GET', f'/users/{real}/credentials/sso') == before_sso
+
+
 def test_user_and_public_key_registration(wg, cfg, keypair):
     _key, pub = keypair
     assert wg.is_public_key(pub)
@@ -125,7 +139,7 @@ def test_user_and_public_key_registration(wg, cfg, keypair):
 def test_ticket_is_single_use_for_user_and_target(wg, cfg):
     _uid, target = _ssh_target(wg, cfg)
     ticket, secret = wg.issue_ticket(cfg, USER, target)
-    assert secret and ticket['username'] == USER and ticket['target'] == target
+    assert secret and ticket['username'] == wg.wg_user_name(USER) and ticket['target'] == target
     assert ticket.get('uses_left') == 1 and ticket.get('expiry')
 
 
@@ -240,7 +254,7 @@ def test_rdp_ticket_sign_in(wg, cfg):
     assert coords['username'] == f'ticket-{secret}' and coords['port'] == WG_RDP
     _xfreerdp([f'/v:127.0.0.1:{WG_RDP}', f'/u:ticket-{secret}', '/p:x', '/cert:ignore', '/sec:tls', '/log-level:INFO'],
               'xfreerdp-ticket.log')
-    sessions = _sessions_for(wg, cfg, rdp_user)
+    sessions = _sessions_for(wg, cfg, wg.wg_user_name(rdp_user))
     assert sessions, 'Warpgate recorded no authorized RDP session for the ticket user'
 
 
@@ -263,7 +277,7 @@ def test_web_rdp_desktop_session_for_a_signed_in_user(wg, cfg):
     s.verify = False
     host = URL.split('://', 1)[1].rstrip('/')
     s.headers['Host'] = host
-    r = s.post(URL.rstrip('/') + '/@warpgate/api/auth/login', json={'username': web_user, 'password': pw}, timeout=20)
+    r = s.post(URL.rstrip('/') + '/@warpgate/api/auth/login', json={'username': wg.wg_user_name(web_user), 'password': pw}, timeout=20)
     assert r.status_code // 100 == 2, r.status_code
     r = s.post(URL.rstrip('/') + '/@warpgate/api/web-desktop/sessions', json={'target_id': tid}, timeout=30)
     assert r.status_code == 201, (r.status_code, r.text[:300])
@@ -303,5 +317,5 @@ def test_the_engine_made_rdp_file_connects_through_warpgate(wg, cfg, monkeypatch
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     _xfreerdp([path, '/cert:ignore', '/p:x', '/log-level:INFO'], 'xfreerdp-rdpfile.log')
-    assert _sessions_for(wg, cfg, file_user), 'Warpgate saw no authorized session from the engine-made .rdp'
+    assert _sessions_for(wg, cfg, wg.wg_user_name(file_user)), 'Warpgate saw no authorized session from the engine-made .rdp'
 

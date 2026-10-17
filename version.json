@@ -231,6 +231,7 @@
     "pegaprox/vlab/reservations.py",
     "pegaprox/vlab/store.py",
     "pegaprox/vlab/warpgate.py",
+    "pegaprox/vlab/wg_oidc.py",
     "pegaprox/vlab/workload.py",
     "pegaprox/witness.py",
     "pegaprox/witness_boot.py",
