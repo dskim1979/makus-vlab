@@ -38,6 +38,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | ![환경 카탈로그](docs/images/env-catalog.png) | ![데이터셋](docs/images/datasets.png) |
 
 화면 전체는 [콘솔 저장소](https://github.com/dskim1979/makus-vlab-console#화면)에 있습니다.
+사이트 종류별 안내: [일반 업무 VDI](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/general.md) · [대학교 실습실](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/university.md) · [연구소 · 기업 R&D](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/research.md) · [FPGA · AI 연구실](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/fpgaai.md).
 
 ## 주요 기능
 
