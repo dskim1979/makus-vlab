@@ -1511,3 +1511,70 @@ def test_ssh_says_so_when_the_guest_agent_blocks_guest_exec(env, fake_wg, monkey
     assert 'guest-exec' in r.get_json()['error'] and not fake_wg.tickets
     assert nxt.agent_exec_disabled('Command guest-exec has been disabled')
     assert not nxt.agent_exec_disabled('guest agent refused') and not nxt.agent_exec_disabled(None)
+
+
+# --- the pool's clipboard policy -> Warpgate's per-target web_clipboard (fork moavi7) ---------
+
+@pytest.mark.parametrize('clipboard,web', [('both', 'both'), ('to_desktop', 'in'), ('from_desktop', 'out'), ('off', 'off')])
+def test_rdp_target_carries_the_pool_clipboard_policy(env, fake_wg, monkeypatch, clipboard, web):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'clipboard': clipboard})
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert tgt['options']['kind'] == 'Rdp' and tgt['options']['web_clipboard'] == web
+
+
+def test_vnc_target_carries_it_too_and_external_pcs_leave_it_out(env, fake_wg):
+    from pegaprox.api import vlab_warpgate as api_wg
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    pol = {'clipboard': 'to_desktop'}
+    assert api_wg._desktop_target_options(cfg, 'vnc', '10.0.0.3', None, pol)['web_clipboard'] == 'in'
+    assert 'web_clipboard' not in api_wg._desktop_target_options(cfg, 'vnc', '10.0.0.3')
+    assert 'web_clipboard' not in api_wg._external_rdp_options(cfg, {'address': '10.0.0.4', 'port': 3389})
+
+
+def test_changing_the_clipboard_policy_resyncs_rdp_and_vnc_targets(env, fake_wg, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    real = wg.resync_targets
+    monkeypatch.setattr(wg, 'resync_targets', lambda cfg, jobs, what, background=True: real(cfg, jobs, what, background=False))
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    uid = wg.get_mapping(d['id'])['target_uuid']
+    n = len(fake_wg.calls)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'clipboard': 'off'})
+    puts = [b for (m, p, b) in fake_wg.calls[n:] if m == 'PUT' and p == f'/targets/{uid}']
+    assert puts and puts[-1]['options']['web_clipboard'] == 'off' and puts[-1]['options']['host'] == '10.0.0.31'
+    n = len(fake_wg.calls)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'clipboard': 'off', 'client_drives': True})
+    assert not [c for c in fake_wg.calls[n:] if c[1].startswith('/targets/')]       # clipboard unchanged: nothing sent
+
+
+def test_an_image_without_web_clipboard_still_gets_the_target(env, fake_wg, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    real = fake_wg.__call__
+
+    class Strict:
+        def __call__(self, method, path, token, base_url, verify_tls, body=None, timeout=15):
+            if path.startswith('/targets') and isinstance(body, dict) and 'web_clipboard' in body.get('options', {}):
+                return 400, 'unknown field web_clipboard'
+            return real(method, path, token, base_url, verify_tls, body, timeout)
+    monkeypatch.setattr(wg, '_api', Strict())
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
+    assert 'web_clipboard' not in tgt['options']

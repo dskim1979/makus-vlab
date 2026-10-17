@@ -287,6 +287,13 @@ MOAVI Desk Warpgate 빌드(포크 moavi4)는 웹 SSH에 파일 패널(SFTP)이 �
 켜고 끄기만 있음 — 내려받기만/올리기만 구분은 아직 없음). 정책의 켜짐/꺼짐이 바뀌면 그 풀 데스크톱의 기존 SSH 대상도
 다시 맞춘다(백그라운드). 이 옵션을 모르는 Warpgate가 400으로 거부하면 옵션을 빼고 대상을 만든다.
 
+## 4-9-1. 클립보드 = 풀의 클립보드 정책 (포크 moavi7)
+
+RDP · VNC 대상 옵션 `web_clipboard`(off / in / out / both, 없으면 both)를 풀 정책 `clipboard`에서 넣는다:
+off → off, to_desktop → in(사용자 PC → 데스크톱), from_desktop → out, both → both. Warpgate가 웹 RDP · 웹 VNC ·
+Warpgate 경유 mstsc 모두에서 막고, 전송과 차단을 로그에 남긴다. 정책을 바꾸면 그 풀의 기존 RDP · VNC 대상도 다시 맞춘다.
+옵션을 모르는 이미지가 400으로 거부하면 빼고 만든다(web_file_transfer와 같음). 새 세션부터 적용.
+
 ## 4-10. 게이트웨이 카탈로그 삭제 (Guacamole · RD 게이트웨이 → 보안 게이트웨이)
 
 사용자 결정("완전삭제"): 게이트웨이 관리(`/api/vlab/admin/gateways`, `vlab_gateways`)와 그 종류 rdpgw · msrdgw ·

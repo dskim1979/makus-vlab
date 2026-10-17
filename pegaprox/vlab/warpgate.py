@@ -251,7 +251,19 @@ def ssh_target_options(host, port, username, web_file_transfer=None):
     return opts
 
 
-def rdp_target_options(host, port, username, nla_password, domain='', interactive_logon=True):
+# the pool's clipboard policy -> the MOAVI Desk Warpgate build's per-target web_clipboard (fork moavi7):
+# in = user PC -> desktop, out = desktop -> user PC; enforced for web RDP / VNC and mstsc through Warpgate
+WEB_CLIPBOARD = {'both': 'both', 'to_desktop': 'in', 'from_desktop': 'out', 'off': 'off'}
+# options only the MOAVI Desk build knows; an older Warpgate refusing them gets the target without
+OPTIONAL_OPTIONS = ('web_file_transfer', 'web_clipboard')
+
+
+def web_clipboard(pool_clipboard):
+    """The target's web_clipboard for a pool clipboard setting; None (leave it out) when unknown."""
+    return WEB_CLIPBOARD.get(pool_clipboard)
+
+
+def rdp_target_options(host, port, username, nla_password, domain='', interactive_logon=True, clipboard=None):
     """RDP 대상: interactive_logon=True → 자동 로그인하지 않고 대상의 Windows 로그온 화면을 띄운다.
     nla_password는 네트워크 수준 인증(CredSSP)용 **서비스 계정** 비밀번호이지 사용자 비번이 아니며,
     아무도 로그인시키지 않는다. 사용자는 자기 디렉터리 계정으로 로그온 화면에서 직접 로그인한다."""
@@ -261,14 +273,21 @@ def rdp_target_options(host, port, username, nla_password, domain='', interactiv
             'interactive_logon': bool(interactive_logon), 'tls_security': 'Tls12'}
     if domain:
         opts['domain'] = domain
+    if clipboard:
+        opts['web_clipboard'] = clipboard
     return opts
 
 
-def vnc_target_options(host, port, vnc_password=None):
-    """VNC 대상: 비밀번호가 없으면 None 인증(저장 자격 없음). 있으면 대상 자체의 VNC 비번."""
+def vnc_target_options(host, port, vnc_password=None, clipboard=None):
+    """VNC 대상: 비밀번호가 없으면 None 인증(저장 자격 없음). 있으면 대상 자체의 VNC 비번.
+    clipboard: web_clipboard (off / in / out / both), None leaves it out."""
     if vnc_password:
-        return {'kind': 'Vnc', 'host': host, 'port': int(port), 'auth': {'kind': 'Password', 'password': vnc_password}}
-    return {'kind': 'Vnc', 'host': host, 'port': int(port), 'auth': {'kind': 'None'}}
+        opts = {'kind': 'Vnc', 'host': host, 'port': int(port), 'auth': {'kind': 'Password', 'password': vnc_password}}
+    else:
+        opts = {'kind': 'Vnc', 'host': host, 'port': int(port), 'auth': {'kind': 'None'}}
+    if clipboard:
+        opts['web_clipboard'] = clipboard
+    return opts
 
 
 def ticket_login(secret):
@@ -441,15 +460,34 @@ def _ensure_sso_credential(cfg, uid, username):
 
 
 def sync_target(cfg, ref, label, proto, options, role_id=None):
-    """_sync_target; a Warpgate that refuses an option it does not know (web_file_transfer on an image
-    without the file panel) gets the target without it."""
+    """_sync_target; a Warpgate that refuses an option it does not know (web_file_transfer /
+    web_clipboard on an image older than the MOAVI Desk build) gets the target without them."""
     try:
         return _sync_target(cfg, ref, label, proto, options, role_id)
     except WarpgateError as e:
-        if e.status != 400 or 'web_file_transfer' not in options:
+        extra = [k for k in OPTIONAL_OPTIONS if k in options]
+        if e.status != 400 or not extra:
             raise
-        logging.info(f'[VLAB] Warpgate refused web_file_transfer ({e.status}); target synced without it')
-        return _sync_target(cfg, ref, label, proto, {k: v for k, v in options.items() if k != 'web_file_transfer'}, role_id)
+        logging.info(f"[VLAB] Warpgate refused {', '.join(extra)} ({e.status}); target synced without")
+        return _sync_target(cfg, ref, label, proto, {k: v for k, v in options.items() if k not in OPTIONAL_OPTIONS}, role_id)
+
+
+def resync_targets(cfg, jobs, what, background=True):
+    """Bring existing targets in line after a pool policy change: jobs = [(ref, label, proto, options)].
+    Best effort, off the request thread."""
+    def run():
+        for ref, label, proto, options in jobs:
+            try:
+                sync_target(cfg, ref, label, proto, options)
+            except Exception as e:
+                logging.warning(f"[VLAB] Warpgate {proto} target of {label}: {what} not updated: {str(e)[:200]}")
+
+    if not jobs:
+        return
+    if background:
+        threading.Thread(target=run, name='vlab-wg-resync', daemon=True).start()
+    else:
+        run()
 
 
 def resync_ssh_file_transfer(desks, on, background=True):
@@ -462,21 +500,10 @@ def resync_ssh_file_transfer(desks, on, background=True):
     todo = [(d, mp) for d, mp in todo if mp and mp['address'] and ssh_login_name(d.get('assigned_user'))]
     if not todo:
         return
-    cfg = config(secret=True)
-
-    def run():
-        for d, mp in todo:
-            try:
-                sync_target(cfg, d['id'], d['name'], 'ssh',
-                            ssh_target_options(mp['address'], mp['port'] or 22,
-                                               ssh_login_name(d['assigned_user']), on))
-            except Exception as e:
-                logging.warning(f"[VLAB] Warpgate SSH target of {d['name']}: file panel not updated: {str(e)[:200]}")
-
-    if background:
-        threading.Thread(target=run, name='vlab-wg-ssh-files', daemon=True).start()
-    else:
-        run()
+    resync_targets(config(secret=True),
+                   [(d['id'], d['name'], 'ssh', ssh_target_options(mp['address'], mp['port'] or 22,
+                                                                    ssh_login_name(d['assigned_user']), on))
+                    for d, mp in todo], 'file panel', background)
 
 
 def _sync_target(cfg, ref, label, proto, options, role_id=None):

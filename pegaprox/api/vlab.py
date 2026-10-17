@@ -1660,7 +1660,8 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
-    was = pool_policy.effective(pool.get('settings')).get('ssh_files', 'off') != 'off'
+    old = pool_policy.effective(pool.get('settings'))
+    was = old.get('ssh_files', 'off') != 'off'
     settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
     store.set_pool_settings(pool['id'], settings)
     now_on = pol.get('ssh_files', 'off') != 'off'
@@ -1671,6 +1672,13 @@ def set_pool_policy(pool_id):
             resync_ssh_file_transfer(store.list_desktops(pool['id']), now_on)
         except Exception as e:
             logging.warning(f"[VLAB] Warpgate SSH file panel for pool '{pool['name']}': {str(e)[:200]}")
+    if old.get('clipboard') != pol.get('clipboard'):
+        # existing Warpgate RDP / VNC targets follow the clipboard policy
+        try:
+            from pegaprox.api.vlab_warpgate import resync_clipboard
+            resync_clipboard(store.list_desktops(pool['id']), pol)
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate clipboard for pool '{pool['name']}': {str(e)[:200]}")
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
               get_client_ip())
     return jsonify({'policy': pol})
