@@ -63,10 +63,11 @@ def _loop():
                 if features.enabled('gpuai') or features.enabled('fpga'):
                     accel_tick()
                 # boards whose loan ended come off their desktop; licence servers every 5 minutes
-                from pegaprox.api.vlab_next import board_tick, license_tick
+                from pegaprox.api.vlab_next import board_tick, gateway_tick, license_tick
                 board_tick()
                 if features.enabled('fpga'):
                     license_tick()
+                    gateway_tick()       # JTAG gateway VMs every 2 minutes
                 # accounts: the notice before the last day, expiry, deletion N days later
                 from pegaprox.api.vlab_accounts import accounts_tick
                 accounts_tick()

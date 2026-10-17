@@ -142,11 +142,33 @@ _SCHEMA = (
         last_detail TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL
     )''',
+    # JTAG gateway VMs (board lab, network target): a small Linux VM with many JTAG cables passed
+    # through (per USB device or a whole PCIe USB controller) that runs hw_server / XVC / jtagd.
+    # passthrough = [{slot, kind 'usb'|'pci', value}] MOAVI Desk put on the VM; cables = the last
+    # read of the cables the guest sees [{vidpid, serial, manufacturer, product, port, jtag}].
+    '''CREATE TABLE IF NOT EXISTS vlab_jtag_gateways (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        cluster_id TEXT NOT NULL,
+        vmid INTEGER,
+        host TEXT NOT NULL,
+        hw_port INTEGER NOT NULL DEFAULT 3121,
+        jtagd_port INTEGER NOT NULL DEFAULT 1309,
+        passthrough TEXT NOT NULL DEFAULT '[]',
+        cables TEXT NOT NULL DEFAULT '[]',
+        cables_at TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        last_check TEXT,
+        last_ok INTEGER,
+        last_detail TEXT NOT NULL DEFAULT '{}',
+        alerted_at TEXT,
+        created_at TEXT NOT NULL
+    )''',
 )
 
 TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
           'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
-          'vlab_desktop_versions', 'vlab_build_jobs')
+          'vlab_desktop_versions', 'vlab_build_jobs', 'vlab_jtag_gateways')
 
 # columns added after a table first shipped: (table, column, definition)
 _COLUMNS = (
@@ -192,6 +214,12 @@ _COLUMNS = (
     ('vlab_boards', 'port', 'INTEGER'),
     ('vlab_boards', 'protocol', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_boards', 'label', "TEXT NOT NULL DEFAULT ''"),
+    # a network board on a JTAG gateway VM: the gateway, the cable's serial number (the hw_server
+    # target), the board's UART on the gateway (ser2net TCP port) and the remote power hook config
+    ('vlab_boards', 'gateway_id', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'cable_serial', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'uart_port', 'INTEGER'),
+    ('vlab_boards', 'power', "TEXT NOT NULL DEFAULT ''"),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -541,19 +569,25 @@ def get_board(bid):
     return _one('SELECT * FROM vlab_boards WHERE id = ?', (bid,))
 
 
-def save_board(bid, name, cluster_id, node, usb, kind, notes, target='usb', host='', port=None, protocol='', label=''):
+def save_board(bid, name, cluster_id, node, usb, kind, notes, target='usb', host='', port=None, protocol='', label='',
+               gateway_id='', cable_serial='', uart_port=None, power=''):
     """Register or update a board. target 'usb' keeps the usb id and node (passthrough);
-    target 'network' keeps host/port/protocol/label and no usb id (hw_server / XVC / jtagd)."""
+    target 'network' keeps protocol/label and either a JTAG gateway VM + the cable's serial number
+    or a host/port of its own, and no usb id (hw_server / XVC / jtagd)."""
+    cols = ('name', 'cluster_id', 'node', 'usb', 'kind', 'notes', 'target', 'host', 'port', 'protocol', 'label',
+            'gateway_id', 'cable_serial', 'uart_port', 'power')
+    vals = (name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, gateway_id, cable_serial, uart_port, power)
     if bid:
-        db().execute('UPDATE vlab_boards SET name = ?, cluster_id = ?, node = ?, usb = ?, kind = ?, notes = ?, '
-                     'target = ?, host = ?, port = ?, protocol = ?, label = ? WHERE id = ?',
-                     (name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, bid))
+        db().execute(f"UPDATE vlab_boards SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?", vals + (bid,))
     else:
         bid = new_id('brd')
-        db().execute('INSERT INTO vlab_boards (id, name, cluster_id, node, usb, kind, notes, '
-                     'target, host, port, protocol, label, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                     (bid, name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, now()))
+        db().execute(f"INSERT INTO vlab_boards (id, {', '.join(cols)}, created_at) VALUES ({', '.join('?' * (len(cols) + 2))})",
+                     (bid,) + vals + (now(),))
     return get_board(bid)
+
+
+def boards_on_gateway(gid):
+    return _rows('SELECT * FROM vlab_boards WHERE gateway_id = ? ORDER BY name', (gid,))
 
 
 def set_board_attachment(bid, desktop_id, vmid, by, lease_user='', lease_until=None):
@@ -572,6 +606,64 @@ def due_boards(at_iso):
 
 def delete_board(bid):
     db().execute('DELETE FROM vlab_boards WHERE id = ?', (bid,))
+
+
+# --- JTAG gateway VMs --------------------------------------------------------------------
+
+def _jtag_gateway_row(r):
+    if not r:
+        return None
+    g = dict(r)
+    for k, empty in (('passthrough', []), ('cables', []), ('last_detail', {})):
+        try:
+            g[k] = json.loads(g.get(k) or 'null') or empty
+        except ValueError:
+            g[k] = empty
+    return g
+
+
+def list_jtag_gateways():
+    return [_jtag_gateway_row(r) for r in db().query('SELECT * FROM vlab_jtag_gateways ORDER BY name')]
+
+
+def get_jtag_gateway(gid):
+    return _jtag_gateway_row(db().query_one('SELECT * FROM vlab_jtag_gateways WHERE id = ?', (gid,))) if gid else None
+
+
+def save_jtag_gateway(gid, name, cluster_id, vmid, host, hw_port, jtagd_port, notes):
+    args = (name, cluster_id, vmid, host, int(hw_port), int(jtagd_port), notes)
+    if gid:
+        db().execute('UPDATE vlab_jtag_gateways SET name = ?, cluster_id = ?, vmid = ?, host = ?, hw_port = ?, jtagd_port = ?, '
+                     'notes = ? WHERE id = ?', args + (gid,))
+    else:
+        gid = new_id('jgw')
+        db().execute('INSERT INTO vlab_jtag_gateways (id, name, cluster_id, vmid, host, hw_port, jtagd_port, notes, created_at) '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (gid,) + args + (now(),))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_passthrough(gid, items):
+    db().execute('UPDATE vlab_jtag_gateways SET passthrough = ? WHERE id = ?', (json.dumps(items), gid))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_cables(gid, cables):
+    db().execute('UPDATE vlab_jtag_gateways SET cables = ?, cables_at = ? WHERE id = ?', (json.dumps(cables), now(), gid))
+    return get_jtag_gateway(gid)
+
+
+def mark_jtag_gateway(gid, ok, detail):
+    db().execute('UPDATE vlab_jtag_gateways SET last_check = ?, last_ok = ?, last_detail = ? WHERE id = ?',
+                 (now(), int(ok), json.dumps(detail), gid))
+    return get_jtag_gateway(gid)
+
+
+def mark_jtag_gateway_alerted(gid, at):
+    db().execute('UPDATE vlab_jtag_gateways SET alerted_at = ? WHERE id = ?', (at, gid))
+
+
+def delete_jtag_gateway(gid):
+    db().execute('DELETE FROM vlab_jtag_gateways WHERE id = ?', (gid,))
 
 
 # --- licence servers ---------------------------------------------------------------------

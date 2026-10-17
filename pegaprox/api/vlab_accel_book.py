@@ -81,8 +81,13 @@ def _clusters():
 
 
 def _boards():
+    from pegaprox.api.vlab_next import _jtag_gateway_state
+    gws = {g['id']: g for g in catalog.list_jtag_gateways()}
     return [{'cluster_id': b['cluster_id'], 'id': b['id'], 'name': b['name'], 'node': b['node'], 'kind': b.get('kind') or '',
-             'target': b.get('target') or 'usb', 'protocol': b.get('protocol') or ''}
+             'target': b.get('target') or 'usb', 'protocol': b.get('protocol') or '',
+             # a board on a JTAG gateway that is down cannot be lent now (booking still allowed for later)
+             'gateway': (gws[b['gateway_id']]['name'] if b.get('gateway_id') in gws else ''),
+             'available': not (b.get('gateway_id') in gws and _jtag_gateway_state(gws[b['gateway_id']]) == 'down')}
             for b in catalog.list_boards() if core._can_reach(b['cluster_id'])]
 
 

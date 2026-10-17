@@ -200,6 +200,7 @@ def _config():
         'external_desktops.json': catalog.list_external(),
         'golden_images.json': catalog.list_golden(),
         'boards.json': catalog.list_boards(),
+        'jtag_gateways.json': catalog.list_jtag_gateways(),
         'license_servers.json': catalog.list_license_servers(),
         'usb_devices.json': catalog.list_usb_devices(),
         'departments.json': catalog.list_departments(),

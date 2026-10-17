@@ -214,6 +214,7 @@
     "pegaprox/vlab/artifacts.py",
     "pegaprox/vlab/ci.py",
     "pegaprox/vlab/accel_bookings.py",
+    "pegaprox/vlab/jtag_gw.py",
     "pegaprox/vlab/forecast.py",
     "pegaprox/vlab/accounts.py",
     "pegaprox/vlab/catalog.py",
