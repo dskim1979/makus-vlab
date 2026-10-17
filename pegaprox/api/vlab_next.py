@@ -1629,22 +1629,30 @@ def delete_jtag_gateway(gid):
     return jsonify({'success': True})
 
 
-def _jtag_gateway_vm(g):
-    """(mgr, node, raw config) of the gateway VM, or (None, None, (message, status))."""
+def _jtag_err(e):
+    """(message, status, code) -> the JSON answer: {error, code}; the console maps the code to its text."""
+    return jsonify({'error': e[0], 'code': e[2]}), e[1]
+
+
+def _jtag_gateway_vm(g, running=False):
+    """(mgr, node, raw config) of the gateway VM, or (None, None, (message, status, code)).
+    running: the VM must be running too (the guest agent answers only then)."""
     if not g.get('vmid'):
-        return None, None, ('The gateway has no VM id - say which VM it is first', 400)
+        return None, None, ('The gateway has no VM id - say which VM it is first', 400, 'NO_VMID')
     mgr = cluster_managers.get(g['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
-        return None, None, ('Cluster not connected', 503)
+        return None, None, ('Cluster not connected', 503, 'CLUSTER')
     live = core._vm_states(g['cluster_id']).get(int(g['vmid'])) or {}
     if not live:
-        return None, None, (f"VM {g['vmid']} not found on the cluster", 404)
+        return None, None, (f"VM {g['vmid']} not found on the cluster", 404, 'VM_MISSING')
     if (live.get('type') or 'qemu') != 'qemu':
-        return None, None, ('The gateway must be a virtual machine (QEMU) to take USB / PCIe devices', 400)
+        return None, None, ('The gateway must be a virtual machine (QEMU) to take USB / PCIe devices', 400, 'NOT_QEMU')
+    if running and live.get('status') != 'running':
+        return None, None, (f"The gateway VM {g['vmid']} is {live.get('status') or 'not running'} - start it to read its cables", 409, 'VM_STOPPED')
     node = live.get('node')
     r = mgr.get_vm_config(node, int(g['vmid']), 'qemu')
     if not isinstance(r, dict) or not r.get('success'):
-        return None, None, (f"Could not read the VM config: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+        return None, None, (f"Could not read the VM config: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502, 'CONFIG')
     return mgr, node, ((r.get('config') or {}).get('raw') or {})
 
 
@@ -1674,7 +1682,7 @@ def add_gateway_passthrough(gid):
         return _bad(f'{value} is passed through to this gateway already', 409)
     mgr, node, raw = _jtag_gateway_vm(g)
     if not mgr:
-        return _bad(raw[0], raw[1])
+        return _jtag_err(raw)
     slot = jtag_gw.free_slot(raw, kind)
     if not slot:
         return _bad('No free slot left on the VM - pass a whole PCIe USB controller, or split the cables over another gateway', 409)
@@ -1698,7 +1706,7 @@ def remove_gateway_passthrough(gid, slot):
         return _bad('MOAVI Desk did not put that slot on the gateway', 404)
     mgr, node, raw = _jtag_gateway_vm(g)
     if not mgr:
-        return _bad(raw[0], raw[1])
+        return _jtag_err(raw)
     if slot in raw:
         r = mgr.update_vm_config(node, int(g['vmid']), 'qemu', {'delete': slot})
         if not isinstance(r, dict) or not r.get('success'):
@@ -1717,16 +1725,20 @@ def discover_gateway_cables(gid):
     g = _jtag_gateway_or_404(gid)
     if not g:
         return _bad('JTAG gateway not found', 404)
-    mgr, node, raw = _jtag_gateway_vm(g)
+    mgr, node, raw = _jtag_gateway_vm(g, running=True)
     if not mgr:
-        return _bad(raw[0], raw[1])
+        catalog.set_jtag_gateway_cables_error(gid, raw[2], raw[0])
+        return _jtag_err(raw)
     code, out, err, why = _agent_run(mgr, node, int(g['vmid']), jtag_gw.LIST_CABLES, wait=15)
     if why or code is None:
-        return _bad(f"The gateway's guest agent did not answer ({why or 'timed out'}) - install qemu-guest-agent in it", 502)
-    if code != 0:
-        return _bad(f'Reading the cables failed: {(err or out)[:200]}', 502)
-    g = catalog.set_jtag_gateway_cables(gid, jtag_gw.parse_cables(out))
-    return jsonify({'gateway': _jtag_gateway_view(g)})
+        e = (f"The gateway's guest agent did not answer ({why or 'timed out'}) - install qemu-guest-agent in it and set agent: 1", 502, 'AGENT')
+    elif code != 0:
+        e = (f'Reading the cables failed: {(err or out)[:200]}', 502, 'READ_FAILED')
+    else:
+        g = catalog.set_jtag_gateway_cables(gid, jtag_gw.parse_cables(out))
+        return jsonify({'gateway': _jtag_gateway_view(g)})
+    catalog.set_jtag_gateway_cables_error(gid, e[2], e[0])
+    return _jtag_err(e)
 
 
 def _check_jtag_gateway(g, states):

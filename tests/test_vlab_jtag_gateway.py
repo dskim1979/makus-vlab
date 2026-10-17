@@ -93,8 +93,24 @@ def test_cables_are_discovered_and_mapped_to_boards(gw, monkeypatch):
     assert r.status_code == 200, r.get_json()
     cables = r.get_json()['gateway']['cables']
     assert cables[0]['serial'] == '210251A08870' and cables[0]['board'] == 'ZCU102 #3' and cables[1]['board'] is None
+    # a failed read says why with a code, and keeps the cables read before (stale, with their time)
     monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: (None, '', '', 'guest agent is not running'))
-    assert admin.post(f"/api/vlab/admin/jtag-gateways/{g['id']}/discover").status_code == 502
+    r = admin.post(f"/api/vlab/admin/jtag-gateways/{g['id']}/discover")
+    assert r.status_code == 502 and r.get_json()['code'] == 'AGENT'
+    gv = admin.get('/api/vlab/admin/jtag-gateways').get_json()['gateways'][0]
+    assert gv['cables_error_code'] == 'AGENT' and gv['cables_error_at'] and len(gv['cables']) == 4 and gv['cables_at']
+    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: (1, '', 'sh: cannot open', ''))
+    r = admin.post(f"/api/vlab/admin/jtag-gateways/{g['id']}/discover")
+    assert r.status_code == 502 and r.get_json()['code'] == 'READ_FAILED' and 'cannot open' in r.get_json()['error']
+    states[700]['status'] = 'stopped'
+    ran = []
+    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: ran.append(1) or (0, LISTING, '', ''))
+    r = admin.post(f"/api/vlab/admin/jtag-gateways/{g['id']}/discover")
+    assert r.status_code == 409 and r.get_json()['code'] == 'VM_STOPPED' and not ran          # the agent is not asked
+    states[700]['status'] = 'running'
+    assert admin.post(f"/api/vlab/admin/jtag-gateways/{g['id']}/discover").status_code == 200
+    gv = admin.get('/api/vlab/admin/jtag-gateways').get_json()['gateways'][0]
+    assert gv['cables_error_code'] == '' and gv['cables_error_at'] is None                      # a good read clears it
     assert admin.delete(f"/api/vlab/admin/jtag-gateways/{g['id']}").status_code == 409                   # a board uses it
     assert admin.delete(f"/api/vlab/admin/boards/{b['id']}").status_code == 200
     assert admin.delete(f"/api/vlab/admin/jtag-gateways/{g['id']}").status_code == 200

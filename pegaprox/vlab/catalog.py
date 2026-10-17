@@ -157,6 +157,9 @@ _SCHEMA = (
         passthrough TEXT NOT NULL DEFAULT '[]',
         cables TEXT NOT NULL DEFAULT '[]',
         cables_at TEXT,
+        cables_error TEXT NOT NULL DEFAULT '',
+        cables_error_code TEXT NOT NULL DEFAULT '',
+        cables_error_at TEXT,
         notes TEXT NOT NULL DEFAULT '',
         last_check TEXT,
         last_ok INTEGER,
@@ -648,7 +651,15 @@ def set_jtag_gateway_passthrough(gid, items):
 
 
 def set_jtag_gateway_cables(gid, cables):
-    db().execute('UPDATE vlab_jtag_gateways SET cables = ?, cables_at = ? WHERE id = ?', (json.dumps(cables), now(), gid))
+    db().execute("UPDATE vlab_jtag_gateways SET cables = ?, cables_at = ?, cables_error = '', cables_error_code = '', "
+                 "cables_error_at = NULL WHERE id = ?", (json.dumps(cables), now(), gid))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_cables_error(gid, code, message):
+    """The last cable read failed: keep the cables read before (stale, with their time) and say why."""
+    db().execute('UPDATE vlab_jtag_gateways SET cables_error = ?, cables_error_code = ?, cables_error_at = ? WHERE id = ?',
+                 (message[:300], code, now(), gid))
     return get_jtag_gateway(gid)
 
 
