@@ -439,9 +439,11 @@ def sync_builtin_guacamole():
         if not re.match(r'^[0-9a-f]{32}$', key):
             on = False
     if not on:
-        if row and row['enabled']:
-            db().execute('UPDATE vlab_gateways SET enabled = 0 WHERE id = ?', (BUILTIN_GUAC_ID,))
-        return get_gateway(BUILTIN_GUAC_ID)
+        # the bundled Guacamole is not part of this install (any more): its gateway goes, so it is
+        # not listed in 접속 설정; external desktops that used it lose the gateway (delete_gateway)
+        if row:
+            delete_gateway(BUILTIN_GUAC_ID)
+        return None
     if not row:
         port = os.environ.get('VLAB_HTTPS_PORT', '443')
         db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',

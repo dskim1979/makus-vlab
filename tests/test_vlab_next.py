@@ -541,8 +541,12 @@ def test_bundled_guacamole_registers_itself_and_links_to_the_console_address(env
     url = r.get_json()['url']
     assert url.startswith('https://localhost/guacamole/?data=')   # the address the user came in by, not VLAB_HOSTNAME
     assert _decrypt_guac(url, key)['connections']['측정실 PC']['parameters']['hostname'] == '10.30.5.21'
+    # turned off (Guacamole removed from the install): the gateway is gone, not just disabled, and the
+    # external desktop that used it is left without one
     monkeypatch.setenv('VLAB_GUAC_BUILTIN', '0')
-    assert catalog.sync_builtin_guacamole()['enabled'] == 0
+    assert catalog.sync_builtin_guacamole() is None and catalog.get_gateway(catalog.BUILTIN_GUAC_ID) is None
+    assert all(g['id'] != catalog.BUILTIN_GUAC_ID for g in admin.get('/api/vlab/admin/gateways').get_json()['gateways'])
+    assert catalog.get_external(ext['id'])['gateway_id'] is None
 
 def test_golden_rollout_moves_users_to_the_new_version(env, monkeypatch):
     import pegaprox.api.vlab as core
