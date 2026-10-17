@@ -51,8 +51,12 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 - **SSH(native)**: `ssh ticket-<secret>@<warpgate-host> -p <SSH 리스너 포트>` (비번 입력칸은 아무 값)
 - **RDP**: RDP 사용자 이름 = `ticket-<secret>` (비번 무시). Warpgate RDP 리스너로 접속.
 - **VNC**: VNC 사용자 이름 = `ticket-<secret>`.
-- **HTTP/브라우저**: `https://<warpgate>/?warpgate-target=<대상이름>` + 헤더 `Authorization: Warpgate <secret>`,
-  또는 `?warpgate-ticket=<secret>`. 브라우저 안에서 RDP/SSH 세션을 Warpgate가 직접 그려준다.
+- **HTTP 대상만**: `?warpgate-ticket=<secret>` 또는 헤더 `Authorization: Warpgate <secret>` 로 브라우저가
+  로그인된다. **RDP/SSH 대상의 티켓으로는 웹 세션이 열리지 않고 티켓도 쓰이지 않는다** — 실제 Warpgate
+  v0.29.2로 확인(아래 4-4, Warpgate 자체 테스트 `test_non_http_ticket_opens_no_session`).
+- **브라우저 RDP/SSH (web-desktop/web-ssh)**: Warpgate 웹 UI(`/@warpgate#/`)에 **로그인한 사용자**가
+  대상 목록에서 연다(`POST /@warpgate/api/web-desktop/sessions {target_id}` + 웹소켓). 그래서 엔진의
+  브라우저 링크는 티켓 없는 웹 UI 주소이고, 사용자는 SSO/LDAP으로 로그인한다(비밀번호를 우리가 저장하지 않음).
 
 ### 1-4. 대상(Target) 옵션과 "비밀번호 저장 안 함" 처리
 `TargetOptions`는 `kind`로 구분된다.
@@ -133,15 +137,18 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 - `GET /api/vlab/me/warpgate` 가 `enabled`·`web_rdp_provider`를 주어 포털이 무엇을 보일지 정한다.
 
 ## 4-3. 실(real) Warpgate + Proxmox 클러스터 검증 체크리스트
-우리 작업은 **코드 + 모킹 테스트**뿐이다. 아래는 실제 Warpgate 컨테이너와 Proxmox 클러스터에서
+Warpgate 자체는 4-4의 CI 통합 테스트로 확인했다. 아래는 **실제 Proxmox 클러스터의 데스크톱**으로
 사람이 확인해야 할 항목이다. 전부 통과하기 전에는 기본 경로(Guacamole)를 끄지 않는다.
 
-- [ ] **브라우저 RDP (Warpgate)**: 포털 Warpgate 연결 → 새 탭에서 데스크톱 화면이 뜨고 로그인된다.
+- [ ] **브라우저 RDP (Warpgate)**: Warpgate 웹 UI에 SSO/LDAP으로 로그인 → 목록의 데스크톱을 열면
+      화면이 뜬다(CI에서는 xrdp 컨테이너로 확인).
 - [ ] **네이티브 RDP**: `ticket-<secret>` 사용자 이름으로 Warpgate RDP 포트에 붙어 접속된다
       (interactive_logon: 데스크톱 Windows 로그온 화면, 사용자 계정으로 로그인).
 - [ ] **네이티브 SSH (자기 도구)**: `ssh moavi-<name>`, `scp`, WinSCP, VS Code Remote-SSH가
       `~/.ssh/config` 관리 블록으로 바로 붙고, 공개키로 인증된다(비밀번호 안 물음).
-- [ ] **브라우저 SSH (Warpgate)**: 티켓으로 브라우저 터미널이 열린다.
+- [ ] **브라우저 SSH (Warpgate)**: Warpgate 웹 UI(로그인 사용자)에서 터미널이 열린다(티켓 아님).
+- [ ] **사용자 본인 계정 로그인**: Windows/AD 데스크톱에서 `interactive_logon` + GPO "연결 시 항상
+      암호 묻기"로 로그온 화면이 뜨고 사용자가 자기 AD 계정으로 들어간다(4-4 참조).
 - [ ] **VNC**: (해당 풀이 있으면) VNC 접속이 된다.
 - [ ] **세션 녹화**: 위 세션들이 Warpgate 관리자 녹화 페이지에서 재생된다.
 - [ ] **직접 접속 차단**: 데스크톱 IP로 직접 RDP/SSH/VNC → 막힘(Proxmox 보안 그룹, relay=Warpgate).
@@ -153,6 +160,35 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
 
 통과하면 전환: `web_rdp_provider=warpgate` 로 바꾸고(필요 시) Guacamole 경로를 내린다. 제거 방법과
 되돌리기는 아래 5절.
+
+## 4-4. 실제 Warpgate 통합 테스트 결과 (GitHub Actions)
+워크플로 `.github/workflows/warpgate-integration.yml`(브랜치 claude/warpgate 푸시·수동 실행)이 Warpgate
+v0.29.2 바이너리(sha256 고정)를 unattended-setup으로 띄우고, OpenSSH 컨테이너(Warpgate 클라이언트 키
+신뢰)와 xrdp 데스크톱 컨테이너를 대상으로 `tests/test_warpgate_live.py`를 돌린다. 엔진 코드 그대로
+실제 관리자 API를 쓴다. 첫 통과: https://github.com/dskim1979/makus-vlab/actions/runs/39008519880
+
+| 확인 | 결과 |
+|---|---|
+| 관리자 API 연결(토큰) | 통과 |
+| 대상 동기화 생성·수정·제거 | 통과 (매핑이 없을 때 409 → 기존 대상 인수, 실제 테스트에서 발견해 고침) |
+| 사용자·공개키 등록 | 통과 (사용자-역할 연결 API가 JSON 본문을 요구 — 실제 테스트에서 발견해 고침) |
+| 1회용 티켓(그 사용자+그 대상) | 통과 |
+| Warpgate 경유 SSH — 티켓 | 통과, 두 번째 사용은 거부(1회용) |
+| Warpgate 경유 SSH — 등록한 공개키 | 통과 |
+| scp(파일 전송) | 통과 |
+| RDP 티켓 로그인 → 데스크톱 | 통과 (Warpgate 로그: `RDP target state=Connected`, 녹화됨) |
+| 브라우저 RDP(web-desktop, 로그인 사용자) | 통과 (세션 생성·스트림·녹화) |
+| 브라우저 링크 | 웹 UI 응답. **티켓으로는 RDP/SSH 웹 세션 불가**(Warpgate 설계) — 링크에 티켓을 넣지 않음 |
+
+**누구 계정으로 데스크톱에 들어가나**: Warpgate는 대상마다 하나의 접속 자격(RDP는 사용자명·비밀번호,
+SSH는 Warpgate 자체 키 + 대상 사용자명)으로 대상에 붙는다. 사용자 본인 계정으로 들어가려면
+- **RDP(Windows/AD)**: `interactive_logon=true`로 자동 로그온을 끄고 데스크톱 GPO "연결 시 항상 암호
+  묻기"를 켜면, 대상 계정(NLA 서비스 계정)은 네트워크 수준 인증에만 쓰이고 사용자가 로그온 화면에서
+  자기 AD 계정을 입력한다. 우리는 사용자 비밀번호를 저장하지 않는다. 이 화면 흐름은 실제 Windows/AD
+  데스크톱에서 확인해야 한다(CI의 xrdp는 NLA가 없어 같은 경로가 아님).
+- **SSH**: 지금 대상 사용자명은 고정(`moavi`). 전용 풀은 데스크톱마다 사용자가 하나이므로, 대상
+  사용자명을 배정된 사용자의 디렉터리 계정으로 하고 Warpgate 클라이언트 공개키를 그 계정(AD/sssd의
+  authorized keys 또는 게스트 에이전트)으로 신뢰시키면 본인 계정으로 들어간다 — 후속 작업.
 
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
