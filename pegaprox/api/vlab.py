@@ -915,7 +915,7 @@ def cluster_storage(cluster_id):
     return jsonify({'storage': out})
 
 
-# --- admin: accelerators (가속 자원 > GPU·가속 카드 재고, vGPU 프로필, 리소스 매핑) -------
+# --- admin: accelerators (GPU · FPGA · NPU > GPU·가속 카드 재고, vGPU 프로필, 리소스 매핑) -------
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/accelerators', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
@@ -1740,7 +1740,7 @@ def policy_tick(now=None):
     return done
 
 
-# --- admin: card loans (가속 자원 > 카드 대여 현황) ----------------------------------
+# --- admin: card loans (GPU · FPGA · NPU > 카드 대여 현황) ----------------------------------
 # A loan puts one card of a PCI mapping on a user's desktop until ends_at, in vLAB's loan
 # slot (accel.LEASE_SLOT); PVE picks a free card of the mapping when the VM starts. A
 # mapping lends at most as many cards at once as it has. Expired loans are returned by

@@ -15,7 +15,7 @@ A download goes through the pool's admin mount on the engine host when it is the
 through the build VM's guest agent (small files, datasets.AGENT_MAX_BYTES). The pool's export
 rule (연구 데이터 > 반출 · 업로드 규칙) applies, as to any file leaving the NAS.
 
-Settings are a server setting: a default and per build farm pool (가속 자원 > 빌드 팜 > 결과물).
+Settings are a server setting: a default and per build farm pool (GPU · FPGA · NPU > 빌드 팜 > 결과물).
 The routes are in pegaprox/api/vlab_builds.py.
 """
 import json

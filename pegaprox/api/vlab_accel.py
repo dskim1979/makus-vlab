@@ -1,4 +1,4 @@
-"""MOAVI Desk: 가속 자원 > 카드 · 패스스루 점검 (pegaprox/vlab/accel_checks.py).
+"""MOAVI Desk: GPU · FPGA · NPU > 카드 · 패스스루 점검 (pegaprox/vlab/accel_checks.py).
 
   GET  /api/vlab/admin/accel/checks                       every finding                    vlab.accel.manage
   GET  /api/vlab/admin/desktops/<desktop_id>/accel-checks the findings of one desktop     vlab.accel.manage

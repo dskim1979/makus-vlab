@@ -219,7 +219,7 @@ def book():
         from pegaprox.api.vlab_notices import admins
         admins(f"카드 · 보드 예약 승인 요청: {res[0]}",
                f"{me} 님이 {res[0]} 를 {row['start_at'].replace('T', ' ')} ~ {row['end_at'][11:]} 에 {desk['name']} 로 예약했습니다. "
-               f"목적: {row['purpose'] or '-'}\n가속 자원 > 카드 대여 > 예약에서 승인하거나 거절하세요.",
+               f"목적: {row['purpose'] or '-'}\nGPU · FPGA · NPU > 카드 대여 > 예약에서 승인하거나 거절하세요.",
                {'kind': 'accel_booking_requested', 'user': me, 'resource': res[0]})
     return jsonify({'booking': _view(row, mine=True)}), 201
 

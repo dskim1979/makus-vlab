@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk - licence seats (가속 자원 > 라이선스 서버 > 좌석 사용량, 운영 > 사용률 보고서 > 라이선스).
+MOAVI Desk - licence seats (GPU · FPGA · NPU › 라이선스 서버 › 사용 현황, 운영 > 사용률 보고서 > 라이선스).
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).
 
@@ -154,13 +154,13 @@ def _alerts(s, features, denied_new):
     for e in events:
         f, n = e['feature'], f"{e['in_use']}/{e['total']}"
         if e['level'] == 'ok':
-            title = f"라이선스 좌석 여유: {s['name']} {f}"
+            title = f"라이선스 여유: {s['name']} {f}"
             text = f"{s['name']} 의 {f} 사용이 {n} ({e['pct']}%) 로 기준 {e['threshold']}% 아래로 내려왔습니다."
         elif e['level'] == 'full':
-            title = f"라이선스 좌석 없음: {s['name']} {f}"
-            text = f"{s['name']} 의 {f} 좌석이 모두 사용 중입니다 ({n}). 더 받으려는 사용자는 거부됩니다."
+            title = f"라이선스 없음: {s['name']} {f}"
+            text = f"{s['name']} 의 {f} 라이선스가 모두 사용 중입니다 ({n}). 더 받으려는 사용자는 거부됩니다."
         else:
-            title = f"라이선스 좌석 {e['pct']}%: {s['name']} {f}"
+            title = f"라이선스 사용 {e['pct']}%: {s['name']} {f}"
             text = f"{s['name']} 의 {f} 사용이 {n} ({e['pct']}%) 로 기준 {e['threshold']}% 를 넘었습니다."
         nxt._alert(title, text, {'kind': f"license_seats_{e['level']}", 'server': s['name'], 'host': s['host'], 'feature': f,
                                  'in_use': e['in_use'], 'total': e['total'], 'severity': 'info' if e['level'] == 'ok' else 'warning'},

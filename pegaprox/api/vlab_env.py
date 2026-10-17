@@ -1,5 +1,5 @@
 """MOAVI Desk: 가상머신 > 환경 카탈로그 (pegaprox/vlab/envcat.py) and NVIDIA MIG on the nodes
-(가속 자원 > GPU · 가속 카드 재고, pegaprox/vlab/mig.py).
+(GPU · FPGA · NPU > GPU · 가속 카드 재고, pegaprox/vlab/mig.py).
 
   GET  /api/vlab/admin/environments                         golden images with their environment     vlab.pool.view
   PUT  /api/vlab/admin/golden-images/<id>/environment       {kind, components, cards, description, note}  vlab.pool.manage

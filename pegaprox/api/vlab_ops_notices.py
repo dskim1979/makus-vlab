@@ -170,8 +170,8 @@ def license_denied(server, count):
             f.add(r['user'])
     detail = '\n'.join(f"- {f}: {', '.join(sorted(u)[:8]) or '-'}" for f, u in sorted(feats.items()))
     title = f"라이선스 거부 {count}건: {server['name']}"
-    text = (f"{server['name']} ({server.get('host', '')}) 가 라이선스 요청 {count}건을 거부했습니다(좌석 부족 등).\n"
-            + (f"기능 · 사용자:\n{detail}\n" if detail else '') + "가속 자원 > 라이선스 서버 > 좌석에서 쓰는 사람과 추이를 보세요.")
+    text = (f"{server['name']} ({server.get('host', '')}) 가 라이선스 요청 {count}건을 거부했습니다(라이선스 부족 등).\n"
+            + (f"기능 · 사용자:\n{detail}\n" if detail else '') + "GPU · FPGA · NPU › 라이선스 서버 › 사용 현황에서 쓰는 사람과 추이를 보세요.")
     _send(title, text, {'kind': 'license_denied', 'server': server['name'], 'count': count, 'severity': 'warning'}, s)
 
 

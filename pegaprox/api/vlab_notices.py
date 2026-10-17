@@ -187,7 +187,7 @@ def loan_returned(lease, by='system'):
 def loan_return_failed(lease, err):
     admins(f"대여 자동 반납 실패: {_card(lease)}",
            f"{lease['username']} 님의 {_card(lease)} (qemu/{lease.get('vmid')}) 를 대여 종료 시각에 반납하지 못했습니다: {err}. "
-           "가속 자원 > 카드 대여 현황에서 확인하세요. 매 분 다시 시도합니다.",
+           "GPU · FPGA · NPU > 카드 대여 현황에서 확인하세요. 매 분 다시 시도합니다.",
            {'kind': 'loan_return_failed', 'user': lease['username'], 'card': lease.get('resource_name'), 'severity': 'warning'})
 
 
@@ -388,7 +388,7 @@ def queue_tick(at=None):
         lines = [f"- {j['name']} ({j['username']}, GPU {j['gpus']}장): {rsch.REASONS.get(j.get('wait_reason') or '', j.get('wait_reason') or '-')}"
                  for j in late[:20]]
         admins(f"GPU 작업이 {hours}시간 넘게 대기 중 ({len(late)}건)",
-               "다음 GPU 작업이 오래 기다리고 있습니다. 가속 자원 > GPU 작업 큐에서 이유를 확인하세요.\n" + '\n'.join(lines),
+               "다음 GPU 작업이 오래 기다리고 있습니다. GPU · FPGA · NPU > GPU 작업 큐에서 이유를 확인하세요.\n" + '\n'.join(lines),
                {'kind': 'gpu_queue_late', 'jobs': len(late), 'severity': 'warning'})
     return len(late)
 

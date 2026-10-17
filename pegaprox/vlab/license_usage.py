@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk - licence seats (라이선스 좌석 사용량): who holds the seats of a FlexLM / FlexNet
+MOAVI Desk - licence seats (라이선스 사용량): who holds the seats of a FlexLM / FlexNet
 licence server (Vivado/Vitis, Quartus, Synopsys, Cadence, ...), every 5 minutes.
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).

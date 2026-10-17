@@ -61,7 +61,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_env import bp as vlab_env_bp  # MOAVI Desk: 환경 카탈로그 · NVIDIA MIG
     from pegaprox.api.vlab_enroll import bp as vlab_enroll_bp  # MOAVI Desk: LAB 단말 대량 등록 (등록 코드)
     from pegaprox.api.vlab_reserve import bp as vlab_reserve_bp  # MOAVI Desk: LAB 예약
-    from pegaprox.api.vlab_license import bp as vlab_license_bp  # MOAVI Desk: 라이선스 좌석 사용량 · 보고서
+    from pegaprox.api.vlab_license import bp as vlab_license_bp  # MOAVI Desk: 라이선스 사용량 · 보고서
     from pegaprox.api.vlab_data import bp as vlab_data_bp  # MOAVI Desk: 연구 데이터 (데이터셋, 파일 전송, 반출 통제)
     from pegaprox.api.vlab_accounts import bp as vlab_accounts_bp  # MOAVI Desk: 비밀번호 찾기·메일 인증·일괄 등록·사용 기한·약관
     from pegaprox.api.vlab_work import bp as vlab_work_bp  # MOAVI Desk: 장시간 작업 보호 · GPU/NPU 사용률 · 유휴 카드 회수

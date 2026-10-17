@@ -1,5 +1,5 @@
 """MOAVI Desk: the research environment catalogue (가상머신 > 환경 카탈로그) and NVIDIA MIG on the
-nodes (가속 자원 > GPU · 가속 카드 재고) - pegaprox/vlab/envcat.py, pegaprox/vlab/mig.py,
+nodes (GPU · FPGA · NPU > GPU · 가속 카드 재고) - pegaprox/vlab/envcat.py, pegaprox/vlab/mig.py,
 pegaprox/api/vlab_env.py, and the MIG findings of pegaprox/vlab/accel_checks.py.
 
 No real MIG card here: the node's nvidia-smi output below is what an A100 80GB in MIG mode with

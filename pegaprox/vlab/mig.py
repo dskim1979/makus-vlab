@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk - NVIDIA MIG (Multi-Instance GPU) on the nodes (가속 자원 > GPU · 가속 카드 재고).
+MOAVI Desk - NVIDIA MIG (Multi-Instance GPU) on the nodes (GPU · FPGA · NPU > GPU · 가속 카드 재고).
 
 A100 / A30 / H100 / H200 (and Blackwell B200) cards split into up to seven GPU instances, each
 with its own memory and SMs (profiles '1g.10gb', '3g.40gb', ...). What the engine reads and does:
