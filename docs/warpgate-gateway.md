@@ -135,6 +135,13 @@ Warpgate 프로토콜 테스트가 "티켓을 username으로 제시하고 **pass
   동작하고, Warpgate 연결은 **별도 메뉴**로 추가되어 둘 다 쓸 수 있다. → 브라우저 RDP는 항상
   {Guacamole, Warpgate} 중 적어도 하나가 서비스하며, 둘 다 꺼지는 상태가 없다.
 - `GET /api/vlab/me/warpgate` 가 `enabled`·`web_rdp_provider`를 주어 포털이 무엇을 보일지 정한다.
+- **전용 앱·mstsc(.rdp)**: 설정 `rdp_via_warpgate`(기본 꺼짐). 켜면 `POST /api/vlab/desktops/<id>/connect
+  {protocol:rdp}` 의 `.rdp`가 데스크톱 주소 대신 Warpgate RDP 리스너를 향하고, 사용자 이름에 그 사용자·
+  데스크톱 전용 1회용 티켓(`ticket-<secret>`)이 들어간다(비밀번호 없음, 응답에 `via: warpgate`). 풀 정책의
+  리디렉션·네트워크 자동 감지 줄은 그대로, `enablecredsspsupport:i:0`(Warpgate RDP는 NLA 없는 TLS),
+  `prompt for credentials:i:0`, 자동 재연결 끔(티켓 1회용). 대상은 `interactive_logon` 이라 데스크톱
+  로그온 화면에서 사용자가 본인(AD) 계정을 입력한다. Warpgate 오류 시 그 접속만 직접 `.rdp`로 돌아간다.
+  클라이언트는 파일을 그대로 mstsc로 열고 "Warpgate 경유"를 안내한다.
 
 ## 4-3. 실(real) Warpgate + Proxmox 클러스터 검증 체크리스트
 Warpgate 자체는 4-4의 CI 통합 테스트로 확인했다. 아래는 **실제 Proxmox 클러스터의 데스크톱**으로
@@ -178,6 +185,7 @@ v0.29.2 바이너리(sha256 고정)를 unattended-setup으로 띄우고, OpenSSH
 | scp(파일 전송) | 통과 |
 | RDP 티켓 로그인 → 데스크톱 | 통과 (Warpgate 로그: `RDP target state=Connected`, 녹화됨) |
 | 브라우저 RDP(web-desktop, 로그인 사용자) | 통과 (세션 생성·스트림·녹화) |
+| 엔진이 만든 `.rdp`(앱·mstsc 경로)로 접속 | 통과 (xfreerdp가 그 파일 그대로 → `RDP target state=Connected`, 녹화) — run 39010002125 |
 | 브라우저 링크 | 웹 UI 응답. **티켓으로는 RDP/SSH 웹 세션 불가**(Warpgate 설계) — 링크에 티켓을 넣지 않음 |
 
 **누구 계정으로 데스크톱에 들어가나**: Warpgate는 대상마다 하나의 접속 자격(RDP는 사용자명·비밀번호,
