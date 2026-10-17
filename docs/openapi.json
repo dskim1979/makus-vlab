@@ -48471,7 +48471,7 @@
             "description": "Not authenticated"
           }
         },
-        "summary": "The portal card's picture of a running desktop: the console tile's grab (screendump, one shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache. The assigned user (vlab.desk) or an admin with vlab.pool.view. 204 when there is no picture (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo; with X-Screen: off the display is there but black and the card says so. It is the VM's console, so a Windows desktop used over RDP shows its lock screen.",
+        "summary": "The portal card's picture of a running desktop: the console tile's grab (screendump, one shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache. The assigned user (vlab.desk) or an admin with vlab.pool.view; in a pool whose desktops pass between users only the user on it now (assigned or in a session). 204 when there is no picture (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo; with X-Screen: off the display is there but black and the card says so. It is the VM's console, so a Windows desktop used over RDP shows its lock screen.",
         "parameters": [
           {
             "name": "desktop_id",
