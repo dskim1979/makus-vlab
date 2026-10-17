@@ -105,7 +105,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 기관 AD 가 없는 곳에서도 **포털 계정 = 데스크톱 계정** 이 되게 하는 선택 기능입니다. 기관 AD 가 있으면 끄고 그 AD 를
 **도메인(AD/LDAP)** 설정에 넣습니다 — 그 설정이 켜져 있으면 내장 DC 는 로그인에 쓰이지 않습니다.
 
-- 설치: 콘솔 저장소 `deploy/` 의 `vlab-directory` 컨테이너(Samba 4.17 AD DC, 내부 DNS, RFC2307). `.env` 에
+- 설치: 콘솔 저장소 `deploy/` 의 `vlab-directory` 컨테이너(Samba 4.17 AD DC, 내부 DNS). `.env` 에
   `VLAB_DIRECTORY=1` 과 `VLAB_DIRECTORY_IP`(데스크톱 망에서의 주소)를 넣고 `docker compose up -d`. 첫 시작에 도메인을 만들고
   `OU=MOAVI` 아래에 Users · Groups · Desktops · Service, 엔진 계정 `vlab-svc`(OU=MOAVI 만 관리), 가입 계정 `vlab-join`(OU=Desktops 에
   컴퓨터만 만듦)을 둡니다. 자세한 것은 `deploy/README.md` "내장 디렉터리".

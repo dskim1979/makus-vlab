@@ -435,7 +435,8 @@ def test_linux_join_failure_and_the_pool_list(desk_env):
     assert j['state'] == 'failed' and j['code'] == 'JOIN_FAILED' and 'access denied' in j['detail']
     script = [d for u, d in g.runs if u.endswith('/agent/exec')][-1]['command'][-1]
     assert 'realm join --user="$JOINER"' in script and 'PW=$(cat)' in script and 'realm permit -g moavi-users' in script
-    assert 'use_fully_qualified_names = False' in script
+    assert 'use_fully_qualified_names = False' in script and '--automatic-id-mapping=yes' in script
+    assert 'ldap_id_mapping = True' in script and 'ldap_idmap_range_size = 200000' in script
     g.code, g.out = 0, 'domain=moavi.lan\ncomputer=md-301\njoined=1\n'
     out = admin.post(f"/api/vlab/admin/pools/{pool['id']}/domain-join", json={}).get_json()
     assert out['joined'] == 2 and out['remaining'] == 0

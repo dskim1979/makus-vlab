@@ -11,7 +11,8 @@ AD 가 있는 기관은 쓰지 않는다(그 AD 를 그대로 쓴다).
 
 | 항목 | 결정 | 이유 |
 |---|---|---|
-| 디렉터리 | Samba 4.17 AD DC (Debian 12), 내부 DNS, RFC2307 | Windows 도메인 가입 · GPO · Kerberos 가 그대로 되고, Linux 는 sssd/realmd 표준 경로. RFC2307 로 uid/gid 가 모든 VM 에서 같다(NFS 소유자) |
+| 디렉터리 | Samba 4.17 AD DC (Debian 12), 내부 DNS — 디렉터리는 이것 하나(OpenLDAP · LLDAP · 별도 SSO 서버 없음) | Windows 도메인 가입 · RDP 로그인 · Kerberos SSO 가 그대로 되고, Linux 는 realm join + SSSD(로그인 · SSH · AD 그룹 권한) |
+| Linux uid/gid | SSSD id 매핑(`ldap_id_mapping = True`, SID 에서 계산, 범위는 SSSD 기본값을 sssd.conf 에 고정) | 모든 데스크톱에서 같은 사용자가 같은 uid/gid — 공유 저장소(NFS) 폴더 소유자가 VM 마다 같다. 엔진은 RFC2307 uidNumber 를 쓰지 않는다 |
 | 켜기 | `.env` `VLAB_DIRECTORY=1` (기본 꺼짐), compose `replicas` | 내장 Guacamole 과 같은 방식 |
 | 주인 | **포털이 정하고 디렉터리가 따른다** | 사용자 · 부서 · 사용 기한 · 승인은 이미 포털에 있다. DC 는 인증과 그룹만 |
 | 엔진 권한 | `vlab-svc` 는 `OU=MOAVI` 전체 권한만, `vlab-join` 은 `OU=Desktops` 의 컴퓨터만 | 도메인 관리자 권한을 엔진에 두지 않는다 |
@@ -70,7 +71,8 @@ AD 가 있는 기관은 쓰지 않는다(그 AD 를 그대로 쓴다).
 - QEMU 게스트 에이전트, 요청 안에서 실행(백그라운드 스레드 없음). 비밀번호는 에이전트 stdin 으로만.
 - Windows: DNS 를 DC 로(설정) → SRV 확인 → `Add-Computer -OUPath OU=Desktops -NewName MD-{vmid}` → `moavi-users` 를 원격 데스크톱 사용자에 → (선택) 15초 뒤 재시작.
   **템플릿은 sysprep /generalize 필수**.
-- Linux: `realm join --computer-ou`, sssd 짧은 이름 · 홈 폴더, `realm permit -g moavi-users`. 템플릿에 realmd · sssd · adcli · mkhomedir.
+- Linux: `realm join --computer-ou --automatic-id-mapping=yes`, sssd 짧은 이름 · 홈 폴더 · id 매핑 범위 고정, `realm permit -g moavi-users`.
+  가입한 데스크톱의 사용자는 `/etc/passwd` 에 없으므로 공유 저장소 확인의 LOCAL_ACCOUNT 경고가 나오지 않고, 엔진이 기록하는 uid/gid(`vlab_storage_ids`)가 모든 VM 에서 같다. 템플릿에 realmd · sssd · adcli · mkhomedir.
 - 상태는 데스크톱마다 `vlab_directory_joins`(joined / failed / other / not_joined / pending, 코드, 컴퓨터 이름). 가입한 데스크톱의 RDP 파일은 `도메인\아이디`.
 
 ## 이중화
@@ -85,5 +87,5 @@ AD 가 있는 기관은 쓰지 않는다(그 AD 를 그대로 쓴다).
 - DC 컨테이너의 첫 시작(프로비저닝, `dsacl` 위임, `user.NTACL` xattr, `samba_dnsupdate --current-ip`), NAT 로 게시한 포트로 Windows 가입과 Kerberos 로그인.
 - 엔진 → DC LDAPS: 인증서 확인(별칭 = 인증서 이름), `unicodePwd` 설정, `vlab-svc` 위임으로 계정 · 그룹 · `vlab-join` 비밀번호 설정.
 - Windows 게스트 에이전트의 stdin 전달(`[Console]::In`), `Add-Computer -NewName`, 재시작 뒤 `MOAVI\아이디` RDP · Guacamole 로그인.
-- Linux `realm join` 의 stdin 비밀번호, sssd 설정, NFS 소유자(RFC2307 uid).
+- Linux `realm join` 의 stdin 비밀번호, sssd 설정(id 매핑), 두 VM 에서 `id 아이디` 가 같은지, 공유 저장소 확인에서 LOCAL_ACCOUNT 경고가 사라지는지.
 - 두 번째 DC 합류와 `drs showrepl`, 첫 DC 정지 중 로그인.

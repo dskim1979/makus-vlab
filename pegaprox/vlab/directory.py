@@ -1157,13 +1157,18 @@ def linux_join_script(name):
         'fi',
         'realm discover "$REALM" >/dev/null 2>&1 || { echo "no DC found for $REALM in DNS" >&2; exit 22; }',
         '[ "$(hostname -f 2>/dev/null)" = "$HOST" ] || hostnamectl set-hostname "$HOST" || exit 25',
-        'printf %s "$PW" | realm join --user="$JOINER" --computer-ou="$OU" "$REALM" >/tmp/.moavi-join 2>&1 '
-        '|| { cat /tmp/.moavi-join >&2; rm -f /tmp/.moavi-join; exit 23; }',
+        # SSSD id mapping from the account's SID: the same uid / gid on every desktop (the NAS
+        # folders and their owners, pegaprox/vlab/nas.py); the ranges are SSSD's defaults, pinned
+        'printf %s "$PW" | realm join --user="$JOINER" --computer-ou="$OU" --automatic-id-mapping=yes "$REALM" '
+        '>/tmp/.moavi-join 2>&1 || { cat /tmp/.moavi-join >&2; rm -f /tmp/.moavi-join; exit 23; }',
         'rm -f /tmp/.moavi-join',
         'F=/etc/sssd/sssd.conf',
         'if [ -f "$F" ]; then',
-        '  sed -i "s/^use_fully_qualified_names.*/use_fully_qualified_names = False/; s|^fallback_homedir.*|fallback_homedir = /home/%u|" "$F"',
-        '  grep -q "^use_fully_qualified_names" "$F" || sed -i "/^\\[domain\\//a use_fully_qualified_names = False" "$F"',
+        '  for KV in "use_fully_qualified_names = False" "fallback_homedir = /home/%u" "ldap_id_mapping = True" '
+        '"ldap_idmap_range_min = 200000" "ldap_idmap_range_max = 2000200000" "ldap_idmap_range_size = 200000"; do',
+        '    K=${KV%% =*}; sed -i "/^$K[[:space:]]*=/d" "$F"; sed -i "/^\\[domain\\//a $KV" "$F"',
+        '  done',
+        '  command -v sss_cache >/dev/null 2>&1 && sss_cache -E >/dev/null 2>&1',
         '  systemctl restart sssd >/dev/null 2>&1 || true',
         'fi',
         'command -v pam-auth-update >/dev/null 2>&1 && pam-auth-update --enable mkhomedir >/dev/null 2>&1',
