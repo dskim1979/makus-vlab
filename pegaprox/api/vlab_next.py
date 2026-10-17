@@ -4546,6 +4546,18 @@ def _guest_os(mgr, node, vmid):
     return 'windows' if str(info.get('id') or '').lower().startswith('mswindows') else 'linux'
 
 
+# RHEL / Rocky / Alma ship qemu-guest-agent with guest-exec blocked (/etc/sysconfig/qemu-ga
+# --block-rpcs); every engine step that runs something inside the desktop then fails with this
+AGENT_EXEC_DISABLED_TEXT = ('이 데스크톱의 게스트 에이전트가 명령 실행(guest-exec)을 막고 있습니다. '
+                            '템플릿의 qemu-guest-agent에서 guest-exec를 허용하세요.')
+
+
+def agent_exec_disabled(error_text):
+    """Is this guest agent error "guest-exec is blocked by the agent's own config"?"""
+    t = str(error_text or '').lower()
+    return 'guest-exec' in t and ('disabled' in t or 'not allowed' in t)
+
+
 def _agent_run(mgr, node, vmid, command, stdin=None, wait=STORAGE_WAIT):
     """Run a command through the guest agent and wait up to `wait` seconds.
     (exit code or None while it runs, stdout, stderr, error text)."""

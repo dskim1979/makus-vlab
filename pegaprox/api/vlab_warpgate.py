@@ -259,6 +259,9 @@ def prepare_ssh_login(desk, mgr, node, login, cfg, wait=20):
         return True, '', ''
     if code == 3 or 'ssh-user=missing' in (out or ''):
         return False, 'SSH_NO_ACCOUNT', f"no account '{login}'"
+    from pegaprox.api.vlab_next import agent_exec_disabled
+    if agent_exec_disabled(e):
+        return False, 'AGENT_EXEC_DISABLED', e
     return False, 'SSH_KEY_FAILED', e or f"exit {code}: {(err or out or '').strip()[:200]}"
 
 
@@ -291,6 +294,9 @@ def prepare_windows_nla(desk, mgr, node, wait=25):
         log_audit('system', 'vlab.warpgate.nla', f"{desk['name']}: RDP NLA service account {wg.NLA_USER} set", '')
         return True
     # Windows' own words (the script asks for UTF-8 output); the password never echoed back
+    from pegaprox.api.vlab_next import agent_exec_disabled
+    if agent_exec_disabled(e):
+        e = f'{e} - the guest agent blocks guest-exec (allow it in the template)'
     detail = e or ' '.join(x for x in ((out or '').strip()[:80], (err or '').replace(pw, '***').strip()[:300]) if x)
     logging.warning(f"[VLAB] Warpgate NLA account on {desk.get('name')} not set (exit {code}): {detail}")
     return False
@@ -484,6 +490,9 @@ def my_desktop_warpgate(desktop_id):
             logging.warning(f"[VLAB] Warpgate SSH to {desk.get('name')} as {ssh_user}: {detail}")
             if code == 'SSH_NO_ACCOUNT':
                 return jsonify({'error': SSH_NO_ACCOUNT_TEXT.format(ssh_user), 'code': code}), 409
+            if code == 'AGENT_EXEC_DISABLED':
+                from pegaprox.api.vlab_next import AGENT_EXEC_DISABLED_TEXT
+                return jsonify({'error': AGENT_EXEC_DISABLED_TEXT, 'code': code}), 409
             return jsonify({'error': '데스크톱에 SSH 키를 넣지 못했습니다. 게스트 에이전트를 확인하세요.', 'code': code}), 502
     try:
         role_id = wg.ensure_role(cfg)

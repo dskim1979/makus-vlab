@@ -567,11 +567,24 @@ def ssh_login_name(username):
 
 
 def own_public_keys(cfg):
-    """Warpgate's own SSH client keys as authorized_keys lines (GET /ssh/own-keys)."""
+    """Warpgate's own SSH client keys as authorized_keys lines (GET /ssh/own-keys).
+    Warpgate 0.29.2 answers {id, label, kind, public_key, is_default} with public_key already an
+    OpenSSH line ("ssh-ed25519 AAAA..."; found live on 192.168.0.9); kind + public_key_base64 is
+    taken too, for other versions."""
     out = []
     for k in _call(cfg, 'GET', '/ssh/own-keys') or []:
-        if isinstance(k, dict) and k.get('kind') and k.get('public_key_base64'):
-            out.append(f"{k['kind']} {k['public_key_base64']} {OWN_KEY_COMMENT}")
+        if not isinstance(k, dict):
+            continue
+        parts = str(k.get('public_key') or '').split()
+        if len(parts) >= 2:
+            line = f'{parts[0]} {parts[1]}'
+        elif k.get('kind') and k.get('public_key_base64'):
+            line = f"{k['kind']} {k['public_key_base64']}"
+        else:
+            continue
+        line += f' {OWN_KEY_COMMENT}'
+        if line not in out:
+            out.append(line)
     return out
 
 

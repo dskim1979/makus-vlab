@@ -132,7 +132,9 @@ class FakeWarpgate:
             self.targets = {(body['name'] if v == uid else k): v for k, v in self.targets.items()}
             return 200, {}
         if path == '/ssh/own-keys' and method == 'GET':
-            return 200, [{'kind': 'ssh-ed25519', 'public_key_base64': 'AAAAWarpgateOwnKey'}]
+            # the shape Warpgate 0.29.2 answers (checked live): public_key is the whole OpenSSH line
+            return 200, [{'id': 'k-1', 'label': 'Default', 'kind': 'Ed25519', 'is_default': True,
+                          'public_key': 'ssh-ed25519 AAAAWarpgateOwnKey'}]
         if path == '/ssh/known-hosts' and method == 'GET':
             return 200, list(self.known_hosts)
         if path == '/ssh/known-hosts' and method == 'POST':
@@ -1478,3 +1480,33 @@ def test_renaming_an_old_target_sends_a_full_target_request(env, fake_wg):
     put = [b for (m, p, b) in fake_wg.calls if m == 'PUT' and p == '/targets/tgt-old'][-1]
     assert put['name'] == 'moavi-old-dsk_old-ssh'
     assert {'ticket_requests_disabled', 'ticket_require_approval', 'require_approval'} <= set(put)
+
+
+def test_own_keys_read_warpgates_answer_and_older_shapes(env, fake_wg, monkeypatch):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    assert wg.own_public_keys(cfg) == ['ssh-ed25519 AAAAWarpgateOwnKey moavi-desk-gateway']
+    answers = [{'kind': 'ssh-rsa', 'public_key_base64': 'AAAAold'},                       # another version
+               {'public_key': 'ssh-ed25519 AAAAWarpgateOwnKey'},                          # the same key twice
+               {'public_key': 'ssh-ed25519 AAAAWarpgateOwnKey extra comment'},
+               {'kind': 'x'}, 'junk']
+    monkeypatch.setattr(wg, '_api', lambda *a, **k: (200, answers))
+    assert wg.own_public_keys(cfg) == ['ssh-rsa AAAAold moavi-desk-gateway', 'ssh-ed25519 AAAAWarpgateOwnKey moavi-desk-gateway']
+
+
+def test_ssh_says_so_when_the_guest_agent_blocks_guest_exec(env, fake_wg, monkeypatch):
+    """Found live on Rocky 9 (VM 117): qemu-guest-agent ships with guest-exec blocked."""
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'browser_ssh': True})
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    monkeypatch.setattr(nxt, '_agent_run', lambda *a, **k: (
+        None, '', '', 'Agent error: Command guest-exec has been disabled: the command is not allowed'))
+    r = alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'ssh'})
+    assert r.status_code == 409 and r.get_json()['code'] == 'AGENT_EXEC_DISABLED'
+    assert 'guest-exec' in r.get_json()['error'] and not fake_wg.tickets
+    assert nxt.agent_exec_disabled('Command guest-exec has been disabled')
+    assert not nxt.agent_exec_disabled('guest agent refused') and not nxt.agent_exec_disabled(None)

@@ -298,6 +298,16 @@ guacamole, .rdp의 gateway 줄, 풀의 `rdp_gateway_id` / `guac_gateway_id`, 풀
 - 시작할 때 한 번(`retire_gateways`): 게이트웨이 행을 지우고 테이블을 없애며, 외부 데스크톱의 게이트웨이와 풀의 두 설정을
   비우고, `guac`만 있던 풀은 `rdp`로 바꾼다(보안 게이트웨이가 켜져 있으면 브라우저로도 열림). 경고 로그 한 줄.
 
+## 4-11. Linux 템플릿: qemu-guest-agent의 guest-exec 허용 (RHEL · Rocky · Alma)
+
+엔진은 데스크톱 안에서 할 일을 게스트 에이전트의 guest-exec로 한다(보안 게이트웨이 SSH 키 넣기, Linux 도메인 조인,
+웹 IDE, Windows NLA 계정). RHEL 계열 qemu-guest-agent는 기본으로 guest-exec를 막아 두어 이 단계가 모두 실패한다
+(`Command guest-exec has been disabled`). 엔진은 이를 `AGENT_EXEC_DISABLED`로 알린다. 템플릿에서 한 번:
+1. `/etc/sysconfig/qemu-ga`의 `--block-rpcs=...`(또는 `BLOCK_RPCS=`) 목록에서 `guest-exec`, `guest-exec-status`를 뺀다
+   (`--allow-rpcs`를 쓰는 배포판이면 그 목록에 넣는다).
+2. `systemctl restart qemu-guest-agent`
+3. 확인: Proxmox 노드에서 `qm guest exec <vmid> -- /bin/true`가 오류 없이 끝나야 한다.
+
 ## 5. 무엇이 무엇을 대체하나
 - **대체 대상(택일)**: 내장 Guacamole(브라우저 RDP/SSH), rdpGW/msrdGW(.rdp 게이트웨이),
   방금 커밋한 `/ssh`(Guacamole SSH). Warpgate 하나가 네 가지를 한 bastion으로 통합.
