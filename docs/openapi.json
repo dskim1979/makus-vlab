@@ -65327,6 +65327,70 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/vlab/desk-files/{token}": {
+      "get": {
+        "operationId": "vlab_desk_files.fast_pull_get",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The desktop fetches an upload part (single use).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "public"
+      },
+      "put": {
+        "operationId": "vlab_desk_files.fast_push_put",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The desktop hands over a download read (single use, exactly the length asked for; sent as application/offset+octet-stream, a type the engine's request filter lets through).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/api/vlab/me/desktops/{desktop_id}/files": {
       "get": {
         "operationId": "vlab_desk_files.list_files_get",

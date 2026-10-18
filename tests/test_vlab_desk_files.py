@@ -297,3 +297,114 @@ def test_a_korean_name_listed_through_proxmox_comes_back_whole(env, monkeypatch)
     monkeypatch.setattr(nxt, '_agent_run', latin1)
     names = [e['name'] for e in alice.get(f"/api/vlab/me/desktops/{d['id']}/files").get_json()['entries']]
     assert names == ['MOAVI시험_한글.txt']
+
+
+# --- the fast path: the desktop fetches / hands over parts at one-time URLs ------------------
+
+class FastGuest(Guest):
+    """A desktop that reaches the console: up-pull / down-push go to the engine's one-time URLs."""
+
+    def __init__(self, http):
+        super().__init__()
+        self.http = http
+        self.fast_runs = 0
+
+    def run(self, mgr, node, vmid, command, stdin=None, wait=0):
+        op = self.op_of(command[-1])
+        if op not in ('up-pull', 'down-push'):
+            return super().run(mgr, node, vmid, command, stdin, wait)
+        self.fast_runs += 1
+        user, p64, arg = (stdin or '\n\n\n').split('\n')[:3]
+        rel = base64.b64decode(p64).decode('utf-8')
+        a = arg.split(' ')
+        path = '/' + a[2].split('://', 1)[1].split('/', 1)[1]
+        if op == 'up-pull':
+            r = self.http.get(path)
+            if r.status_code != 200 or len(r.data) != int(a[1]):
+                return 7, '', 'curl failed', ''
+            self.files[rel + df.PART_SUFFIX] += r.data
+            return 0, '', '', ''
+        off, n = int(a[0]), int(a[1])
+        r = self.http.put(path, data=self.files[rel][off:off + n], content_type='application/offset+octet-stream')
+        return (0, '', '', '') if r.status_code == 204 else (7, '', 'curl failed', '')
+
+
+@pytest.fixture
+def fast_env(env, api, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    apiobj, guest, admin, alice, bob, pool, d = env
+    fg = FastGuest(apiobj.app.test_client())
+    monkeypatch.setattr(nxt, '_agent_run', fg.run)
+    from pegaprox.globals import cluster_managers
+    cluster_managers[CID]._api_post.side_effect = fg.api_post
+    df._fast_off.clear()
+    _policy(admin, pool, desktop_files='both')
+    return fg, alice, d
+
+
+def test_fast_path_moves_parts_through_one_time_urls(fast_env, monkeypatch):
+    fg, alice, d = fast_env
+    monkeypatch.setattr(df, 'FAST_CHUNK', 100_000)
+    data = bytes(range(256)) * 1000
+    r = _upload(alice, d, data, name='fast.bin', part=200_000)
+    assert r.status_code == 200, r.get_json()
+    assert fg.files['fast.bin'] == data and not fg.pieces              # no agent file-write pieces at all
+    assert not [x for x in fg.runs if x[0] == 'up-join']
+    r = alice.get(f"/api/vlab/me/desktops/{d['id']}/files/download?path=fast.bin")
+    assert r.data == data
+    assert not [x for x in fg.runs if x[0] == 'read']                  # no base64 reads either
+    assert fg.fast_runs == 2 + 3                                       # two parts up, three reads down
+    assert not df._slots                                               # every one-time URL used up
+
+
+def test_one_time_urls_are_single_use_and_exact(fast_env, api):
+    raw = api.app.test_client()
+    token = df._new_slot('pull', b'abc')
+    assert raw.get(f'/api/vlab/desk-files/{token}').data == b'abc'
+    assert raw.get(f'/api/vlab/desk-files/{token}').status_code == 404         # used
+    token = df._new_slot('push', length=3)
+    assert raw.put(f'/api/vlab/desk-files/{token}', data=b'abcd', content_type='application/offset+octet-stream').status_code == 404
+    assert raw.put(f'/api/vlab/desk-files/{token}', data=b'abc', content_type='application/offset+octet-stream').status_code == 204
+    assert raw.get(f'/api/vlab/desk-files/{token}').status_code == 404         # a push slot is not readable
+    assert raw.get('/api/vlab/desk-files/guess').status_code == 404
+
+
+def test_a_desktop_that_cannot_reach_the_console_falls_back_to_the_agent(fast_env, monkeypatch):
+    fg, alice, d = fast_env
+    fg.http = type('NoRoute', (), {'get': lambda self, p: type('R', (), {'status_code': 599, 'data': b''})(),
+                                   'put': lambda self, p, **k: type('R', (), {'status_code': 599})()})()
+    data = b'x' * 120_000
+    r = _upload(alice, d, data, name='slow.bin')
+    assert r.status_code == 200 and fg.files['slow.bin'] == data
+    assert fg.fast_runs == 1                                           # tried once, then the agent for a while
+    assert df._fast_off.get(d['id'], 0) > 0
+    assert alice.get(f"/api/vlab/me/desktops/{d['id']}/files/download?path=slow.bin").data == data
+    assert fg.fast_runs == 1
+
+
+def test_fast_path_can_be_turned_off(fast_env, monkeypatch):
+    fg, alice, d = fast_env
+    monkeypatch.setenv('VLAB_DESK_FILES_FAST', '0')
+    assert _upload(alice, d, b'y' * 1000, name='off.bin').status_code == 200
+    assert fg.fast_runs == 0
+
+
+def test_a_download_the_desktop_cannot_start_is_a_clear_error_not_an_empty_200(env):
+    """Found on 192.168.0.9: a 4 MiB agent read never came back and the browser got 200 with 0 bytes."""
+    import pegaprox.api.vlab_next as nxt
+    _, guest, admin, alice, _, pool, d = env
+    _policy(admin, pool, desktop_files='both')
+    guest.files['big.bin'] = b'z' * 5000
+    real = guest.run
+
+    def slow(mgr, node, vmid, command, stdin=None, wait=0):
+        if guest.op_of(command[-1]) in ('read', 'down-push'):
+            return None, '', '', ''                                # no answer in time
+        return real(mgr, node, vmid, command, stdin, wait)
+    nxt._agent_run = slow
+    try:
+        r = alice.get(f"/api/vlab/me/desktops/{d['id']}/files/download?path=big.bin")
+    finally:
+        nxt._agent_run = real
+    assert r.status_code == 502 and r.get_json()['code'] == 'NO_AGENT'
+    assert df.db().query_one("SELECT * FROM vlab_desktop_file_log WHERE direction = 'down'")['result'] == 'failed'

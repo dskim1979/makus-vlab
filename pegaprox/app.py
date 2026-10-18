@@ -205,7 +205,9 @@ def create_app():
         )
         if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
                 and request.path.startswith('/api/')
-                and request.path not in _CSRF_EXEMPT):
+                and request.path not in _CSRF_EXEMPT
+                # MOAVI Desk - a desktop handing a 파일 part to its one-time URL: no session, the token is the gate
+                and not request.path.startswith('/api/vlab/desk-files/')):
             # NS Jul 2026 (CodeAnt CSRF) — the CSRF check must run for EVERY state-changing
             # non-exempt /api/* request, not only JSON/form bodies: a cross-site form with
             # enctype=text/plain is a browser "simple request" that previously skipped this gate.
