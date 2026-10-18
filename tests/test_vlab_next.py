@@ -507,7 +507,8 @@ def test_rdp_first_windows_is_made_ready_and_linux_needs_an_rdp_server(env, monk
     store.set_assignment(d['id'], 'alice')
     mgr._fetch_qemu_ips.return_value = ['10.0.0.31']
     ran = []
-    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: ran.append(cmd[-1]) or (0, 'changed=1', '', ''))
+    # the RDP setup runs only (the pool's device switches go in their own run: rdp_device_policy)
+    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: ('fDisableCdm' in cmd[-1] or ran.append(cmd[-1])) and None or (0, 'changed=1', '', ''))
     nxt._rdp_tuned.clear()
     os_kind = {'v': 'windows'}
     monkeypatch.setattr(nxt, '_guest_os', lambda *a: os_kind['v'])

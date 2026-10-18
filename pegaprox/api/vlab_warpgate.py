@@ -25,6 +25,7 @@ from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
 from pegaprox.vlab import policy as pool_policy
+from pegaprox.vlab import rdpgw
 from pegaprox.vlab import store
 from pegaprox.vlab import warpgate as wg
 from pegaprox.vlab import wg_oidc
@@ -56,6 +57,17 @@ def _port(data, key, default):
 @require_auth(perms=['vlab.pool.view'])
 def get_warpgate():
     return jsonify({'config': wg.config(), 'targets': len(wg.list_mappings())})
+
+
+@bp.route('/api/vlab/admin/rdpgw', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def get_rdpgw():
+    """보안 게이트웨이 · 장치 연결 방식 (rdpgw): set up by the deploy (.env), read here. The pools that
+    use it (policy rdp_route 'devices') are counted; whether it answers is checked now."""
+    st = rdpgw.status()
+    pools = [p for p in store.list_pools() if pool_policy.effective(p.get('settings'))['rdp_route'] == 'devices']
+    return jsonify({'config': st, 'reachable': rdpgw.reachable() if st['enabled'] else False,
+                    'pools': [{'id': p['id'], 'name': p['name']} for p in pools]})
 
 
 @bp.route('/api/vlab/admin/warpgate', methods=['PUT'])
@@ -636,3 +648,26 @@ def oidc_userinfo():
     if not info:
         return _oauth_error('invalid_token', 401)
     return jsonify(info)
+
+
+RDPGW_OFF_TEXT = '장치 연결 방식(보안 게이트웨이)이 켜져 있지 않습니다. 관리자에게 문의하세요.'
+
+
+def rdp_answer_via_rdpgw(desk, username, ip, port, pol):
+    """The connect route's .rdp for a pool on the devices route: through the bundled RD Gateway with a
+    token for this user, this desktop and this client address (pegaprox/vlab/rdpgw.py). (answer, None);
+    (None, None) when neither gateway is on - the caller writes the direct file, devices and all;
+    rdpgw off while 보안 게이트웨이 (Warpgate) carries the .rdp: RDPGW_OFF - never a direct file around
+    the gateway, and not the recorded route either (the pool asked for its devices)."""
+    if not rdpgw.is_enabled():
+        if wg.is_enabled() and wg.config().get('rdp_via_warpgate'):
+            logging.warning(f"[VLAB] devices route for {desk.get('name')} refused: rdpgw is off ({rdpgw.config()['problem'] or 'VLAB_RDPGW=0'})")
+            return None, (jsonify({'error': RDPGW_OFF_TEXT, 'code': 'RDPGW_OFF'}), 503)
+        return None, None
+    from pegaprox.api.vlab_next import RDP_NETWORK, rdp_redirects
+    cfg = rdpgw.config()
+    client_ip = get_client_ip()
+    token = rdpgw.paa_token(cfg['key'], username, f'{ip}:{int(port)}', client_ip)
+    log_audit(username, 'vlab.rdpgw.connect', f"RDP file to '{desk['name']}' via 보안 게이트웨이 (devices)", client_ip)
+    return {'type': 'rdp', 'via': 'rdpgw', 'filename': f"{desk['name']}.rdp", 'cert_url': '/moavi-gateway.crt',
+            'rdp': rdpgw.rdp_file_text(cfg, token, ip, port, username, rdp_redirects(pol), RDP_NETWORK)}, None

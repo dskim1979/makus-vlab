@@ -935,9 +935,13 @@ def rdp_redirects(pol):
     whose own RDP host decides."""
     if pol is None:
         return ['redirectclipboard:i:1']
-    return [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
-            f"redirectprinters:i:{1 if pol['client_printers'] else 0}",
-            f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
+    lines = [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
+             f"redirectprinters:i:{1 if pol['client_printers'] else 0}",
+             f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
+    if pol.get('rdp_route') == 'devices' and pol['usb_redirect']:
+        from pegaprox.vlab.rdpgw import USB_LINES
+        lines += USB_LINES
+    return lines
 
 
 # the lines that let mstsc pick the codec and transport for the link it measures (RDP 8+: UDP
@@ -2253,6 +2257,45 @@ def rdp_prepare(desk, mgr, node, wait=8):
     return code
 
 
+# the pool's device switches, kept by the desktop itself (Remote Desktop Services policy): the user
+# can edit an .rdp, not these - 1 = refused (drives, printers, plug-and-play / USB devices)
+_rdp_devices_set = {}   # desktop id -> (vmid, values)
+
+
+def rdp_device_values(pol):
+    return (('fDisableCdm', 0 if pol['client_drives'] else 1), ('fDisableCpm', 0 if pol['client_printers'] else 1),
+            ('fDisablePNPRedir', 0 if pol['usb_redirect'] else 1))
+
+
+def rdp_device_script(values):
+    sets = '; '.join(f"if ((Get-ItemProperty -Path $ts -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
+                     f"{{ Set-ItemProperty -Path $ts -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in values)
+    return '\n'.join(["$ErrorActionPreference = 'Stop'", '$changed = 0', f"$ts = '{RDP_TS}'",
+                      'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+                      '"changed=$changed"', 'exit 0']) + '\n'
+
+
+def rdp_device_policy(desk, mgr, node, pol, wait=8):
+    """Put the pool's drive / printer / USB switches into a Windows desktop (once per change).
+    Never raises."""
+    values = rdp_device_values(pol)
+    if _rdp_devices_set.get(desk['id']) == (desk['vmid'], values):
+        return None
+    try:
+        code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                        '-ExecutionPolicy', 'Bypass', '-Command', rdp_device_script(values)], wait=wait)
+    except Exception as ex:
+        code, out, e = None, '', str(ex)[:200]
+    if code == 0:
+        _rdp_devices_set[desk['id']] = (desk['vmid'], values)
+        if 'changed=1' in (out or ''):
+            log_audit('system', 'vlab.rdp.devices', f"{desk['name']}: RDP devices " +
+                      ', '.join(f'{n}={v}' for n, v in values), '')
+    elif e:
+        logging.info(f"[VLAB] RDP device policy on {desk.get('name')}: {e}")
+    return code
+
+
 def rdp_listening(ip, port=3389, timeout=1.5):
     """Does the desktop answer on its RDP port (a Linux desktop with xrdp / gnome-remote-desktop)?"""
     try:
@@ -2286,6 +2329,17 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
                                'code': 'NO_RDP'}), 409)
     # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
     username = directory.desktop_login(desk['id'], username)
+    if protocol == 'rdp' and os_kind == 'windows':
+        rdp_device_policy(desk, mgr, node, pol)
+    if protocol == 'rdp' and pol['rdp_route'] == 'devices':
+        # the pool's devices route: the .rdp through the bundled RD Gateway (rdpgw) with a token for
+        # this desktop only; drives, printers and USB as the policy says (pegaprox/api/vlab_warpgate.py)
+        from pegaprox.api.vlab_warpgate import rdp_answer_via_rdpgw
+        answer, err = rdp_answer_via_rdpgw(desk, username, ip, port, pol)
+        if err:
+            return None, err
+        if answer:
+            return answer, None
     if protocol == 'rdp':
         # "RDP through Warpgate" on: an .rdp aimed at Warpgate with a single-use ticket
         # (pegaprox/api/vlab_warpgate.py). Warpgate down: refused (WG_DOWN) unless the admin allowed
