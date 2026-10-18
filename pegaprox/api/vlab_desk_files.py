@@ -28,6 +28,7 @@ MOAVI Desk - the portal's 파일 panel: files into and out of the user's own des
 """
 
 import base64
+import concurrent.futures
 import hashlib
 import logging
 import re
@@ -50,7 +51,8 @@ bp = Blueprint('vlab_desk_files', __name__)
 _bad = core._bad
 _user = core._user
 
-PIECE = 46080                 # bytes per guest agent file-write (61440 base64 characters)
+PIECE = 46080                 # bytes per guest agent file-write (Proxmox takes 61440 base64 characters at most)
+WRITERS = 6                   # file-writes in flight at once: each is a Proxmox API round trip, the agent itself is fast
 PART_MAX = 8 * 1024 * 1024    # one upload request (the engine's request limit is 10 MB)
 READ_CHUNK = 4 * 1024 * 1024  # one download read (base64 stays under the agent's 16 MiB output)
 LIST_MAX = 2000
@@ -176,7 +178,7 @@ echo "sha256=$(runuser -u "$U" -- sha256sum -- "$P" | cut -c1-64)"''',
     'up-abort': r'''rm -rf "/tmp/moavi-df-$X"; PD=$(dirname -- "$P"); RPD=$(realpath -e -- "$PD") 2>/dev/null && inside "$RPD" && rm -f -- "$P.moavi-part"; exit 0''',
 }
 
-_PS_HEAD = r'''$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.Encoding]::UTF8
+_PS_HEAD = r'''$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8
 $U = [Console]::In.ReadLine(); $P64 = [Console]::In.ReadLine(); $X = [Console]::In.ReadLine()
 try { $sid = (New-Object Security.Principal.NTAccount($U)).Translate([Security.Principal.SecurityIdentifier]).Value }
 catch { [Console]::Error.WriteLine('no account'); exit 3 }
@@ -193,10 +195,10 @@ $P = if ($REL) { [IO.Path]::GetFullPath((Join-Path $RR ($REL -replace '/', '\'))
 function Inside($p) { ($p -ieq $RR) -or $p.StartsWith($RR + '\', [StringComparison]::OrdinalIgnoreCase) }
 function NoLinks($p) { $c = $p; while ($c.Length -gt $RR.Length) { if (Test-Path -LiteralPath $c) {
   if ((Get-Item -LiteralPath $c -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false } }
-  $c = Split-Path -LiteralPath $c -Parent }; return $true }
+  $c = [IO.Path]::GetDirectoryName($c) }; return $true }
 if (-not (Inside $P) -or -not (NoLinks $P)) { exit 26 }
 function Existing { if (-not (Test-Path -LiteralPath $P)) { exit 24 } }
-function Fresh { $d = Split-Path -LiteralPath $P -Parent; if (-not (Test-Path -LiteralPath $d -PathType Container)) { exit 24 } }
+function Fresh { $d = [IO.Path]::GetDirectoryName($P); if (-not (Test-Path -LiteralPath $d -PathType Container)) { exit 24 } }
 $T = Join-Path $env:SystemRoot ('Temp\moavi-df-' + $X)
 '''
 
@@ -248,6 +250,17 @@ class _Fail(Exception):
         self.response = response
 
 
+def agent_text(s):
+    """The guest agent's output as Proxmox hands it over: the guest's UTF-8 bytes read as Latin-1
+    (found on VM 117: a Korean file name came back as 'MOAVIì\x8b\x9c...'). Undone when that is what it is."""
+    if not s:
+        return s or ''
+    try:
+        return s.encode('latin-1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
 def _run(ctx, op, rel, arg='', wait=60.0):
     """Run one guest step. Returns stdout; raises _Fail(error response)."""
     from pegaprox.api import vlab_next as vn
@@ -255,6 +268,7 @@ def _run(ctx, op, rel, arg='', wait=60.0):
             guest_script('windows', op)] if ctx['os'] == 'windows' else ['/bin/sh', '-c', guest_script('linux', op)])
     stdin = f"{ctx['account']}\n{_b64(rel)}\n{arg}\n"
     code, out, err, e = vn._agent_run(ctx['mgr'], ctx['node'], ctx['vmid'], cmd, stdin=stdin, wait=wait)
+    out, err = agent_text(out), agent_text(err)
     if code == 0:
         return out or ''
     if e and vn.agent_exec_disabled(e):
@@ -540,21 +554,27 @@ def upload_part(desktop_id, uid):
     length = request.content_length or 0
     if length <= 0 or length > PART_MAX or up['received'] + length > up['size']:
         return _err('TOO_BIG', 413, ctx['pol']['desktop_files_max_mb'])
-    got = 0
+    got, jobs = 0, []
+    while got < length:
+        piece = request.stream.read(min(PIECE, length - got))
+        if not piece:
+            break
+        jobs.append((_piece_path(ctx, uid, up['piece'] + len(jobs)), piece))
+        got += len(piece)
+    if got != length:
+        return _bad('The part ended early', 400)
     try:
-        while got < length:
-            piece = request.stream.read(min(PIECE, length - got))
-            if not piece:
-                break
-            _file_write(ctx, _piece_path(ctx, uid, up['piece']), piece)
-            up['piece'] += 1
-            up['sha'].update(piece)
-            got += len(piece)
-        if got != length:
-            return _bad('The part ended early', 400)
+        # the pieces of one part (<= 8 MiB) go out several at a time, each to its own numbered file;
+        # the join then takes them in order
+        with concurrent.futures.ThreadPoolExecutor(max_workers=WRITERS) as pool:
+            for f in [pool.submit(_file_write, ctx, path, data) for path, data in jobs]:
+                f.result()
         _run(ctx, 'up-join', up['rel'], uid, wait=120.0)
     except _Fail as f:
         return f.response
+    for _path, data in jobs:
+        up['sha'].update(data)
+    up['piece'] += len(jobs)
     up['received'] += got
     up['at'] = time.time()
     return jsonify({'received': up['received'], 'size': up['size']})
