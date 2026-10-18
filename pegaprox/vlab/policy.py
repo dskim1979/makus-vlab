@@ -8,7 +8,11 @@ takes effect:
   clipboard                    the browser console (noVNC), the .rdp file (on only for both -
                                mstsc has no one-way switch) and browser RDP (disable-copy / -paste);
                                SPICE leaves it to the guest agent
-  usb_redirect, usb_autoshare  the .vv file (SPICE USB redirection)
+  usb_redirect, usb_autoshare  the .vv file (SPICE USB redirection); usb_redirect also the .rdp's USB and
+                               plug-and-play devices on the devices route
+  rdp_route                    the .rdp file's way to the desktop: 'record' = 보안 게이트웨이 (Warpgate:
+                               recorded, no device channels), 'devices' = its device route (rdpgw: drives,
+                               printers, USB as the switches here say, not recorded; pegaprox/vlab/rdpgw.py)
   client_drives                the .rdp file: the user's own PC drives in the desktop (off = files
                                cannot be carried in or out that way)
   client_printers              the .rdp file (the PC's printers) and browser RDP (print to PDF)
@@ -38,6 +42,7 @@ SSH_FILES = ('off', 'down', 'up', 'both')
 # the portal's 파일 panel (files into / out of the user's own desktop through the guest agent): off / up / down / both
 DESKTOP_FILES = ('off', 'up', 'down', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
 RESET_TYPES = ('reset', 'classroom')
+RDP_ROUTES = ('record', 'devices')
 
 DEFAULTS = {
     # RDP first (H.264 · UDP, the lightest on a WAN for office work), SPICE / VNC as the choice;
@@ -49,6 +54,7 @@ DEFAULTS = {
     'usb_autoshare': False,
     'client_drives': False,
     'client_printers': True,
+    'rdp_route': 'record',
     'rdp_tune': True,
     'start_on_connect': True,
     'idle_shutdown_min': 0,
@@ -116,6 +122,10 @@ def validate(data, pool_type):
         elif k == 'ssh_files':
             if v not in SSH_FILES:
                 return None, f"ssh_files must be one of {', '.join(SSH_FILES)}"
+            out[k] = v
+        elif k == 'rdp_route':
+            if v not in RDP_ROUTES:
+                return None, f"rdp_route must be one of {', '.join(RDP_ROUTES)}"
             out[k] = v
         elif k == 'desktop_files':
             if v not in DESKTOP_FILES:

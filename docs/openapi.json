@@ -64806,6 +64806,41 @@
         ]
       }
     },
+    "/api/vlab/admin/rdpgw": {
+      "get": {
+        "operationId": "vlab_warpgate.get_rdpgw_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "보안 게이트웨이 · 장치 연결 방식 (rdpgw): set up by the deploy (.env), read here. The pools that use it (policy rdp_route 'devices') are counted; whether it answers is checked now.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
     "/api/vlab/admin/warpgate/test": {
       "post": {
         "operationId": "vlab_warpgate.test_warpgate_post",
