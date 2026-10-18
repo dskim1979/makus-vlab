@@ -41,7 +41,9 @@ takes effect:
 PROTOCOLS = ('vnc', 'spice', 'rdp')
 CLIPBOARD = ('both', 'to_desktop', 'from_desktop', 'off')
 WEB_IDE = ('jupyter', 'vscode')
-SSH_FILES = ('off', 'down', 'up', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
+SSH_FILES = ('off', 'down', 'up', 'both')
+# the portal's 파일 panel (files into / out of the user's own desktop through the guest agent): off / up / down / both
+DESKTOP_FILES = ('off', 'up', 'down', 'both')   # browser SSH file transfer (SFTP): none / download / upload / both
 RESET_TYPES = ('reset', 'classroom')
 # pools whose desktops pass from one user to the next: the screen picture is off unless set
 SHARED_SCREEN_TYPES = ('reset', 'shared', 'classroom', 'buildfarm')
@@ -73,13 +75,16 @@ DEFAULTS = {
     'researcher_ssh': False,    # researchers' own SSH tools (PuTTY/scp/WinSCP/VS Code) through Warpgate
     'screen_thumbnail': True,   # the portal card shows the running desktop's screen
     'auto_domain_join': None,
+    'desktop_files': 'off',     # the portal's 파일 panel: off / up (to the desktop) / down / both (pegaprox/api/vlab_desk_files.py)
+    'desktop_files_max_mb': 500,   # largest single file
+    'desktop_files_day_mb': 0,     # per user per day, both ways; 0 = no limit
 }
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
           'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
-           'web_ide_idle_min': (10, 10080)}
+           'web_ide_idle_min': (10, 10080), 'desktop_files_max_mb': (1, 10240), 'desktop_files_day_mb': (0, 1048576)}
 
 
 def defaults_for(pool_type=None):
@@ -136,6 +141,10 @@ def validate(data, pool_type):
         elif k == 'auto_domain_join':
             if v is not None and not isinstance(v, bool):
                 return None, 'auto_domain_join must be true, false or null'
+            out[k] = v
+        elif k == 'desktop_files':
+            if v not in DESKTOP_FILES:
+                return None, f"desktop_files must be one of {', '.join(DESKTOP_FILES)}"
             out[k] = v
         elif k in _BOOLS:
             if not isinstance(v, bool):

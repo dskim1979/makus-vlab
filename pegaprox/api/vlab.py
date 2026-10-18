@@ -332,7 +332,7 @@ def my_desktops():
         pol = pool_policy.effective(_settings_of(d), d.get('pool_type'))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
                        'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide'],
-                       'screen_thumbnail': pol['screen_thumbnail']}
+                       'screen_thumbnail': pol['screen_thumbnail'], 'desktop_files': pol['desktop_files']}
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:

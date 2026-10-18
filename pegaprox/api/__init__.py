@@ -76,6 +76,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_adobjects import bp as vlab_adobjects_bp  # MOAVI Desk: AD 디렉터리 (사용자 · 그룹 · OU)
     from pegaprox.api.vlab_next import bp as vlab_next_bp  # MOAVI Desk: 부서·가입 심사·USB·게이트웨이·골든 이미지·보드 LAB·빌드 팜·라이선스 서버
     from pegaprox.api.vlab_warpgate import bp as vlab_warpgate_bp  # MOAVI Desk: Warpgate 접근 게이트웨이(bastion)
+    from pegaprox.api.vlab_desk_files import bp as vlab_desk_files_bp  # MOAVI Desk: 포털 파일 (게스트 에이전트로 내 데스크톱에 파일)
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -146,6 +147,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_warpgate_bp)
     app.register_blueprint(vlab_directory_bp)
     app.register_blueprint(vlab_adobjects_bp)
+    app.register_blueprint(vlab_desk_files_bp)
     from pegaprox.api.vlab_accounts import attach_terms_gate
     attach_terms_gate(app)   # after every vlab blueprint is registered
 

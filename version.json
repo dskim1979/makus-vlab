@@ -129,6 +129,7 @@
     "pegaprox/api/vlab_reserve.py",
     "pegaprox/api/vlab_license.py",
     "pegaprox/api/vlab_data.py",
+    "pegaprox/api/vlab_desk_files.py",
     "pegaprox/api/vlab_work.py",
     "pegaprox/api/vlab_notices.py",
     "pegaprox/api/vlab_research.py",

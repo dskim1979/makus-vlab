@@ -350,6 +350,8 @@ SYNC_TABLES = (
     'vlab_capacity_daily',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
     'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
+    # the portal 파일 panel's transfers (per-day limit, audit) (pegaprox/api/vlab_desk_files.py)
+    'vlab_desktop_file_log',
     # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
     'vlab_wg_oidc',
     # the bundled directory (pegaprox/vlab/directory.py): the engine's sealed accounts, the last

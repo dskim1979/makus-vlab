@@ -402,7 +402,7 @@ def test_the_policy_shapes_the_connection(connectable):
     assert a['clipboard'] == 'to_desktop'
     (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
     assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': [],
-                              'screen_thumbnail': False}   # a reset pool: off unless turned on
+                              'screen_thumbnail': False, 'desktop_files': 'off'}   # a reset pool: thumbnail off unless turned on
 
 
 def test_the_policy_can_take_power_away(connectable):
