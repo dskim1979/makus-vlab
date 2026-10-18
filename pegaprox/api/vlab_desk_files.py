@@ -22,8 +22,13 @@ MOAVI Desk - the portal's 파일 panel: files into and out of the user's own des
   passes no symbolic link / junction).
 - Pool policy desktop_files: off / up / down / both, desktop_files_max_mb per file, desktop_files_day_mb
   per user per day (both ways). Every transfer is logged (vlab_desktop_file_log) and audited.
-- Nothing is held whole in memory: an upload comes in parts that go on as guest agent file-write pieces
-  and are joined in the desktop; a download is read 4 MiB at a time.
+- Nothing is held whole in memory: an upload comes in parts (<= 8 MiB), a download goes out in reads.
+- Fast path: the desktop itself fetches each upload part from, and hands each download read to, a
+  one-time URL of this engine on the console's address (GET / PUT /api/vlab/desk-files/<token>; single
+  use, 2 minutes, no session - the token is the gate). Where the desktop cannot reach the console (no
+  route, no curl) it falls back for 10 minutes to the guest agent alone: 45 KB file-write pieces (the
+  most Proxmox passes) six at a time, and base64 reads - slow but always there. VLAB_DESK_FILES_FAST=0
+  turns the fast path off.
 - A guest agent that blocks guest-exec / guest-file-* (RHEL / Rocky) answers AGENT_EXEC_DISABLED.
 """
 
@@ -31,6 +36,7 @@ import base64
 import concurrent.futures
 import hashlib
 import logging
+import os
 import re
 import secrets
 import threading
@@ -54,10 +60,13 @@ _user = core._user
 PIECE = 46080                 # bytes per guest agent file-write (Proxmox takes 61440 base64 characters at most)
 WRITERS = 6                   # file-writes in flight at once: each is a Proxmox API round trip, the agent itself is fast
 PART_MAX = 8 * 1024 * 1024    # one upload request (the engine's request limit is 10 MB)
-READ_CHUNK = 4 * 1024 * 1024  # one download read (base64 stays under the agent's 16 MiB output)
+READ_CHUNK = 1024 * 1024      # one download read through the agent alone (its output comes back base64, whole)
 LIST_MAX = 2000
 UPLOAD_TTL = 2 * 3600
 PART_SUFFIX = '.moavi-part'
+FAST_CHUNK = 8 * 1024 * 1024  # one download read on the fast path
+FAST_TTL = 120               # a one-time URL lives this long
+FAST_OFF_FOR = 600           # after the fast path failed for a desktop, the agent alone for this long
 
 TEXT = {
     'OFF': '이 풀은 파일 전송을 쓰지 않습니다.',
@@ -87,6 +96,8 @@ _SCHEMA = '''CREATE TABLE IF NOT EXISTS vlab_desktop_file_log (
 TABLES = ('vlab_desktop_file_log',)
 _lock = threading.Lock()
 _uploads = {}   # upload id -> state (this engine; an upload restarts after a failover)
+_slots = {}     # one-time URL token -> {kind: pull|push, data, len, exp}
+_fast_off = {}  # desktop id -> until when the fast path is not tried
 
 
 def db():
@@ -175,6 +186,14 @@ chmod 644 "$T"/* 2>/dev/null; runuser -u "$U" -- sh -c 'cat "$1"/* >> "$2"' sh "
     'up-finish': r'''fresh; [ -e "$P" ] && exit 23; rm -rf "/tmp/moavi-df-$X"
 runuser -u "$U" -- mv -- "$P.moavi-part" "$P" || exit 5
 echo "sha256=$(runuser -u "$U" -- sha256sum -- "$P" | cut -c1-64)"''',
+    'up-pull': r'''fresh; set -- $X; T="/tmp/moavi-df-$1"; F="$T/pull"; [ -f "$P.moavi-part" ] || exit 24
+command -v curl >/dev/null 2>&1 || exit 7
+curl -fsSk --max-time 300 -o "$F" "$3" || { rm -f "$F"; exit 7; }
+[ "$(stat -c %s "$F")" = "$2" ] || { rm -f "$F"; exit 7; }
+chmod 644 "$F"; runuser -u "$U" -- sh -c 'cat "$1" >> "$2"' sh "$F" "$P.moavi-part" || exit 5; rm -f "$F"''',
+    'down-push': r'''existing; [ -f "$P" ] || exit 24; set -- $X; command -v curl >/dev/null 2>&1 || exit 7
+runuser -u "$U" -- dd if="$P" bs=65536 iflag=skip_bytes,count_bytes skip="$1" count="$2" status=none \
+  | curl -fsSk --max-time 300 -X PUT -H 'Content-Type: application/offset+octet-stream' --data-binary @- "$3" >/dev/null || exit 7''',
     'up-abort': r'''rm -rf "/tmp/moavi-df-$X"; PD=$(dirname -- "$P"); RPD=$(realpath -e -- "$PD") 2>/dev/null && inside "$RPD" && rm -f -- "$P.moavi-part"; exit 0''',
 }
 
@@ -227,6 +246,23 @@ finally { $out.Close() }''',
 if (Test-Path -LiteralPath $T) { Remove-Item -LiteralPath $T -Recurse -Force }
 Move-Item -LiteralPath ($P + '.moavi-part') -Destination $P; Own $P
 "sha256=" + (Get-FileHash -LiteralPath $P -Algorithm SHA256).Hash.ToLower()''',
+    'up-pull': r'''Fresh; $a = $X.Split(' '); $T = Join-Path $env:SystemRoot ('Temp\moavi-df-' + $a[0]); $F = Join-Path $T 'pull'
+$part = $P + '.moavi-part'; if (-not (Test-Path -LiteralPath $part)) { exit 24 }
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+  (New-Object Net.WebClient).DownloadFile($a[2], $F) } catch { exit 7 }
+if ((Get-Item -LiteralPath $F).Length -ne [long]$a[1]) { Remove-Item -LiteralPath $F -Force; exit 7 }
+$out = [IO.File]::Open($part, 'Append', 'Write'); try { $in = [IO.File]::OpenRead($F); try { $in.CopyTo($out) } finally { $in.Close() } }
+finally { $out.Close() }; Remove-Item -LiteralPath $F -Force''',
+    'down-push': r'''Existing; if (-not (Test-Path -LiteralPath $P -PathType Leaf)) { exit 24 }
+$a = $X.Split(' '); $off = [long]$a[0]; $len = [int]$a[1]
+$fs = [IO.File]::Open($P, 'Open', 'Read', 'ReadWrite'); try { [void]$fs.Seek($off, 'Begin'); $buf = New-Object byte[] $len
+  $got = 0; while ($got -lt $len) { $r = $fs.Read($buf, $got, $len - $got); if ($r -le 0) { break }; $got += $r } } finally { $fs.Close() }
+if ($got -ne $len) { exit 24 }
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+  $wc = New-Object Net.WebClient; $wc.Headers.Add('Content-Type', 'application/offset+octet-stream')
+  [void]$wc.UploadData($a[2], 'PUT', $buf) } catch { exit 7 }''',
     'up-abort': r'''if (Test-Path -LiteralPath $T) { Remove-Item -LiteralPath $T -Recurse -Force }
 if (Test-Path -LiteralPath ($P + '.moavi-part')) { Remove-Item -LiteralPath ($P + '.moavi-part') -Force }''',
 }
@@ -242,6 +278,10 @@ def guest_script(guest_os, op):
 
 def _err(code, status, *fmt):
     return jsonify({'error': TEXT.get(code, TEXT['FAILED']).format(*fmt), 'code': code}), status
+
+
+class _Done(Exception):
+    pass
 
 
 class _Fail(Exception):
@@ -281,6 +321,82 @@ def _run(ctx, op, rel, arg='', wait=60.0):
         raise _Fail(_err(label, status, ctx['account']) if label == 'NO_ACCOUNT' else _err(label, status))
     logging.warning(f"[VLAB] desktop files {op} on {ctx['desk']['name']} exit {code}: {(err or out or '').strip()[:300]}")
     raise _Fail(_err('FAILED', 502))
+
+
+# --- the fast path: one-time URLs the desktop itself fetches from / hands to --------------------
+
+def fast_base():
+    """The console's address as the desktop reaches it, or None when the fast path is off."""
+    if os.environ.get('VLAB_DESK_FILES_FAST', '1').strip().lower() in ('0', 'false', 'no', 'off'):
+        return None
+    from pegaprox.vlab.wg_oidc import public_base
+    return public_base()
+
+
+def _fast_ok(ctx):
+    return fast_base() is not None and _fast_off.get(ctx['desk']['id'], 0) < time.time()
+
+
+def _new_slot(kind, data=None, length=0):
+    token = secrets.token_urlsafe(32)
+    now_t = time.time()
+    with _lock:
+        for k in [k for k, v in _slots.items() if v['exp'] < now_t]:
+            _slots.pop(k, None)
+        _slots[token] = {'kind': kind, 'data': data, 'len': length if data is None else len(data), 'exp': now_t + FAST_TTL}
+    return token
+
+
+def _take_slot(token):
+    with _lock:
+        return _slots.pop(token, None)
+
+
+def _try_fast(ctx, op, rel, arg):
+    """One fast-path step; False (and the agent alone for a while) when the desktop could not."""
+    from pegaprox.api import vlab_next as vn
+    cmd = (['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+            guest_script('windows', op)] if ctx['os'] == 'windows' else ['/bin/sh', '-c', guest_script('linux', op)])
+    try:
+        code, out, err, e = vn._agent_run(ctx['mgr'], ctx['node'], ctx['vmid'], cmd,
+                                          stdin=f"{ctx['account']}\n{_b64(rel)}\n{arg}\n", wait=320.0)
+    except Exception as ex:
+        code, out, err, e = None, '', '', str(ex)[:200]
+    if code == 0:
+        return True
+    _fast_off[ctx['desk']['id']] = time.time() + FAST_OFF_FOR
+    logging.info(f"[VLAB] desktop files fast path off for {ctx['desk']['name']} ({op} exit {code}): "
+                 f"{(e or agent_text(err) or '').strip()[:200]} - the guest agent alone for {FAST_OFF_FOR // 60} min")
+    return False
+
+
+@bp.route('/api/vlab/desk-files/<token>', methods=['GET'])
+def fast_pull(token):
+    """The desktop fetches an upload part (single use)."""
+    s = _take_slot(token)
+    if not s or s['kind'] != 'pull' or s['exp'] < time.time():
+        return jsonify({'error': 'not found'}), 404
+    resp = Response(s['data'], mimetype='application/octet-stream')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@bp.route('/api/vlab/desk-files/<token>', methods=['PUT'])
+def fast_push(token):
+    """The desktop hands over a download read (single use, exactly the length asked for; sent as
+    application/offset+octet-stream, a type the engine's request filter lets through)."""
+    with _lock:
+        s = _slots.get(token)
+        ok = bool(s) and s['kind'] == 'push' and s['data'] is None and s['exp'] >= time.time() \
+            and (request.content_length or 0) == s['len']
+    if not ok:
+        return jsonify({'error': 'not found'}), 404
+    data = request.get_data(cache=False)
+    if len(data) != s['len']:
+        return jsonify({'error': 'length'}), 400
+    with _lock:
+        s['data'] = data
+    return '', 204
 
 
 def _file_write(ctx, path, data):
@@ -463,20 +579,57 @@ def download_file(desktop_id):
     if limit:
         return limit
 
+    def read(sent):
+        """The next piece from offset `sent`: the desktop hands it to a one-time URL, else the agent reads it."""
+        if _fast_ok(ctx):
+            n = min(FAST_CHUNK, size - sent)
+            token = _new_slot('push', length=n)
+            if _try_fast(ctx, 'down-push', rel, f"{sent} {n} {fast_base()}/api/vlab/desk-files/{token}"):
+                data = (_take_slot(token) or {}).get('data')
+                if data:
+                    return data
+            else:
+                _take_slot(token)
+        n = min(READ_CHUNK, size - sent)
+        return base64.b64decode((_run(ctx, 'read', rel, f'{sent} {n}', wait=120.0) or '').strip())
+
+    # the first piece before any header goes out: a desktop that cannot hand it over gets a clear error,
+    # not a 200 that ends at 0 bytes (found on 192.168.0.9)
+    try:
+        first = read(0) if size else b''
+    except _Fail as f:
+        _log(ctx, rel, 0, 'down', 'failed')
+        return f.response
+    except Exception as e:
+        logging.warning(f"[VLAB] desktop files download of {rel} on {ctx['desk']['name']}: {type(e).__name__}: {str(e)[:200]}")
+        _log(ctx, rel, 0, 'down', 'failed')
+        return _err('FAILED', 502)
+    if size and not first:
+        _log(ctx, rel, 0, 'down', 'failed')
+        return _err('FAILED', 502)
+
     def stream():
         sent, result = 0, 'failed'
         try:
-            while sent < size:
-                n = min(READ_CHUNK, size - sent)
-                data = base64.b64decode((_run(ctx, 'read', rel, f'{sent} {n}', wait=120.0) or '').strip())
-                if not data:
+            data = first
+            while True:
+                if data:
+                    sent += len(data)
+                    yield data
+                if sent >= size or not data:
                     break
-                sent += len(data)
-                yield data
+                data = read(sent)
             result = 'ok' if sent == size else 'short'
         except _Fail:
             result = 'failed'
+        except Exception as e:
+            # say why a download stopped part way (the client then sees a short file)
+            result = 'failed'
+            logging.warning(f"[VLAB] desktop files download of {rel} on {ctx['desk']['name']} stopped at {sent} of {size}: "
+                            f"{type(e).__name__}: {str(e)[:200]}")
         finally:
+            if result != 'ok':
+                logging.warning(f"[VLAB] desktop files download of {rel} on {ctx['desk']['name']}: {result} at {sent} of {size}")
             _log(ctx, rel, sent, 'down', result)
 
     name = rel.rsplit('/', 1)[-1]
@@ -563,13 +716,23 @@ def upload_part(desktop_id, uid):
         got += len(piece)
     if got != length:
         return _bad('The part ended early', 400)
+    fast = False
+    if _fast_ok(ctx):
+        data = b''.join(p for _path, p in jobs)
+        token = _new_slot('pull', data)
+        fast = _try_fast(ctx, 'up-pull', up['rel'], f"{uid} {len(data)} {fast_base()}/api/vlab/desk-files/{token}")
+        _take_slot(token)
     try:
+        if fast:
+            raise _Done()
         # the pieces of one part (<= 8 MiB) go out several at a time, each to its own numbered file;
         # the join then takes them in order
         with concurrent.futures.ThreadPoolExecutor(max_workers=WRITERS) as pool:
             for f in [pool.submit(_file_write, ctx, path, data) for path, data in jobs]:
                 f.result()
         _run(ctx, 'up-join', up['rel'], uid, wait=120.0)
+    except _Done:
+        pass
     except _Fail as f:
         return f.response
     for _path, data in jobs:
