@@ -77,6 +77,10 @@ class FakeWarpgate:
         if method == 'GET' and path == '/users':
             return 200, [{'id': v, 'username': k, 'description': self.user_desc.get(v, '')}
                          for k, v in self.users.items()]
+        m = re.match(r'^/users/([^/]+)$', path)
+        if m and method == 'DELETE':
+            self.users = {k: v for k, v in self.users.items() if v != m.group(1)}
+            return 204, ''
         m = re.match(r'^/users/([^/]+)/admin-roles$', path)
         if m and method == 'GET':
             return 200, list(self.admin_roles.get(m.group(1), []))
@@ -368,8 +372,9 @@ def test_ssh_refused_when_the_desktop_has_no_such_account(env, fake_wg, monkeypa
 
 def test_ssh_login_name_is_a_linux_name():
     assert wg.ssh_login_name('alice') == 'alice' and wg.ssh_login_name('kim.dh-2') == 'kim.dh-2'
-    for bad in ('', 'a b', 'root;rm', '-x', 'MOAVI\\alice', 'a' * 65, None):
+    for bad in ('', 'a b', 'root;rm', '-x', 'OTHER\\alice', 'a' * 65, None):
         assert wg.ssh_login_name(bad) is None
+    assert wg.ssh_login_name('MOAVI\\alice') == 'alice'          # the bundled directory's form
 
 
 def test_portal_status_reflects_enabled(env):
@@ -1578,3 +1583,76 @@ def test_an_image_without_web_clipboard_still_gets_the_target(env, fake_wg, monk
     assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
     tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]
     assert 'web_clipboard' not in tgt['options']
+
+
+# --- one gateway identity per person (found live: "MOAVI\\admin" made moavi-MOAVI\\admin) -------------
+
+@pytest.mark.parametrize('raw,want', [('admin', 'admin'), ('MOAVI\\admin', 'admin'), ('moavi\\Admin', 'admin'),
+                                      ('admin@moavi.lan', 'admin'), ('Admin@MOAVI.LAN', 'admin'),
+                                      ('alice@univ.ac.kr', 'alice@univ.ac.kr'), ('kim.j-h_2', 'kim.j-h_2')])
+def test_portal_id_maps_the_directory_forms_to_one_name(raw, want):
+    assert wg.portal_id(raw) == want and wg.wg_user_name(raw) == 'moavi-' + want
+
+
+@pytest.mark.parametrize('raw', ['OTHER\\bob', 'a:b', 'a b', '', 'x' * 65, 'evil\\..\\x'])
+def test_portal_id_refuses_what_it_cannot_tell_apart(raw):
+    with pytest.raises(wg.WarpgateError):
+        wg.portal_id(raw)
+
+
+def test_more_directory_domains_can_be_named(monkeypatch):
+    monkeypatch.setenv('VLAB_IDENTITY_DOMAINS', 'CORP, corp.example')
+    assert wg.portal_id('CORP\\bob') == 'bob' and wg.portal_id('bob@corp.example') == 'bob'
+
+
+def test_the_domain_form_lands_on_the_same_warpgate_user(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    uid = wg.ensure_user(cfg, 'admin')
+    assert wg.ensure_user(cfg, 'MOAVI\\admin') == uid and wg.ensure_user(cfg, 'admin@moavi.lan') == uid
+    assert [n for n in fake_wg.users if n.startswith('moavi-')] == ['moavi-admin']
+    assert wg.ssh_username('MOAVI\\admin', 't') == 'moavi-admin:t' and wg.ssh_login_name('MOAVI\\admin') == 'admin'
+    from pegaprox.vlab import wg_oidc
+    assert wg_oidc.sso_email('MOAVI\\admin') == 'admin@moavi-desk.invalid'
+    _ticket, _secret = wg.issue_ticket(cfg, 'MOAVI\\admin', 'moavi-x')
+    assert fake_wg.tickets[-1]['username'] == 'moavi-admin'
+
+
+def test_oidc_sign_in_in_the_domain_form_is_the_same_identity(env, fake_wg, oidc_on, seed):
+    import jwt
+    from urllib.parse import parse_qs, urlparse
+    api, _, root, _, _ = env
+    _configure(root)
+    dom = api.as_user(seed.user('MOAVI\\admin', role='user'))
+    verifier, challenge = _pkce()
+    code = parse_qs(urlparse(_authorize(dom, challenge).headers['Location']).query)['code'][0]
+    t = api.app.test_client().post('/api/vlab/oidc/token', headers=_basic('warpgate', 'oidc-client-secret'),
+                                   data={'grant_type': 'authorization_code', 'code': code, 'redirect_uri': RETURN,
+                                         'code_verifier': verifier}).get_json()
+    claims = jwt.decode(t['id_token'], options={'verify_signature': False})
+    assert claims['sub'] == 'admin' and claims['email'] == 'admin@moavi-desk.invalid'
+    assert 'moavi-admin' in fake_wg.users and not [n for n in fake_wg.users if '\\' in n]
+
+
+def test_stray_engine_users_are_folded_into_the_normal_one(env, fake_wg, oidc_on):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    role = wg.ensure_role(cfg)
+    good = wg.ensure_user(cfg, 'admin', role)
+    # what the engine made before: moavi-MOAVI\\admin, managed, with a role and a key
+    stray = fake_wg.users['moavi-MOAVI\\admin'] = 'stray-1'
+    fake_wg.user_desc[stray] = wg.MANAGED_DESC + ' (MOAVI\\admin)'
+    fake_wg.user_roles[stray] = [role, 'role-extra']
+    fake_wg.keys[stray] = [{'id': 'k1', 'label': '노트북', 'openssh_public_key': 'ssh-ed25519 AAAAstray me@pc'}]
+    # one somebody made by hand, and one with no gateway identity: left alone
+    fake_wg.users['moavi-MOAVI\\carol'] = 'hand'
+    fake_wg.users['moavi-OTHER\\dave'] = 'other'
+    fake_wg.user_desc['other'] = wg.MANAGED_DESC
+    assert wg.merge_stray_users(cfg) == 1
+    assert 'moavi-MOAVI\\admin' not in fake_wg.users and fake_wg.users['moavi-admin'] == good
+    assert set(fake_wg.user_roles[good]) == {role, 'role-extra'}
+    assert [k['openssh_public_key'] for k in fake_wg.keys[good]] == ['ssh-ed25519 AAAAstray me@pc']
+    assert 'moavi-MOAVI\\carol' in fake_wg.users and 'moavi-OTHER\\dave' in fake_wg.users
+    assert wg.merge_stray_users(cfg) == 0                       # once

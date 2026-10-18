@@ -594,7 +594,11 @@ def oidc_authorize():
         wg.ensure_user(cfg, username, wg.ensure_role(cfg))
     except Exception as e:
         logging.warning(f"[VLAB] Warpgate user {username} not prepared for sign-in: {str(e)[:200]}")
-    code = wg_oidc.issue_code(username, redirect_uri, a.get('nonce', ''), challenge)
+    try:
+        sub = wg.portal_id(username)        # one identity: MOAVI\\admin and admin sign in as the same Warpgate user
+    except wg.WarpgateError:
+        return back(error='access_denied', state=state)
+    code = wg_oidc.issue_code(sub, redirect_uri, a.get('nonce', ''), challenge)
     log_audit(username, 'vlab.warpgate.sso', 'signed in to 보안 게이트웨이 with the portal session', get_client_ip())
     return back(code=code, state=state)
 
