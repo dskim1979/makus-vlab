@@ -270,3 +270,30 @@ def test_a_desktop_without_the_users_account(env):
     r = alice.get(f"/api/vlab/me/desktops/{d['id']}/files")
     assert r.status_code == 409 and r.get_json()['code'] == 'NO_ACCOUNT' and "'alice'" in r.get_json()['error']
     nxt._agent_run = real
+
+
+def test_powershell_scripts_avoid_what_powershell_5_lacks():
+    """Found on VM 116 (Windows Server 2022, PowerShell 5.1): Split-Path -LiteralPath -Parent does not exist."""
+    for op in df._PS_OPS:
+        assert 'Split-Path' not in df.guest_script('windows', op)
+
+
+def test_agent_output_read_as_latin1_is_undone():
+    name = 'MOAVI시험_한글.txt'
+    assert df.agent_text(name.encode('utf-8').decode('latin-1')) == name
+    assert df.agent_text(name) == name and df.agent_text('plain') == 'plain' and df.agent_text(None) == ''
+
+
+def test_a_korean_name_listed_through_proxmox_comes_back_whole(env, monkeypatch):
+    _, guest, admin, alice, _, pool, d = env
+    _policy(admin, pool, desktop_files='both')
+    guest.files['MOAVI시험_한글.txt'] = b'x'
+    real = guest.run
+
+    def latin1(*a, **k):
+        code, out, err, e = real(*a, **k)
+        return code, out.encode('utf-8').decode('latin-1'), err, e
+    import pegaprox.api.vlab_next as nxt
+    monkeypatch.setattr(nxt, '_agent_run', latin1)
+    names = [e['name'] for e in alice.get(f"/api/vlab/me/desktops/{d['id']}/files").get_json()['entries']]
+    assert names == ['MOAVI시험_한글.txt']
