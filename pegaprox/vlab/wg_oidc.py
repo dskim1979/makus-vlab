@@ -89,7 +89,13 @@ def public_base():
 
 
 def sso_email(username):
-    """The e-mail Warpgate matches the user's SSO credential on: fixed per user, never a real address."""
+    """The e-mail Warpgate matches the user's SSO credential on: fixed per user, never a real address
+    (of the normalised identity: MOAVI\\admin and admin are one)."""
+    from pegaprox.vlab.warpgate import WarpgateError, portal_id
+    try:
+        username = portal_id(username)
+    except WarpgateError:
+        pass
     return f'{username}@{SSO_EMAIL_DOMAIN}'
 
 

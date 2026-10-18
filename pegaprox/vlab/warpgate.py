@@ -410,9 +410,50 @@ USER_PREFIX = 'moavi-'
 MANAGED_DESC = 'MOAVI Desk managed user'
 
 
+_PORTAL_ID_RE = re.compile(r'^[A-Za-z0-9._@-]{1,64}$')
+
+
+def _identity_domains():
+    """The directory domains whose DOMAIN\\user / user@realm forms are the plain portal id: the bundled
+    directory's (VLAB_DIRECTORY_DOMAIN / VLAB_DIRECTORY_REALM, as pegaprox/vlab/directory.py) and any
+    listed in VLAB_IDENTITY_DOMAINS (comma separated; a name with a dot is a realm)."""
+    netbios = {(os.environ.get('VLAB_DIRECTORY_DOMAIN') or 'MOAVI').strip().upper()}
+    realms = {(os.environ.get('VLAB_DIRECTORY_REALM') or 'moavi.lan').strip().lower()}
+    for x in os.environ.get('VLAB_IDENTITY_DOMAINS', '').split(','):
+        x = x.strip()
+        if x:
+            (realms.add(x.lower()) if '.' in x else netbios.add(x.upper()))
+    return netbios, realms
+
+
+def portal_id(username):
+    """The one identity a portal user has at the gateway. Found on 192.168.0.9: a sign-in as
+    "MOAVI\\admin" made a second Warpgate user next to "moavi-admin". DOMAIN\\user and user@realm of a
+    known directory domain are the plain (lower-case) name; another domain's form, or a character a
+    Warpgate user name / the ssh user:target form cannot hold, is refused (WarpgateError 400) - never
+    guessed, so two people never share one gateway user."""
+    s = str(username or '').strip()
+    netbios, realms = _identity_domains()
+    stripped = False
+    if '\\' in s:
+        dom, user = s.split('\\', 1)
+        if dom.upper() in netbios or dom.lower() in realms:
+            s, stripped = user, True
+    if '@' in s:
+        user, realm = s.rsplit('@', 1)
+        if realm.lower() in realms:
+            s, stripped = user, True
+    if stripped:
+        s = s.lower()
+    if not _PORTAL_ID_RE.match(s):
+        raise WarpgateError(f'portal user {username!r} cannot have a gateway identity', 400)
+    return s
+
+
 def wg_user_name(username):
-    """The Warpgate user name of a portal user (reserved prefix, never one of Warpgate's own accounts)."""
-    return f'{USER_PREFIX}{username}'
+    """The Warpgate user name of a portal user (reserved prefix, never one of Warpgate's own accounts;
+    the identity normalised by portal_id)."""
+    return f'{USER_PREFIX}{portal_id(username)}'
 
 
 def ensure_user(cfg, username, role_id=None):
@@ -588,8 +629,12 @@ OWN_KEY_COMMENT = 'moavi-desk-gateway'
 
 def ssh_login_name(username):
     """The desktop account a portal user's SSH lands on: the same name (local, LDAP or the bundled
-    directory, whose SSSD has use_fully_qualified_names = False). None when it cannot be a Linux name."""
-    name = str(username or '').strip()
+    directory, whose SSSD has use_fully_qualified_names = False). None when it cannot be a Linux name.
+    MOAVI\\admin / admin@moavi.lan land on admin (portal_id)."""
+    try:
+        name = portal_id(username)
+    except WarpgateError:
+        return None
     return name if _LOGIN_RE.match(name) else None
 
 
@@ -853,6 +898,47 @@ def migrate_legacy_users(cfg):
     return creds, roles
 
 
+def merge_stray_users(cfg):
+    """Once (vlab_warpgate_state): engine-made Warpgate users whose name is not the normalised identity
+    (moavi-MOAVI\\admin next to moavi-admin) are folded into it - their access roles and public keys
+    move over, then the stray user goes. Only users the engine made (MANAGED_DESC); a name that has no
+    gateway identity at all is left alone. Returns how many were folded."""
+    if _state('identities_merged'):
+        return 0
+    users = [u for u in (_call(cfg, 'GET', '/users') or []) if isinstance(u, dict)]
+    merged = 0
+    for u in users:
+        name = str(u.get('username') or '')
+        if not name.startswith(USER_PREFIX) or not str(u.get('description') or '').startswith(MANAGED_DESC):
+            continue
+        try:
+            want = wg_user_name(name[len(USER_PREFIX):])
+        except WarpgateError:
+            continue
+        if want.lower() == name.lower():
+            continue
+        target = ensure_user(cfg, want[len(USER_PREFIX):])
+        stray = u['id']
+        for r in _call(cfg, 'GET', f'/users/{stray}/roles') or []:
+            if isinstance(r, dict) and r.get('id'):
+                try:
+                    _call(cfg, 'POST', f"/users/{target}/roles/{r['id']}", {})
+                except WarpgateError as e:
+                    if e.status != 409:
+                        raise
+        have = {k.get('openssh_public_key') for k in (_call(cfg, 'GET', f'/users/{target}/credentials/public-keys') or [])
+                if isinstance(k, dict)}
+        for k in _call(cfg, 'GET', f'/users/{stray}/credentials/public-keys') or []:
+            if isinstance(k, dict) and k.get('openssh_public_key') and k['openssh_public_key'] not in have:
+                _call(cfg, 'POST', f'/users/{target}/credentials/public-keys',
+                      {'label': k.get('label') or 'MOAVI Desk', 'openssh_public_key': k['openssh_public_key']})
+        _call(cfg, 'DELETE', f'/users/{stray}')
+        merged += 1
+        logging.warning(f'[VLAB] Warpgate: folded user {name} into {want} (roles and keys moved)')
+    _set_state('identities_merged', now())
+    return merged
+
+
 def _state(key):
     r = db().query_one('SELECT value FROM vlab_warpgate_state WHERE key = ?', (key,))
     return r['value'] if r else None
@@ -938,6 +1024,7 @@ def start_auto_connect(attempts=30, wait=10):
                 auto_connect()
                 if is_enabled():
                     migrate_legacy_users(config(secret=True))
+                    merge_stray_users(config(secret=True))
                 return
             except Exception as e:
                 # the message carries no token or password (status codes only)
