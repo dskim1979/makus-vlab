@@ -898,15 +898,41 @@ def migrate_legacy_users(cfg):
     return creds, roles
 
 
+RETIRED_PREFIX = f'{USER_PREFIX}retired-'
+_CREDENTIAL_KINDS = ('sso', 'public-keys', 'passwords', 'otp', 'certificates')
+
+
+def _retire_user(cfg, uid, name, into):
+    """A Warpgate user that cannot be deleted (its sessions, tickets and recordings refer to it - found
+    on 192.168.0.9: DELETE answered 500, FOREIGN KEY constraint failed) is retired instead: every
+    credential and role taken off, renamed moavi-retired-<id>, described as merged. Nobody can sign in
+    as it; its history stays."""
+    for kind in _CREDENTIAL_KINDS:
+        try:
+            creds = _call(cfg, 'GET', f'/users/{uid}/credentials/{kind}') or []
+        except WarpgateError:
+            continue
+        for c in creds:
+            if isinstance(c, dict) and c.get('id'):
+                _call(cfg, 'DELETE', f"/users/{uid}/credentials/{kind}/{c['id']}")
+    for r in _call(cfg, 'GET', f'/users/{uid}/roles') or []:
+        if isinstance(r, dict) and r.get('id'):
+            _call(cfg, 'DELETE', f"/users/{uid}/roles/{r['id']}")
+    _call(cfg, 'PUT', f'/users/{uid}', {'username': f'{RETIRED_PREFIX}{str(uid)[:8]}',
+                                        'description': f'MOAVI Desk retired user: was {name}, merged into {into} (history kept)'})
+
+
 def merge_stray_users(cfg):
     """Once (vlab_warpgate_state): engine-made Warpgate users whose name is not the normalised identity
     (moavi-MOAVI\\admin next to moavi-admin) are folded into it - their access roles and public keys
-    move over, then the stray user goes. Only users the engine made (MANAGED_DESC); a name that has no
-    gateway identity at all is left alone. Returns how many were folded."""
+    move over, then the stray user goes; one Warpgate will not delete (it has history) is retired
+    (_retire_user). Only users the engine made (MANAGED_DESC); a name that has no gateway identity at
+    all is left alone. A failure is logged per user and tried again at the next start; it never stops
+    the start-up. Returns how many were folded."""
     if _state('identities_merged'):
         return 0
     users = [u for u in (_call(cfg, 'GET', '/users') or []) if isinstance(u, dict)]
-    merged = 0
+    merged, failed = 0, 0
     for u in users:
         name = str(u.get('username') or '')
         if not name.startswith(USER_PREFIX) or not str(u.get('description') or '').startswith(MANAGED_DESC):
@@ -917,25 +943,35 @@ def merge_stray_users(cfg):
             continue
         if want.lower() == name.lower():
             continue
-        target = ensure_user(cfg, want[len(USER_PREFIX):])
-        stray = u['id']
-        for r in _call(cfg, 'GET', f'/users/{stray}/roles') or []:
-            if isinstance(r, dict) and r.get('id'):
-                try:
-                    _call(cfg, 'POST', f"/users/{target}/roles/{r['id']}", {})
-                except WarpgateError as e:
-                    if e.status != 409:
-                        raise
-        have = {k.get('openssh_public_key') for k in (_call(cfg, 'GET', f'/users/{target}/credentials/public-keys') or [])
-                if isinstance(k, dict)}
-        for k in _call(cfg, 'GET', f'/users/{stray}/credentials/public-keys') or []:
-            if isinstance(k, dict) and k.get('openssh_public_key') and k['openssh_public_key'] not in have:
-                _call(cfg, 'POST', f'/users/{target}/credentials/public-keys',
-                      {'label': k.get('label') or 'MOAVI Desk', 'openssh_public_key': k['openssh_public_key']})
-        _call(cfg, 'DELETE', f'/users/{stray}')
-        merged += 1
-        logging.warning(f'[VLAB] Warpgate: folded user {name} into {want} (roles and keys moved)')
-    _set_state('identities_merged', now())
+        try:
+            target = ensure_user(cfg, want[len(USER_PREFIX):])
+            stray = u['id']
+            for r in _call(cfg, 'GET', f'/users/{stray}/roles') or []:
+                if isinstance(r, dict) and r.get('id'):
+                    try:
+                        _call(cfg, 'POST', f"/users/{target}/roles/{r['id']}", {})
+                    except WarpgateError as e:
+                        if e.status != 409:
+                            raise
+            have = {k.get('openssh_public_key') for k in (_call(cfg, 'GET', f'/users/{target}/credentials/public-keys') or [])
+                    if isinstance(k, dict)}
+            for k in _call(cfg, 'GET', f'/users/{stray}/credentials/public-keys') or []:
+                if isinstance(k, dict) and k.get('openssh_public_key') and k['openssh_public_key'] not in have:
+                    _call(cfg, 'POST', f'/users/{target}/credentials/public-keys',
+                          {'label': k.get('label') or 'MOAVI Desk', 'openssh_public_key': k['openssh_public_key']})
+            try:
+                _call(cfg, 'DELETE', f'/users/{stray}')
+                how = 'removed'
+            except WarpgateError as e:
+                _retire_user(cfg, stray, name, want)
+                how = f'retired as {RETIRED_PREFIX}{str(stray)[:8]} (Warpgate keeps its history: {str(e)[:120]})'
+            merged += 1
+            logging.warning(f'[VLAB] Warpgate: folded user {name} into {want} (roles and keys moved, {how})')
+        except Exception as e:
+            failed += 1
+            logging.warning(f'[VLAB] Warpgate: could not fold user {name} into {want}: {str(e)[:200]} - tried again at the next start')
+    if not failed:
+        _set_state('identities_merged', now())
     return merged
 
 
@@ -1024,7 +1060,10 @@ def start_auto_connect(attempts=30, wait=10):
                 auto_connect()
                 if is_enabled():
                     migrate_legacy_users(config(secret=True))
-                    merge_stray_users(config(secret=True))
+                    try:
+                        merge_stray_users(config(secret=True))
+                    except Exception as e:
+                        logging.warning(f'[VLAB] Warpgate identity fold skipped: {str(e)[:200]}')
                 return
             except Exception as e:
                 # the message carries no token or password (status codes only)

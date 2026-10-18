@@ -1656,3 +1656,54 @@ def test_stray_engine_users_are_folded_into_the_normal_one(env, fake_wg, oidc_on
     assert [k['openssh_public_key'] for k in fake_wg.keys[good]] == ['ssh-ed25519 AAAAstray me@pc']
     assert 'moavi-MOAVI\\carol' in fake_wg.users and 'moavi-OTHER\\dave' in fake_wg.users
     assert wg.merge_stray_users(cfg) == 0                       # once
+
+
+def test_a_stray_user_warpgate_will_not_delete_is_retired(env, fake_wg, oidc_on, monkeypatch, caplog):
+    """Found on 192.168.0.9: DELETE /users/<id> answered 500 (FOREIGN KEY constraint failed) for a user
+    with session history - the fold then retires it instead of trying forever."""
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    role = wg.ensure_role(cfg)
+    good = wg.ensure_user(cfg, 'admin', role)
+    stray = fake_wg.users['moavi-MOAVI__admin'.replace('__', chr(92))] = 'stray-2'
+    fake_wg.user_desc[stray] = wg.MANAGED_DESC
+    fake_wg.user_roles[stray] = [role]
+    fake_wg.sso[stray] = [{'id': 's1', 'provider': 'moavi-desk', 'email': 'MOAVI__admin@moavi-desk.invalid'.replace('__', chr(92))}]
+    fake_wg.keys[stray] = [{'id': 'k1', 'label': 'pc', 'openssh_public_key': 'ssh-ed25519 AAAAk me@pc'}]
+    real = fake_wg.__call__
+    renamed = {}
+
+    def api(method, path, token, base_url, verify_tls, body=None, timeout=15):
+        if method == 'DELETE' and path == f'/users/{stray}':
+            return 500, 'SqliteError { code: 787, message: "FOREIGN KEY constraint failed" }'
+        if method == 'PUT' and path == f'/users/{stray}':
+            renamed.update(body)
+            return 200, {}
+        if path.startswith(f'/users/{stray}/credentials/') and path.count('/') == 3 and method == 'GET' and 'sso' not in path and 'public-keys' not in path:
+            return 200, []
+        return real(method, path, token, base_url, verify_tls, body, timeout)
+    monkeypatch.setattr(wg, '_api', api)
+    assert wg.merge_stray_users(cfg) == 1
+    assert renamed['username'] == 'moavi-retired-stray-2'[:len('moavi-retired-') + 8] and 'merged into moavi-admin' in renamed['description']
+    assert fake_wg.sso[stray] == [] and fake_wg.keys.get(stray) == [] and fake_wg.user_roles[stray] == []
+    assert [k['openssh_public_key'] for k in fake_wg.keys[good]] == ['ssh-ed25519 AAAAk me@pc']
+    assert 'retired as moavi-retired-' in caplog.text
+    assert wg.merge_stray_users(cfg) == 0                        # done, not tried forever
+
+
+def test_a_fold_that_fails_never_stops_the_start(env, fake_wg, oidc_on, monkeypatch, caplog):
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    fake_wg.users['moavi-MOAVI__bob'.replace('__', chr(92))] = 'stray-3'
+    fake_wg.user_desc['stray-3'] = wg.MANAGED_DESC
+    real = fake_wg.__call__
+
+    def api(method, path, *a, **k):
+        if path.startswith('/users/stray-3'):
+            return 500, 'boom'
+        return real(method, path, *a, **k)
+    monkeypatch.setattr(wg, '_api', api)
+    assert wg.merge_stray_users(cfg) == 0
+    assert 'could not fold user' in caplog.text and wg._state('identities_merged') is None   # tried again next start
