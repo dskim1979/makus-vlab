@@ -3,24 +3,28 @@
 MOAVI Desk desktop templates (가상머신 > 이미지 > 데스크톱 템플릿): ready-made desktops for the pools of a
 site - built on the cluster from a public cloud image (Linux) or the admin's Windows ISO, then
 registered as a golden image (Linux, with its environment card) or a Proxmox template (Windows,
-generalised with sysprep).
+generalised with sysprep). A template is a use (PRESETS) on an operating system the use supports (OSES):
 
-  office-win11   일반 업무 · Windows 11  the admin's Windows 11 ISO + virtio-win ISO, unattended setup,
-                                         guest tools, RDP, Korean locale, Chrome · 7-Zip, sysprep
-  research       연구원 · Ubuntu 24.04    Xfce desktop + xrdp, Korean input, dev tools, Python,
-                                         JupyterLab + code-server (the portal's 웹 IDE), NFS / autofs
-  gpu            GPU · AI · Ubuntu 24.04  research + NVIDIA driver (open kernel modules), CUDA, PyTorch
-  npu            NPU · Ubuntu 22.04       research + the vendor SDK (FuriosaAI, Rebellions ...) from
-                                         an offline package folder the admin keeps on NFS
-  fpga           FPGA · Ubuntu 22.04      research + Vivado / Vitis prerequisites, JTAG cable udev
-                                         rules (Xilinx, Digilent, FTDI), Vivado from the admin's
-                                         installer folder on NFS (batch install, EULA accepted by the admin)
+  office    일반 업무    Windows 11 / 10, Windows Server 2025 / 2022 (shared desktops: RDS licences needed) -
+                        the admin's ISO + virtio-win ISO, unattended setup, guest tools, RDP, Korean locale,
+                        Chrome · 7-Zip, sysprep
+  research  연구원 · Linux  any Linux of the image library: desktop (Xfce or GNOME) + xrdp, Korean input,
+                        directory join tools, dev tools, Python, JupyterLab + code-server (the portal's 웹 IDE)
+  gpu       GPU · AI     research + NVIDIA driver (open kernel modules), CUDA 12.8, PyTorch - on the OSes CUDA supports
+  npu       NPU          research + the vendor SDK (FuriosaAI, Rebellions ...) from an offline package folder
+                        the admin keeps on NFS - on the OSes the vendors support
+  fpga      FPGA         research + Vivado / Vitis prerequisites, JTAG cable udev rules (Xilinx, Digilent,
+                        FTDI), Vivado from the admin's installer folder on NFS (batch install, EULA accepted
+                        by the admin) - on the OSes Vivado supports
 
 Linux builds follow pegaprox/api/templates_lib.py (download -> import) and boot with a NoCloud CD
 (volume cidata: user-data + meta-data) that runs /usr/local/sbin/moavi-template-build.sh on the
-first boot - no Proxmox Snippets storage needed; the engine follows its stage file through the guest agent. Nothing here stores a user
-password: the Linux templates have no password login (users come from the directory), the Windows
-template's local administrator gets a random password shown to the admin once.
+first boot - apt on Ubuntu / Debian, dnf (+ EPEL) on Rocky / AlmaLinux - no Proxmox Snippets storage
+needed; the engine follows its stage file through the guest agent. Everything is downloaded from the
+Internet (the distribution's repositories, NVIDIA, PyTorch, GitHub) except what is licensed (Windows
+ISO, Vivado, NPU SDK). Nothing here stores a user password: the Linux templates have no password login
+(users come from the directory), the Windows template's local administrator gets a random password
+shown to the admin once.
 
 This module is pure (texts and checks); the build itself is pegaprox/api/vlab_desktpl.py.
 """
@@ -41,44 +45,67 @@ WIN_FAILED = r'C:\moavi\failed.txt'
 WIN_STAGE = r'C:\moavi\stage.txt'
 
 CODE_SERVER_VERSION = '4.96.4'
-CUDA_REPOS = {'24.04': 'ubuntu2404', '22.04': 'ubuntu2204'}
 CUDA_TOOLKIT = 'cuda-toolkit-12-8'
 TORCH_INDEX = 'https://download.pytorch.org/whl/cu128'
 
 # JTAG cables of FPGA boards (USB vendor ids): Xilinx Platform Cable, FTDI (most dev boards), Digilent
 JTAG_VENDORS = (('03fd', 'Xilinx'), ('0403', 'FTDI'), ('1443', 'Digilent'))
 
+# --- the operating systems ------------------------------------------------------------------------
+# Linux: `base` is the cloud image of pegaprox/api/templates_lib.py CATALOG; `family` picks apt or dnf;
+# `cuda` the NVIDIA repository directory. Windows: what setup needs (Proxmox ostype, the virtio-win driver
+# folder, the image name in a Microsoft ISO).
+OSES = {
+    'ubuntu-2604': {'name': 'Ubuntu 26.04 LTS', 'platform': 'linux', 'family': 'debian', 'distro': 'ubuntu', 'release': '26.04', 'base': 'ubuntu-2604'},
+    'ubuntu-2404': {'name': 'Ubuntu 24.04 LTS', 'platform': 'linux', 'family': 'debian', 'distro': 'ubuntu', 'release': '24.04', 'base': 'ubuntu-2404', 'cuda': 'ubuntu2404'},
+    'ubuntu-2204': {'name': 'Ubuntu 22.04 LTS', 'platform': 'linux', 'family': 'debian', 'distro': 'ubuntu', 'release': '22.04', 'base': 'ubuntu-2204', 'cuda': 'ubuntu2204'},
+    'debian-13': {'name': 'Debian 13', 'platform': 'linux', 'family': 'debian', 'distro': 'debian', 'release': '13', 'base': 'debian-13'},
+    'debian-12': {'name': 'Debian 12', 'platform': 'linux', 'family': 'debian', 'distro': 'debian', 'release': '12', 'base': 'debian-12'},
+    'rocky-10': {'name': 'Rocky Linux 10', 'platform': 'linux', 'family': 'rhel', 'distro': 'rocky', 'release': '10', 'base': 'rocky-10'},
+    'rocky-9': {'name': 'Rocky Linux 9', 'platform': 'linux', 'family': 'rhel', 'distro': 'rocky', 'release': '9', 'base': 'rocky-9', 'cuda': 'rhel9'},
+    'almalinux-10': {'name': 'AlmaLinux 10', 'platform': 'linux', 'family': 'rhel', 'distro': 'almalinux', 'release': '10', 'base': 'almalinux-10'},
+    'almalinux-9': {'name': 'AlmaLinux 9', 'platform': 'linux', 'family': 'rhel', 'distro': 'almalinux', 'release': '9', 'base': 'almalinux-9', 'cuda': 'rhel9'},
+    'win11': {'name': 'Windows 11', 'platform': 'windows', 'ostype': 'win11', 'drivers': 'w11', 'edition': 'Windows 11 Pro', 'iso_hint': r'win(dows)?[ _-]?11'},
+    'win10': {'name': 'Windows 10', 'platform': 'windows', 'ostype': 'win10', 'drivers': 'w10', 'edition': 'Windows 10 Pro', 'iso_hint': r'win(dows)?[ _-]?10'},
+    'ws2025': {'name': 'Windows Server 2025', 'platform': 'windows', 'ostype': 'win11', 'drivers': '2k25', 'server': True,
+               'edition': 'Windows Server 2025 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2025|2k25'},
+    'ws2022': {'name': 'Windows Server 2022', 'platform': 'windows', 'ostype': 'win11', 'drivers': '2k22', 'server': True,
+               'edition': 'Windows Server 2022 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2022|2k22'},
+}
+DESKTOPS = ('xfce', 'gnome')
+
+_ALL_LINUX = ['ubuntu-2404', 'ubuntu-2204', 'ubuntu-2604', 'debian-13', 'debian-12', 'rocky-9', 'rocky-10', 'almalinux-9', 'almalinux-10']
+
 PRESETS = {
-    'office-win11': {
-        'name': '일반 업무 · Windows 11', 'name_en': 'Office · Windows 11', 'os': 'windows', 'kind': 'general',
+    'office': {
+        'name': '일반 업무', 'name_en': 'Office', 'platform': 'windows', 'kind': 'general',
         'cores': 4, 'memory_mb': 8192, 'disk_gb': 80, 'output': 'template',
-        'summary': 'Windows 11 무인 설치 · 게스트 도구 · RDP · 한국어 · Chrome · 7-Zip · sysprep',
-        'needs': ['windows_iso', 'virtio_iso'],
+        'summary': 'Windows 무인 설치 · 게스트 도구 · RDP · 한국어 · Chrome · 7-Zip · sysprep',
+        'os_choices': ['win11', 'win10', 'ws2025', 'ws2022'], 'needs': ['windows_iso', 'virtio_iso'],
     },
     'research': {
-        'name': '연구원 · Ubuntu 24.04', 'name_en': 'Research · Ubuntu 24.04', 'os': 'linux', 'base': 'ubuntu-2404',
-        'release': '24.04', 'kind': 'general', 'cores': 4, 'memory_mb': 8192, 'disk_gb': 64, 'output': 'golden',
-        'summary': 'Xfce 데스크톱 · xrdp · 한글 입력 · 개발 도구 · Python · JupyterLab · code-server',
-        'features': ['desktop', 'dev', 'ide'],
+        'name': '연구원 · Linux', 'name_en': 'Research · Linux', 'platform': 'linux', 'kind': 'general',
+        'cores': 4, 'memory_mb': 8192, 'disk_gb': 64, 'output': 'golden',
+        'summary': '데스크톱(Xfce · GNOME) · 원격 데스크톱 · 한글 입력 · 개발 도구 · Python · JupyterLab · code-server',
+        'features': ['desktop', 'dev', 'ide'], 'os_choices': _ALL_LINUX,
     },
     'gpu': {
-        'name': 'GPU · AI · Ubuntu 24.04', 'name_en': 'GPU · AI · Ubuntu 24.04', 'os': 'linux', 'base': 'ubuntu-2404',
-        'release': '24.04', 'kind': 'ai', 'cores': 8, 'memory_mb': 16384, 'disk_gb': 120, 'output': 'golden',
+        'name': 'GPU · AI', 'name_en': 'GPU · AI', 'platform': 'linux', 'kind': 'ai',
+        'cores': 8, 'memory_mb': 16384, 'disk_gb': 120, 'output': 'golden',
         'summary': '연구원 템플릿 + NVIDIA 드라이버(open) · CUDA 12.8 · PyTorch',
-        'features': ['desktop', 'dev', 'ide', 'nvidia'],
+        'features': ['desktop', 'dev', 'ide', 'nvidia'], 'os_choices': ['ubuntu-2404', 'ubuntu-2204', 'rocky-9', 'almalinux-9'],
     },
     'npu': {
-        'name': 'NPU · Ubuntu 22.04', 'name_en': 'NPU · Ubuntu 22.04', 'os': 'linux', 'base': 'ubuntu-2204',
-        'release': '22.04', 'kind': 'npu', 'cores': 8, 'memory_mb': 16384, 'disk_gb': 100, 'output': 'golden',
+        'name': 'NPU', 'name_en': 'NPU', 'platform': 'linux', 'kind': 'npu',
+        'cores': 8, 'memory_mb': 16384, 'disk_gb': 100, 'output': 'golden',
         'summary': '연구원 템플릿 + NPU SDK(FuriosaAI · Rebellions 등, 관리자 패키지 폴더에서)',
-        'features': ['desktop', 'dev', 'ide', 'npu'],
-        'optional': ['vendor_dir'],
+        'features': ['desktop', 'dev', 'ide', 'npu'], 'os_choices': ['ubuntu-2204', 'ubuntu-2404'], 'optional': ['vendor_dir'],
     },
     'fpga': {
-        'name': 'FPGA · Ubuntu 22.04', 'name_en': 'FPGA · Ubuntu 22.04', 'os': 'linux', 'base': 'ubuntu-2204',
-        'release': '22.04', 'kind': 'fpga', 'cores': 8, 'memory_mb': 16384, 'disk_gb': 250, 'output': 'golden',
+        'name': 'FPGA', 'name_en': 'FPGA', 'platform': 'linux', 'kind': 'fpga',
+        'cores': 8, 'memory_mb': 16384, 'disk_gb': 250, 'output': 'golden',
         'summary': '연구원 템플릿 + Vivado/Vitis 필수 라이브러리 · JTAG udev · Vivado(설치 파일이 있으면 자동)',
-        'features': ['desktop', 'dev', 'ide', 'fpga'],
+        'features': ['desktop', 'dev', 'ide', 'fpga'], 'os_choices': ['ubuntu-2204', 'ubuntu-2404', 'rocky-9', 'almalinux-9'],
         'optional': ['vendor_dir'],
     },
 }
@@ -87,10 +114,22 @@ _NFS_RE = re.compile(r'^[A-Za-z0-9.\-]{1,253}:/[A-Za-z0-9._/\-]{1,300}$')
 _NAME_RE = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9.-]{0,61}[A-Za-z0-9])?$')
 _VOLID_RE = re.compile(r'^[A-Za-z0-9._-]+:iso/[A-Za-z0-9._+-]+\.iso$')
 _AGREE_RE = re.compile(r'^[A-Za-z0-9_,]{1,120}$')
+_EDITION_RE = re.compile(r'^Windows (1[01]|Server 20(19|22|25)) [A-Za-z ()]{2,60}$')
+_KEY_RE = re.compile(r'^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$')
 
 
 def preset_list():
-    return [dict({k: v for k, v in p.items()}, id=k) for k, p in PRESETS.items()]
+    out = []
+    for k, p in PRESETS.items():
+        item = dict(p, id=k)
+        item['os_options'] = [dict(OSES[o], id=o) for o in p['os_choices']]
+        item['os_default'] = p['os_choices'][0]
+        out.append(item)
+    return out
+
+
+def os_of(opts):
+    return OSES[opts['os']]
 
 
 def validate(preset_id, data):
@@ -100,7 +139,12 @@ def validate(preset_id, data):
     if not p:
         return None, 'Unknown template'
     out = {'preset': preset_id}
-    name = str(data.get('name') or '').strip() or f'moavi-{preset_id}'
+    os_id = str(data.get('os') or p['os_choices'][0])
+    if os_id not in p['os_choices']:
+        return None, f"os: one of {', '.join(p['os_choices'])} for this template"
+    out['os'] = os_id
+    o = OSES[os_id]
+    name = str(data.get('name') or '').strip() or f"moavi-{preset_id}-{os_id.replace('-', '')}"
     if not _NAME_RE.fullmatch(name):
         return None, 'name: letters, digits, "-" and ".", up to 63'
     out['name'] = name
@@ -109,20 +153,30 @@ def validate(preset_id, data):
         if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
             return None, f'{k} must be a whole number from {lo} to {hi}'
         out[k] = v
-    if p['os'] == 'windows':
+    if o['platform'] == 'windows':
         for k in ('windows_iso', 'virtio_iso'):
             v = str(data.get(k) or '')
             if not _VOLID_RE.fullmatch(v):
                 return None, f'{k}: an ISO of a storage (storage:iso/name.iso)'
             out[k] = v
-        edition = str(data.get('edition') or 'Windows 11 Pro').strip()
-        if not re.fullmatch(r'Windows 1[01] [A-Za-z ]{2,40}', edition):
-            return None, 'edition: the image name in the ISO, e.g. "Windows 11 Pro"'
+        edition = str(data.get('edition') or o['edition']).strip()
+        if not _EDITION_RE.fullmatch(edition):
+            return None, f'edition: the image name in the ISO, e.g. "{o["edition"]}"'
         out['edition'] = edition
         lang = str(data.get('language') or 'ko-KR')
         if lang not in ('ko-KR', 'en-US'):
             return None, 'language: ko-KR or en-US (the language of the ISO)'
         out['language'] = lang
+        key = str(data.get('product_key') or '').strip().upper()
+        if key and not _KEY_RE.fullmatch(key):
+            return None, 'product_key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX'
+        if key:
+            out['product_key'] = key
+    else:
+        desktop = str(data.get('desktop') or 'xfce')
+        if desktop not in DESKTOPS:
+            return None, 'desktop: xfce or gnome'
+        out['desktop'] = desktop
     vendor = str(data.get('vendor_dir') or '').strip()
     if vendor:
         if 'vendor_dir' not in p.get('optional', ()):
@@ -143,11 +197,6 @@ def validate(preset_id, data):
 
 # --- Linux: cloud-init user-data and the first-boot build script -----------------------------
 
-def _yaml_str(s):
-    """A YAML double-quoted scalar."""
-    return '"' + str(s).replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-
 def _block(text, indent=6):
     pad = ' ' * indent
     return '\n'.join(pad + line if line else '' for line in text.split('\n'))
@@ -161,131 +210,231 @@ def udev_rules():
     return '\n'.join(lines) + '\n'
 
 
-def build_script(opts):
-    """bash run once by cloud-init (runcmd) as root. Writes its stage to STAGE_FILE, READY_FILE at the
-    end, FAILED_FILE with the failing step on an error."""
-    p = PRESETS[opts['preset']]
-    feats = p.get('features', [])
-    q = shlex.quote
-    rel = p['release']
-    s = [
-        '#!/bin/bash',
-        '# MOAVI Desk desktop template build (pegaprox/vlab/desktpl.py) - runs once on the first boot',
-        'set -o pipefail',
-        f'exec >>{LOG_FILE} 2>&1',
+_COMMON_HEAD = [
+    '#!/bin/bash',
+    '# MOAVI Desk desktop template build (pegaprox/vlab/desktpl.py) - runs once on the first boot',
+    'set -o pipefail',
+    f'exec >>{LOG_FILE} 2>&1',
+    'mkdir -p /var/lib/moavi',
+    f'stage() {{ echo "$1" > {STAGE_FILE}; echo "== $(date -Is) $1"; }}',
+    f'fail() {{ echo "$1" > {FAILED_FILE}; echo "!! $(date -Is) failed: $1"; exit 1; }}',
+]
+
+# the Hangul input and the session every user of the desktop gets (Xfce or GNOME, in RDP and on the console)
+_IME_FCITX = [
+    "printf 'export GTK_IM_MODULE=fcitx\\nexport QT_IM_MODULE=fcitx\\nexport XMODIFIERS=@im=fcitx\\n' > /etc/profile.d/moavi-ime.sh",
+    "printf '[Desktop Entry]\\nType=Application\\nName=fcitx5\\nExec=fcitx5 -d\\n' > /etc/xdg/autostart/moavi-fcitx5.desktop",
+]
+_IME_IBUS = [
+    "printf 'export GTK_IM_MODULE=ibus\\nexport QT_IM_MODULE=ibus\\nexport XMODIFIERS=@im=ibus\\n' > /etc/profile.d/moavi-ime.sh",
+]
+# xrdp: no "authentication required to create a color managed device" prompt in RDP sessions
+_POLKIT_COLORD = [
+    'mkdir -p /etc/polkit-1/rules.d',
+    "printf 'polkit.addRule(function(a, s) { if (a.id.indexOf(\"org.freedesktop.color-manager.\") == 0) return polkit.Result.YES; });\\n'"
+    ' > /etc/polkit-1/rules.d/45-moavi-colord.rules',
+]
+
+
+def _session_lines(desktop, distro):
+    if desktop == 'gnome':
+        mode = 'ubuntu' if distro == 'ubuntu' else 'classic'
+        return [f"printf 'export GNOME_SHELL_SESSION_MODE={mode}\\nexec gnome-session\\n' > /etc/skel/.xsession"]
+    return ["echo 'xfce4-session' > /etc/skel/.xsession"]
+
+
+def _debian_script(opts):
+    o, p = os_of(opts), PRESETS[opts['preset']]
+    feats, q, ubuntu = p.get('features', []), shlex.quote, os_of(opts)['distro'] == 'ubuntu'
+    desktop = opts.get('desktop', 'xfce')
+    s = list(_COMMON_HEAD) + [
         'export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a',
-        'mkdir -p /var/lib/moavi',
-        f'stage() {{ echo "$1" > {STAGE_FILE}; echo "== $(date -Is) $1"; }}',
-        f'fail() {{ echo "$1" > {FAILED_FILE}; echo "!! $(date -Is) failed: $1"; exit 1; }}',
         'apt_get() { for i in 1 2 3; do apt-get -y -o Dpkg::Options::=--force-confold "$@" && return 0; sleep 20; apt-get update; done; return 1; }',
+        'pkg_files() { apt_get install "$@"; }',
         'stage update',
         'apt-get update || fail "apt update"',
         'apt_get dist-upgrade || fail "upgrade"',
         'apt_get install qemu-guest-agent spice-vdagent curl wget ca-certificates gnupg locales || fail "base packages"',
         'systemctl enable --now qemu-guest-agent',
+        "sed -i 's/^# *ko_KR.UTF-8/ko_KR.UTF-8/; s/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen",
         'locale-gen ko_KR.UTF-8 en_US.UTF-8; update-locale LANG=ko_KR.UTF-8',
         'timedatectl set-timezone Asia/Seoul || ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime',
     ]
     if 'desktop' in feats:
+        if desktop == 'gnome':
+            pkgs = 'ubuntu-desktop-minimal' if ubuntu else 'task-gnome-desktop'
+            dm = 'gdm3'
+        else:
+            pkgs = 'xfce4 xfce4-goodies xfce4-terminal lightdm lightdm-gtk-greeter'
+            dm = 'lightdm'
+        korean = ('language-pack-ko ' if ubuntu else '') + 'fonts-nanum fonts-noto-cjk fcitx5 fcitx5-hangul fcitx5-config-qt im-config'
         s += [
             'stage desktop',
-            'apt_get install --no-install-recommends xfce4 xfce4-goodies xfce4-terminal lightdm lightdm-gtk-greeter '
-            'dbus-x11 xorg xrdp xorgxrdp network-manager-gnome || fail "desktop"',
-            'apt_get install language-pack-ko fonts-nanum fonts-noto-cjk fcitx5 fcitx5-hangul fcitx5-config-qt im-config || fail "korean input"',
-            'apt_get install firefox || true',
-            # every user's RDP / console session is Xfce with Hangul input
-            "echo 'xfce4-session' > /etc/skel/.xsession",
-            "printf 'export GTK_IM_MODULE=fcitx\\nexport QT_IM_MODULE=fcitx\\nexport XMODIFIERS=@im=fcitx\\n' > /etc/profile.d/moavi-ime.sh",
-            "printf '[Desktop Entry]\\nType=Application\\nName=fcitx5\\nExec=fcitx5 -d\\n' > /etc/xdg/autostart/moavi-fcitx5.desktop",
-            # xrdp: no "authentication required to create a color managed device" prompt in RDP sessions
-            "mkdir -p /etc/polkit-1/localauthority/50-local.d",
-            "printf '[Allow colord]\\nIdentity=unix-user:*\\nAction=org.freedesktop.color-manager.*\\nResultAny=no\\nResultInactive=no\\nResultActive=yes\\n'"
-            " > /etc/polkit-1/localauthority/50-local.d/45-moavi-colord.pkla",
+            f'apt_get install --no-install-recommends {pkgs} dbus-x11 xorg xrdp xorgxrdp network-manager-gnome || fail "desktop"',
+            f'apt_get install {korean} || fail "korean input"',
+            f'apt_get install {"firefox" if ubuntu else "firefox-esr"} || true',
+            *_session_lines(desktop, o['distro']), *_IME_FCITX, *_POLKIT_COLORD,
             'adduser xrdp ssl-cert 2>/dev/null || true',
-            'systemctl enable xrdp lightdm',
+            f'systemctl enable xrdp {dm}; systemctl set-default graphical.target',
             # ready for 내장 디렉터리 자동 조인 (realm join through the guest agent)
             'apt_get install realmd sssd sssd-tools adcli krb5-user samba-common-bin oddjob oddjob-mkhomedir packagekit || fail "directory join tools"',
             "grep -q pam_mkhomedir /etc/pam.d/common-session || echo 'session optional pam_mkhomedir.so skel=/etc/skel umask=077' >> /etc/pam.d/common-session",
         ]
     if 'dev' in feats:
-        s += [
-            'stage dev',
-            'apt_get install build-essential git git-lfs cmake pkg-config vim nano htop tmux unzip zip rsync '
-            'python3 python3-venv python3-pip python3-dev nfs-common autofs || fail "dev tools"',
-        ]
+        s += ['stage dev',
+              'apt_get install build-essential git git-lfs cmake pkg-config vim nano htop tmux unzip zip rsync '
+              'python3 python3-venv python3-pip python3-dev nfs-common autofs || fail "dev tools"']
     if 'ide' in feats:
-        s += [
-            'stage ide',
-            'python3 -m venv /opt/jupyter || fail "jupyter venv"',
-            '/opt/jupyter/bin/pip install --upgrade pip wheel || fail "pip"',
-            '/opt/jupyter/bin/pip install jupyterlab jupyter-server-proxy jupyter-vscode-proxy ipykernel ipywidgets '
-            'numpy pandas matplotlib scipy || fail "jupyterlab"',
-            'ln -sf /opt/jupyter/bin/jupyter /usr/local/bin/jupyter',
-            f'curl -fsSL -o /tmp/code-server.deb https://github.com/coder/code-server/releases/download/v{CODE_SERVER_VERSION}/code-server_{CODE_SERVER_VERSION}_amd64.deb'
-            ' || fail "code-server download"',
-            'apt_get install /tmp/code-server.deb || fail "code-server"',
-            'rm -f /tmp/code-server.deb',
-        ]
+        s += ['stage ide', *_jupyter_lines(),
+              f'curl -fsSL -o /tmp/code-server.deb https://github.com/coder/code-server/releases/download/v{CODE_SERVER_VERSION}/code-server_{CODE_SERVER_VERSION}_amd64.deb'
+              ' || fail "code-server download"',
+              'apt_get install /tmp/code-server.deb || fail "code-server"', 'rm -f /tmp/code-server.deb']
     if 'nvidia' in feats:
-        repo = CUDA_REPOS[rel]
+        s += ['stage nvidia',
+              f"curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/{o['cuda']}/x86_64/cuda-keyring_1.1-1_all.deb || fail \"cuda keyring\"",
+              'dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb && apt-get update || fail "cuda repo"',
+              # the open kernel modules (Turing and later, every datacenter card a pool passes through)
+              f'apt_get install nvidia-open {CUDA_TOOLKIT} || fail "nvidia driver and CUDA"', *_cuda_tail()]
+    s += _vendor_lines(opts, 'deb')
+    if 'fpga' in feats:
+        s += ['stage fpga',
+              'apt_get install libtinfo5 libncurses5 libncursesw5 libx11-6 libxext6 libxrender1 libxtst6 libxi6 libfreetype6 '
+              'fontconfig libgtk2.0-0 libcanberra-gtk-module libcanberra-gtk3-module xvfb gcc g++ make libusb-1.0-0 '
+              '|| fail "fpga libraries"', *_jtag_lines(), *_vivado_lines(opts)]
+    s += ['stage cleanup', 'apt-get -y autoremove; apt-get clean', *_lock_lines(), 'stage done', f'date -Is > {READY_FILE}']
+    return '\n'.join(s) + '\n'
+
+
+def _rhel_script(opts):
+    o, p = os_of(opts), PRESETS[opts['preset']]
+    feats = p.get('features', [])
+    desktop = opts.get('desktop', 'xfce')
+    s = list(_COMMON_HEAD) + [
+        'dnf_i() { for i in 1 2 3; do dnf -y install "$@" && return 0; sleep 20; done; return 1; }',
+        'stage update',
+        'dnf -y upgrade || fail "upgrade"',
+        'dnf_i qemu-guest-agent spice-vdagent curl wget ca-certificates glibc-langpack-ko langpacks-ko || fail "base packages"',
+        # the guest agent of RHEL / Rocky / Alma blocks guest-exec: the engine needs it (this build, directory join, versions)
+        "sed -i 's/^FILTER_RPC_ARGS=.*/FILTER_RPC_ARGS=\"\"/; s/^BLOCK_RPCS=.*/BLOCK_RPCS=\"\"/' /etc/sysconfig/qemu-ga 2>/dev/null || true",
+        'systemctl enable qemu-guest-agent; systemctl restart qemu-guest-agent',
+        'localectl set-locale LANG=ko_KR.UTF-8 || true',
+        'timedatectl set-timezone Asia/Seoul || ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime',
+        # EPEL (xrdp, Xfce, fcitx) and the CodeReady / CRB repository it builds on
+        'dnf_i epel-release || fail "epel"',
+        '(dnf config-manager --set-enabled crb || dnf config-manager --enable crb || crb enable) >/dev/null 2>&1 || true',
+        'dnf -y makecache',
+    ]
+    if 'desktop' in feats:
+        group = '"Server with GUI"' if desktop == 'gnome' else '"Xfce"'
+        dm = 'gdm' if desktop == 'gnome' else 'lightdm'
         s += [
-            'stage nvidia',
-            f'curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/{repo}/x86_64/cuda-keyring_1.1-1_all.deb || fail "cuda keyring"',
-            'dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb && apt-get update || fail "cuda repo"',
-            # the open kernel modules (Turing and later, every datacenter card a pool passes through)
-            f'apt_get install nvidia-open {CUDA_TOOLKIT} || fail "nvidia driver and CUDA"',
-            "printf 'export PATH=/usr/local/cuda/bin:$PATH\\nexport LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}\\n' > /etc/profile.d/moavi-cuda.sh",
-            'stage pytorch',
-            f'/opt/jupyter/bin/pip install torch torchvision torchaudio --index-url {TORCH_INDEX} || fail "pytorch"',
+            'stage desktop',
+            f'dnf -y groupinstall {group} || dnf -y group install {group} || fail "desktop"',
+            ('dnf_i lightdm lightdm-gtk || fail "display manager"' if desktop == 'xfce' else 'true'),
+            'dnf_i xrdp xorgxrdp || fail "xrdp"',
+            'dnf_i google-noto-sans-cjk-fonts ibus ibus-hangul || dnf_i google-noto-sans-cjk-ttc-fonts ibus ibus-hangul || fail "korean input"',
+            'dnf_i firefox || true',
+            *_session_lines(desktop, o['distro']), *_IME_IBUS, *_POLKIT_COLORD,
+            f'systemctl enable xrdp {dm}; systemctl set-default graphical.target',
+            '(firewall-cmd --permanent --add-port=3389/tcp && firewall-cmd --reload) >/dev/null 2>&1 || true',
+            'dnf_i realmd sssd adcli krb5-workstation samba-common-tools oddjob oddjob-mkhomedir || fail "directory join tools"',
+            'authselect select sssd with-mkhomedir --force >/dev/null 2>&1 || true',
+            'systemctl enable oddjobd || true',
         ]
-    if 'npu' in feats or 'fpga' in feats:
-        vendor = opts.get('vendor_dir', '')
-        s += ['stage vendor-mount', 'mkdir -p /mnt/moavi-vendor']
-        if vendor:
-            s += [f'mount -t nfs -o ro,nolock {q(vendor)} /mnt/moavi-vendor || fail "mount {vendor}"']
+    if 'dev' in feats:
+        s += ['stage dev',
+              'dnf -y groupinstall "Development Tools" || dnf -y group install "Development Tools" || fail "dev tools"',
+              'dnf_i git git-lfs cmake vim nano htop tmux unzip zip rsync python3 python3-pip python3-devel nfs-utils autofs || fail "dev tools"']
+    if 'ide' in feats:
+        s += ['stage ide', *_jupyter_lines(),
+              f'dnf_i https://github.com/coder/code-server/releases/download/v{CODE_SERVER_VERSION}/code-server-{CODE_SERVER_VERSION}-amd64.rpm || fail "code-server"']
+    if 'nvidia' in feats:
+        s += ['stage nvidia',
+              'dnf_i kernel-devel-$(uname -r) kernel-headers dkms || dnf_i kernel-devel kernel-headers dkms || fail "kernel headers"',
+              f"dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/{o['cuda']}/x86_64/cuda-{o['cuda']}.repo || fail \"cuda repo\"",
+              '(dnf -y module install nvidia-driver:open-dkms || dnf_i nvidia-open) || fail "nvidia driver"',
+              f'dnf_i {CUDA_TOOLKIT} || fail "CUDA"', *_cuda_tail()]
+    s += _vendor_lines(opts, 'rpm')
+    if 'fpga' in feats:
+        s += ['stage fpga',
+              'dnf_i ncurses-compat-libs libX11 libXext libXrender libXtst libXi freetype fontconfig gtk2 libcanberra-gtk2 '
+              'xorg-x11-server-Xvfb gcc gcc-c++ make libusb1 || fail "fpga libraries"', *_jtag_lines(), *_vivado_lines(opts)]
+    s += ['stage cleanup', 'dnf clean all', *_lock_lines(), 'stage done', f'date -Is > {READY_FILE}']
+    return '\n'.join(s) + '\n'
+
+
+def _jupyter_lines():
+    return [
+        'python3 -m venv /opt/jupyter || fail "jupyter venv"',
+        '/opt/jupyter/bin/pip install --upgrade pip wheel || fail "pip"',
+        '/opt/jupyter/bin/pip install jupyterlab jupyter-server-proxy jupyter-vscode-proxy ipykernel ipywidgets '
+        'numpy pandas matplotlib scipy || fail "jupyterlab"',
+        'ln -sf /opt/jupyter/bin/jupyter /usr/local/bin/jupyter',
+    ]
+
+
+def _cuda_tail():
+    return [
+        "printf 'export PATH=/usr/local/cuda/bin:$PATH\\nexport LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}\\n' > /etc/profile.d/moavi-cuda.sh",
+        'stage pytorch',
+        f'/opt/jupyter/bin/pip install torch torchvision torchaudio --index-url {TORCH_INDEX} || fail "pytorch"',
+    ]
+
+
+def _vendor_lines(opts, pkg):
+    """NPU / FPGA: the admin's NFS folder mounted read-only; NPU: every package in it, as the vendor ships them."""
+    feats = PRESETS[opts['preset']].get('features', [])
+    if 'npu' not in feats and 'fpga' not in feats:
+        return []
+    out = ['stage vendor-mount', 'mkdir -p /mnt/moavi-vendor']
+    vendor = opts.get('vendor_dir', '')
+    if vendor:
+        out += [f'mount -t nfs -o ro,nolock {shlex.quote(vendor)} /mnt/moavi-vendor || fail "mount {vendor}"']
     if 'npu' in feats:
-        s += [
+        install = 'apt_get install' if pkg == 'deb' else 'dnf_i'
+        out += [
             'stage npu',
-            # the vendor's own packages, as the admin downloaded them (driver, runtime, SDK): every .deb, then every .whl
-            'if ls /mnt/moavi-vendor/*.deb >/dev/null 2>&1; then apt_get install /mnt/moavi-vendor/*.deb || fail "npu packages"; fi',
+            f'if ls /mnt/moavi-vendor/*.{pkg} >/dev/null 2>&1; then {install} /mnt/moavi-vendor/*.{pkg} || fail "npu packages"; fi',
             'if ls /mnt/moavi-vendor/*.whl >/dev/null 2>&1; then /opt/jupyter/bin/pip install /mnt/moavi-vendor/*.whl || fail "npu python packages"; fi',
             'if [ -x /mnt/moavi-vendor/install.sh ]; then (cd /mnt/moavi-vendor && ./install.sh) || fail "npu install.sh"; fi',
+            'umount /mnt/moavi-vendor 2>/dev/null || true',
         ]
-    if 'fpga' in feats:
-        s += [
-            'stage fpga',
-            'apt_get install libtinfo5 libncurses5 libncursesw5 libx11-6 libxext6 libxrender1 libxtst6 libxi6 libfreetype6 '
-            'fontconfig libgtk2.0-0 libcanberra-gtk-module libcanberra-gtk3-module xvfb gcc g++ make libusb-1.0-0 '
-            '|| fail "fpga libraries"',
-            f"cat > /etc/udev/rules.d/52-moavi-jtag.rules <<'EOF'\n{udev_rules()}EOF",
-            'udevadm control --reload-rules || true',
-        ]
-        if opts.get('vendor_dir'):
-            agree = opts.get('agree', 'XilinxEULA,3rdPartyEULA')
-            s += [
-                'stage vivado',
-                'xs=$(find /mnt/moavi-vendor -maxdepth 3 -name xsetup -type f | head -1)',
-                '[ -n "$xs" ] || fail "no xsetup in the installer folder"',
-                'cfg=$(dirname "$xs")/install_config.txt; [ -f "$cfg" ] || cfg=/mnt/moavi-vendor/install_config.txt',
-                '[ -f "$cfg" ] || fail "no install_config.txt (make it once with: xsetup -b ConfigGen)"',
-                # the admin ticked "I accept the AMD license agreements" in the console (accept_eula)
-                f'"$xs" --agree {q(agree)} --batch Install --config "$cfg" || fail "vivado install"',
-                'drv=$(find /tools /opt -path "*cable_drivers/lin64/install_script/install_drivers/install_drivers" -type f 2>/dev/null | head -1)',
-                '[ -n "$drv" ] && (cd "$(dirname "$drv")" && ./install_drivers) || true',
-                's64=$(find /tools /opt -maxdepth 5 -name settings64.sh -path "*Vivado*" 2>/dev/null | head -1)',
-                '[ -n "$s64" ] && echo "source $s64" > /etc/profile.d/moavi-vivado.sh',
-            ]
-    if 'npu' in feats or 'fpga' in feats:
-        s += ['umount /mnt/moavi-vendor 2>/dev/null || true']
-    s += [
-        'stage cleanup',
-        'apt-get -y autoremove; apt-get clean',
-        # no login of its own: the cloud image's default user is locked (people sign in with their directory account)
-        "for u in ubuntu debian; do id \"$u\" >/dev/null 2>&1 && passwd -l \"$u\"; done",
-        'stage done',
-        f'date -Is > {READY_FILE}',
+    return out
+
+
+def _jtag_lines():
+    return [f"cat > /etc/udev/rules.d/52-moavi-jtag.rules <<'EOF'\n{udev_rules()}EOF", 'udevadm control --reload-rules || true']
+
+
+def _vivado_lines(opts):
+    if not opts.get('vendor_dir'):
+        return []
+    agree = opts.get('agree', 'XilinxEULA,3rdPartyEULA')
+    return [
+        'stage vivado',
+        'xs=$(find /mnt/moavi-vendor -maxdepth 3 -name xsetup -type f | head -1)',
+        '[ -n "$xs" ] || fail "no xsetup in the installer folder"',
+        'cfg=$(dirname "$xs")/install_config.txt; [ -f "$cfg" ] || cfg=/mnt/moavi-vendor/install_config.txt',
+        '[ -f "$cfg" ] || fail "no install_config.txt (make it once with: xsetup -b ConfigGen)"',
+        # the admin ticked "I accept the AMD license agreements" in the console (accept_eula)
+        f'"$xs" --agree {shlex.quote(agree)} --batch Install --config "$cfg" || fail "vivado install"',
+        'drv=$(find /tools /opt -path "*cable_drivers/lin64/install_script/install_drivers/install_drivers" -type f 2>/dev/null | head -1)',
+        '[ -n "$drv" ] && (cd "$(dirname "$drv")" && ./install_drivers) || true',
+        's64=$(find /tools /opt -maxdepth 5 -name settings64.sh -path "*Vivado*" 2>/dev/null | head -1)',
+        '[ -n "$s64" ] && echo "source $s64" > /etc/profile.d/moavi-vivado.sh',
+        'umount /mnt/moavi-vendor 2>/dev/null || true',
     ]
-    return '\n'.join(s) + '\n'
+
+
+def _lock_lines():
+    # no login of its own: the cloud image's default user is locked (people sign in with their directory account)
+    return ["for u in ubuntu debian rocky almalinux cloud-user; do id \"$u\" >/dev/null 2>&1 && passwd -l \"$u\"; done"]
+
+
+def build_script(opts):
+    """bash run once by cloud-init (runcmd) as root. Writes its stage to STAGE_FILE, READY_FILE at the
+    end, FAILED_FILE with the failing step on an error."""
+    return _rhel_script(opts) if os_of(opts)['family'] == 'rhel' else _debian_script(opts)
 
 
 def user_data(opts):
@@ -323,8 +472,6 @@ SEAL_LINUX = ('cloud-init clean --logs --seed 2>/dev/null; rm -f /var/lib/moavi/
               'truncate -s 0 /etc/machine-id; rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id; '
               'rm -f /etc/ssh/ssh_host_*; fstrim -av >/dev/null 2>&1; sync; echo sealed')
 
-LINUX_STAGES = ('boot', 'update', 'desktop', 'dev', 'ide', 'nvidia', 'pytorch', 'vendor-mount', 'npu', 'fpga', 'vivado', 'cleanup', 'done')
-
 
 def stage_progress(preset_id, stage):
     """30..90 for the stage the guest is in (the steps before and after the guest are the rest)."""
@@ -339,7 +486,7 @@ def stage_progress(preset_id, stage):
     return 30 + int(60 * i / max(1, len(names) - 1))
 
 
-# --- Windows 11: unattended setup ----------------------------------------------------------------
+# --- Windows: unattended setup ------------------------------------------------------------------
 
 def random_password(n=18):
     alphabet = string.ascii_letters + string.digits
@@ -364,12 +511,15 @@ def _component(name, pass_, body):
 def autounattend(opts, admin_password):
     """autounattend.xml on its own CD: disk, edition, virtio drivers, Korean locale, RDP on, one local
     administrator (logged on once to run C:\\moavi\\firstlogon.ps1), no online account screens."""
+    o = os_of(opts)
     lang = opts['language']
     ilocale = '0412:00000412' if lang == 'ko-KR' else '0409:00000409'
     pw = xml_escape(admin_password)
     drivers = '\n'.join(
-        f'        <PathAndCredentials wcm:action="add" wcm:keyValue="{i}"><Path>{d}:\\{folder}\\w11\\amd64</Path></PathAndCredentials>'
+        f'        <PathAndCredentials wcm:action="add" wcm:keyValue="{i}"><Path>{d}:\\{folder}\\{o["drivers"]}\\amd64</Path></PathAndCredentials>'
         for i, (d, folder) in enumerate(((d, f) for f in _VIRTIO_DIRS for d in _DRIVE_LETTERS), start=1))
+    key = (f'<ProductKey><Key>{xml_escape(opts["product_key"])}</Key><WillShowUI>OnError</WillShowUI></ProductKey>'
+           if opts.get('product_key') else '')
     pe_intl = _component('Microsoft-Windows-International-Core-WinPE', 'windowsPE', f'''      <SetupUILanguage><UILanguage>{lang}</UILanguage></SetupUILanguage>
       <InputLocale>{ilocale}</InputLocale><SystemLocale>{lang}</SystemLocale><UILanguage>{lang}</UILanguage><UserLocale>{lang}</UserLocale>''')
     pe_drivers = _component('Microsoft-Windows-PnpCustomizationsWinPE', 'windowsPE', f'      <DriverPaths>\n{drivers}\n      </DriverPaths>')
@@ -392,7 +542,7 @@ def autounattend(opts, admin_password):
         <InstallFrom><MetaData wcm:action="add"><Key>/IMAGE/NAME</Key><Value>{xml_escape(opts['edition'])}</Value></MetaData></InstallFrom>
         <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
       </OSImage></ImageInstall>
-      <UserData><AcceptEula>true</AcceptEula><FullName>MOAVI Desk</FullName><Organization>MOAVI Desk</Organization></UserData>''')
+      <UserData>{key}<AcceptEula>true</AcceptEula><FullName>MOAVI Desk</FullName><Organization>MOAVI Desk</Organization></UserData>''')
     spec_shell = _component('Microsoft-Windows-Shell-Setup', 'specialize',
                             '      <ComputerName>*</ComputerName><TimeZone>Korea Standard Time</TimeZone>')
     spec_ts = _component('Microsoft-Windows-TerminalServices-LocalSessionManager', 'specialize', '      <fDenyTSConnections>false</fDenyTSConnections>')
@@ -436,11 +586,14 @@ WIN_APPS = (
 )
 
 
-def firstlogon_ps1():
+def firstlogon_ps1(server=False):
     """Runs at the first logon of the setup account: virtio guest tools (drivers, QEMU guest agent, SPICE),
     power settings, the office apps; writes C:\\moavi\\ready.txt (or failed.txt). sysprep is the engine's
-    next step through the guest agent."""
+    next step through the guest agent. A server does not open Server Manager at every logon."""
     apps = '\n'.join(f"  @{{n='{n}'; u='{u}'}}," for n, u in WIN_APPS).rstrip(',')
+    server_lines = ("  New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\ServerManager' -Force | Out-Null\n"
+                    "  Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\ServerManager' -Name DoNotOpenServerManagerAtLogon -Value 1\n"
+                    "  Get-ScheduledTask -TaskName ServerManager -ErrorAction SilentlyContinue | Disable-ScheduledTask | Out-Null\n") if server else ''
     return f'''$ErrorActionPreference = 'Stop'
 $log = '{WIN_DIR}\\build.log'
 function Stage($s) {{ Set-Content -Path '{WIN_STAGE}' -Value $s; Add-Content -Path $log -Value "== $(Get-Date -Format s) $s" }}
@@ -453,7 +606,7 @@ try {{
   powercfg /change standby-timeout-ac 0; powercfg /change monitor-timeout-ac 0; powercfg /hibernate off
   Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server' -Name fDenyTSConnections -Value 0
   Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752' -ErrorAction SilentlyContinue
-  Stage 'apps'
+{server_lines}  Stage 'apps'
   $apps = @(
 {apps}
   )
