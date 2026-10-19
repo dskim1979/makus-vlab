@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk desktop templates (가상머신 > 이미지 > 데스크톱 템플릿): ready-made desktops for the pools of a
+MOAVI Desk desktop templates (가상머신 > 이미지 > 템플릿 만들기): ready-made desktops for the pools of a
 site - built on the cluster from a public cloud image (Linux) or the admin's Windows ISO, then
 registered as a golden image (Linux, with its environment card) or a Proxmox template (Windows,
 generalised with sysprep). A template is a use (PRESETS) on an operating system the use supports (OSES):
