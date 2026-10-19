@@ -126,11 +126,11 @@ class FakeNode:
         self.cmds.append(cmd)
         if cmd.startswith('pvesh get /cluster/nextid'):
             return '"9100"'
-        if cmd.startswith('pvesm status --content snippets'):
+        if cmd.startswith('pvesm status --content iso'):
             return 'Name Type Status Total Used Available %\nlocal dir active 1 1 1 1%\n'
         if cmd.startswith('pvesm path'):
             vol = cmd.split()[-1].strip("'")
-            return f"/var/lib/vz/{vol.split(':', 1)[1]}" if 'snippets' in vol else '/mnt/pve/ceph-fs/template/iso/Win11.iso'
+            return f"/var/lib/vz/template/{vol.split(':', 1)[1]}" if 'cidata' in vol else '/mnt/pve/ceph-fs/template/iso/Win11.iso'
         if cmd.startswith('qm importdisk'):
             return "unused0: successfully imported disk 'local-lvm:vm-9100-disk-0'"
         if cmd.startswith('qm status'):
@@ -195,20 +195,22 @@ def test_a_linux_build_ends_as_a_golden_image_with_its_card(lab):
     assert img['vmid'] == 9100 and img['name'] == 'gpu-2404'
     assert envcat.get(gid)['kind'] == 'ai'
     joined = '\n'.join(node.cmds)
-    assert 'qm create 9100' in joined and 'qm importdisk 9100' in joined and '--cicustom user=local:snippets/moavi-desktpl-' in joined
-    assert 'qm resize 9100 scsi0 120G' in joined and 'qm start 9100' in joined and 'qm set 9100 --delete cicustom' in joined
+    assert 'qm create 9100' in joined and 'qm importdisk 9100' in joined and '-V cidata' in joined
+    assert '--ide2 local:iso/moavi-cidata-' in joined and 'cicustom' not in joined     # no Snippets storage
+    assert 'qm resize 9100 scsi0 120G' in joined and 'qm start 9100' in joined and 'qm set 9100 --delete ide2' in joined
+    assert 'qm set 9100 --ide2 local-lvm:cloudinit --ipconfig0 ip=dhcp' in joined     # clones get their own name
     assert 'qm template' not in joined                                # a golden image is a VM
-    snippet = next(v for k, v in node.files.items() if 'snippets' in k)
-    assert 'nvidia-open' in snippet
+    ud = next(v for k, v in node.files.items() if k.endswith('/user-data'))
+    assert 'nvidia-open' in ud and any(k.endswith('/meta-data') for k in node.files)
     assert desktpl.SEAL_LINUX in agent['calls']
 
 
-def test_no_snippets_storage_is_told_plainly(lab, monkeypatch):
+def test_no_iso_storage_is_told_plainly(lab, monkeypatch):
     admin, node, agent, started, dt = lab
     orig = node.run
 
     def run(cmd, label, **k):
-        if cmd.startswith('pvesm status --content snippets'):
+        if cmd.startswith('pvesm status --content iso'):
             return 'Name Type Status Total Used Available %\n'
         return orig(cmd, label, **k)
     monkeypatch.setattr(node, 'run', run)
@@ -216,7 +218,7 @@ def test_no_snippets_storage_is_told_plainly(lab, monkeypatch):
                      json={'node': 'pve1', 'storage': 'local-lvm'}).get_json()['build']['id']
     _go(started)
     b = admin.get(f'/api/vlab/admin/desktop-templates/builds/{bid}').get_json()['build']
-    assert b['status'] == 'failed' and 'Snippets' in b['error']
+    assert b['status'] == 'failed' and 'ISO' in b['error']
 
 
 def test_a_guest_failure_stops_the_build(lab):

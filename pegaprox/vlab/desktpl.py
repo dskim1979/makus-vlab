@@ -16,9 +16,9 @@ generalised with sysprep).
                                          rules (Xilinx, Digilent, FTDI), Vivado from the admin's
                                          installer folder on NFS (batch install, EULA accepted by the admin)
 
-Linux builds follow pegaprox/api/templates_lib.py (download -> import -> cloud-init) and add a
-cloud-init user-data snippet (cicustom) that runs /usr/local/sbin/moavi-template-build.sh on the
-first boot; the engine follows its stage file through the guest agent. Nothing here stores a user
+Linux builds follow pegaprox/api/templates_lib.py (download -> import) and boot with a NoCloud CD
+(volume cidata: user-data + meta-data) that runs /usr/local/sbin/moavi-template-build.sh on the
+first boot - no Proxmox Snippets storage needed; the engine follows its stage file through the guest agent. Nothing here stores a user
 password: the Linux templates have no password login (users come from the directory), the Windows
 template's local administrator gets a random password shown to the admin once.
 
@@ -289,7 +289,7 @@ def build_script(opts):
 
 
 def user_data(opts):
-    """#cloud-config for the build VM (Proxmox cicustom user=)."""
+    """#cloud-config for the build VM (the NoCloud CD's user-data)."""
     script = build_script(opts)
     return '\n'.join([
         '#cloud-config',
@@ -307,6 +307,11 @@ def user_data(opts):
         '  - [bash, /usr/local/sbin/moavi-template-build.sh]',
         '',
     ])
+
+
+def meta_data(opts, build_id):
+    """The NoCloud CD's meta-data: a fresh instance id, so cloud-init runs the user-data."""
+    return f"instance-id: moavi-build-{build_id}\nlocal-hostname: {opts['name']}\n"
 
 
 # the guest agent reads where the build is: "stage <name>", "ready", "failed <step>"
