@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-MOAVI Desk desktop templates (가상머신 > 이미지 > 데스크톱 템플릿) - the build (pegaprox/vlab/desktpl.py
+MOAVI Desk desktop templates (가상머신 > 이미지 > 템플릿 만들기) - the build (pegaprox/vlab/desktpl.py
 has the catalog and the texts).
 
   GET  /api/vlab/admin/desktop-templates                          the presets and the recent builds   vlab.pool.view
@@ -444,7 +444,7 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
         found['os_type'] = 'linux'
         envcat.set_probe(img_row['id'], found, 'desktop-template')
         envcat.save(img_row['id'], 'desktop-template', components=envcat.merge(env['components'], found['components']),
-                    note='데스크톱 템플릿 빌드', version=img_row.get('current_version') or '')
+                    note='템플릿 만들기로 생성', version=img_row.get('current_version') or '')
     _update(bid, status='completed', step='done', progress=100, finished_at=now(), result={'golden_id': img_row['id'], 'vmid': v},
             log=f"golden image '{opts['name']}' (VMID {v}) ready")
 
