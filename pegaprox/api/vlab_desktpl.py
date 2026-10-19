@@ -8,13 +8,13 @@ has the catalog and the texts).
        {node, storage, bridge, name?, cores?, memory_mb?, disk_gb?, vmid?,
         windows_iso, virtio_iso, edition?, language?   (office-win11)
         vendor_dir?, accept_eula?, agree?              (npu / fpga),
-        snippets_storage?}                             -> 202 {build, admin_password (Windows: shown once)}   vlab.pool.manage
+        iso_storage?}                                  -> 202 {build, admin_password (Windows: shown once)}   vlab.pool.manage
   GET  /api/vlab/admin/desktop-templates/builds/<id>              one build with its log                vlab.pool.view
   POST /api/vlab/admin/desktop-templates/builds/<id>/cancel       stop after the current step; the VM stays   vlab.pool.manage
 
 Linux: like pegaprox/api/templates_lib.py - download the cloud image on the node, qm create /
-importdisk / cloud-init drive - plus a cicustom user-data snippet that builds the desktop on the first
-boot; the engine follows the stage file through the guest agent, reads the versions (envcat probe),
+importdisk - plus a NoCloud CD (user-data + meta-data, volume cidata, made on the node with genisoimage on
+a storage that keeps ISO images) that builds the desktop on the first boot (no Snippets storage needed); the engine follows the stage file through the guest agent, reads the versions (envcat probe),
 seals the VM (cloud-init, machine id, host keys), shuts it down and registers a golden image with its
 environment card. Windows: an unattended-setup CD (autounattend.xml + C:\\moavi scripts) built on the
 node with genisoimage, the admin's Windows ISO and the virtio-win ISO, OVMF + TPM 2.0; first logon
@@ -194,21 +194,21 @@ def start_build(cluster_id, preset_id):
     if err:
         return _bad(err)
     node, storage, bridge = str(data.get('node') or ''), str(data.get('storage') or ''), str(data.get('bridge') or 'vmbr0')
-    snippets = str(data.get('snippets_storage') or '')
+    iso_storage = str(data.get('iso_storage') or '')
     if not NODE.fullmatch(node):
         return _bad('node: a node of the cluster')
     if not STORAGE.fullmatch(storage):
         return _bad('storage: the storage for the disk')
     if not BRIDGE.fullmatch(bridge):
         return _bad('bridge: a network bridge, e.g. vmbr0')
-    if snippets and not STORAGE.fullmatch(snippets):
-        return _bad('snippets_storage: a storage with the Snippets content')
+    if iso_storage and not STORAGE.fullmatch(iso_storage):
+        return _bad('iso_storage: a storage with the ISO content')
     vmid = data.get('vmid')
     if vmid is not None and (not isinstance(vmid, int) or isinstance(vmid, bool) or not 100 <= vmid <= 999999999):
         return _bad('vmid: a number from 100')
     if vmid is not None and core._vm_states(cluster_id).get(vmid):
         return _bad(f'VMID {vmid} is in use', 409)
-    opts.update(node=node, storage=storage, bridge=bridge, snippets_storage=snippets)
+    opts.update(node=node, storage=storage, bridge=bridge, iso_storage=iso_storage)
     password = None
     if desktpl.PRESETS[preset_id]['os'] == 'windows':
         password = desktpl.random_password()
@@ -370,13 +370,14 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
     if not base:
         raise BuildError(f"cloud image {p['base']} is not in the template library")
     q, v, st = shlex.quote, int(vmid), opts['storage']
-    snippets = opts.get('snippets_storage') or ''
-    have = _content_storages(node, 'snippets')
-    if not snippets:
-        snippets = 'local' if 'local' in have else (have[0] if have else '')
-    if not snippets or snippets not in have:
-        raise BuildError('No storage on this node keeps Snippets (cloud-init user-data). Datacenter > Storage > local > '
-                         'Content: add Snippets, then build again.', 'NO_SNIPPETS')
+    # the user-data goes in on a NoCloud CD (volume "cidata") made on the node, on a storage that keeps ISO
+    # images - no Snippets content needed. The VM gets Proxmox's own cloud-init drive only at the end (clones)
+    iso_store = opts.get('iso_storage') or ''
+    have = _content_storages(node, 'iso')
+    if not iso_store:
+        iso_store = 'local' if 'local' in have else (have[0] if have else '')
+    if not iso_store or iso_store not in have:
+        raise BuildError('No storage on this node keeps ISO images (for the cloud-init CD).', 'NO_ISO_STORAGE')
     _step(bid, 'download', 5, f"{base['name']} from {base['image_url']}")
     try:
         sanitize_outbound_url(base['image_url'], allowed_schemes=('https', 'http'), allow_private=True, allow_loopback=False)
@@ -396,11 +397,19 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
         vol = m[-1] if m else f'{st}:vm-{v}-disk-0'
     finally:
         node.run(f'rm -rf {q(tmp)}', 'cleanup', quiet=True, ok=(0, 1))
-    snippet = f'moavi-desktpl-{bid}.yaml'
-    path = node.run(f'pvesm path {q(snippets + ":snippets/" + snippet)}', 'snippet path', quiet=True).strip()
-    node.write(path, desktpl.user_data(opts))
-    node.run(f"qm set {v} --scsi0 {q(vol + ',discard=on,iothread=1,ssd=1')} --ide2 {q(st + ':cloudinit')} "
-             f"--boot order=scsi0 --ipconfig0 ip=dhcp --cicustom {q('user=' + snippets + ':snippets/' + snippet)}", 'qm set')
+    cd_name = f'moavi-cidata-{bid}.iso'
+    cd_vol = f'{iso_store}:iso/{cd_name}'
+    path = node.run(f'pvesm path {q(cd_vol)}', 'CD path', quiet=True).strip()
+    work = f'/tmp/moavi-cidata-{uuid.uuid4().hex}'
+    node.run(f'mkdir -m 700 -p {q(work)}', 'staging dir', quiet=True)
+    try:
+        node.write(f'{work}/user-data', desktpl.user_data(opts))
+        node.write(f'{work}/meta-data', desktpl.meta_data(opts, bid))
+        node.run(f'genisoimage -quiet -J -r -V cidata -o {q(path)} {q(work + "/user-data")} {q(work + "/meta-data")}', 'genisoimage')
+    finally:
+        node.run(f'rm -rf {q(work)}', 'cleanup', quiet=True, ok=(0, 1))
+    node.run(f"qm set {v} --scsi0 {q(vol + ',discard=on,iothread=1,ssd=1')} --ide2 {q(cd_vol + ',media=cdrom')} "
+             f"--boot order=scsi0", 'qm set')
     node.run(f"qm resize {v} scsi0 {int(opts['disk_gb'])}G", 'qm resize')
     _step(bid, 'start', 25)
     node.run(f'qm start {v}', 'qm start')
@@ -414,8 +423,11 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
     _agent(mgr, opts, v, ['/bin/bash', '-c', desktpl.SEAL_LINUX], wait=120)
     node.run(f'qm shutdown {v} --timeout 300', 'qm shutdown', timeout=400, ok=(0, 255))
     _wait_stopped(bid, node, v, 10)
-    node.run(f'qm set {v} --delete cicustom', 'qm set', quiet=True)
-    node.run(f'rm -f {q(path)}', 'snippet cleanup', quiet=True, ok=(0, 1))
+    # the build CD out; Proxmox's cloud-init drive in, so every clone gets its own name and address
+    node.run(f'qm set {v} --delete ide2', 'qm set', quiet=True)
+    node.run(f'rm -f {q(path)}', 'CD cleanup', quiet=True, ok=(0, 1))
+    node.run(f"qm set {v} --ide2 {q(st + ':cloudinit')} --ipconfig0 ip=dhcp", 'cloud-init drive')
+    node.run(f'qm set {v} --ciupgrade 0', 'no upgrade on each clone', quiet=True, ok=(0, 2, 255))
     _step(bid, 'register', 97)
     img_row = catalog.add_golden(cluster_id, opts['node'], v, 'qemu', opts['name'], p['summary'], 'desktop-template')
     env = envcat.save(img_row['id'], 'desktop-template', kind=p['kind'], description=p['summary'])
