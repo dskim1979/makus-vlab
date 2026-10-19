@@ -378,6 +378,8 @@ LOCAL_TABLES = (
     'vlab_data_uploads', 'vlab_data_hashes',
     # MOAVI Desk: GPU / NPU use this instance read from the card desktops every few minutes
     'vlab_accel_samples',
+    # desktop template builds this instance runs in its own thread (pegaprox/api/vlab_desktpl.py)
+    'vlab_desktpl_builds',
 )
 
 # server_settings keys that describe this host, not the deployment
