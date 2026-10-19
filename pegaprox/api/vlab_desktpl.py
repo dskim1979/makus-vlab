@@ -6,7 +6,8 @@ has the catalog and the texts).
   GET  /api/vlab/admin/desktop-templates                          the presets and the recent builds   vlab.pool.view
   POST /api/vlab/admin/clusters/<cid>/desktop-templates/<preset>/build
        {node, storage, bridge, name?, cores?, memory_mb?, disk_gb?, vmid?,
-        windows_iso, virtio_iso, edition?, language?   (office-win11)
+        os?, desktop? (xfce | gnome),
+        windows_iso, virtio_iso, edition?, language?, product_key?   (office: Windows 11 / 10 / Server 2025 / 2022)
         vendor_dir?, accept_eula?, agree?              (npu / fpga),
         iso_storage?}                                  -> 202 {build, admin_password (Windows: shown once)}   vlab.pool.manage
   GET  /api/vlab/admin/desktop-templates/builds/<id>              one build with its log                vlab.pool.view
@@ -210,7 +211,7 @@ def start_build(cluster_id, preset_id):
         return _bad(f'VMID {vmid} is in use', 409)
     opts.update(node=node, storage=storage, bridge=bridge, iso_storage=iso_storage)
     password = None
-    if desktpl.PRESETS[preset_id]['os'] == 'windows':
+    if desktpl.os_of(opts)['platform'] == 'windows':
         password = desktpl.random_password()
     bid = f'dtb_{uuid.uuid4().hex[:12]}'
     t = now()
@@ -284,7 +285,7 @@ def _run(bid, cluster_id, opts, vmid, password):
         if not vmid:
             vmid = int(node.run('pvesh get /cluster/nextid', 'next VMID', quiet=True).strip().strip('"'))
         _update(bid, vmid=int(vmid))
-        if desktpl.PRESETS[opts['preset']]['os'] == 'windows':
+        if desktpl.os_of(opts)['platform'] == 'windows':
             _build_windows(bid, mgr, node, cluster_id, opts, int(vmid), password)
         else:
             _build_linux(bid, mgr, node, cluster_id, opts, int(vmid))
@@ -365,10 +366,10 @@ def _wait_stopped(bid, node, vmid, minutes):
 def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
     from pegaprox.api.templates_lib import CATALOG
     from pegaprox.utils.url_security import SsrfError, sanitize_outbound_url
-    p = desktpl.PRESETS[opts['preset']]
-    base = next((c for c in CATALOG if c['id'] == p['base']), None)
+    p, osd = desktpl.PRESETS[opts['preset']], desktpl.os_of(opts)
+    base = next((c for c in CATALOG if c['id'] == osd['base']), None)
     if not base:
-        raise BuildError(f"cloud image {p['base']} is not in the template library")
+        raise BuildError(f"cloud image {osd['base']} is not in the template library")
     q, v, st = shlex.quote, int(vmid), opts['storage']
     # the user-data goes in on a NoCloud CD (volume "cidata") made on the node, on a storage that keeps ISO
     # images - no Snippets content needed. The VM gets Proxmox's own cloud-init drive only at the end (clones)
@@ -391,7 +392,7 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
         _step(bid, 'create', 15)
         node.run(f"qm create {v} --name {q(opts['name'])} --memory {int(opts['memory_mb'])} --cores {int(opts['cores'])} --cpu host "
                  f"--machine q35 --net0 virtio,bridge={q(opts['bridge'])} --ostype l26 --agent 1 --serial0 socket --vga qxl "
-                 f"--scsihw virtio-scsi-single --description {q('MOAVI Desk desktop template: ' + p['name'])}", 'qm create')
+                 f"--scsihw virtio-scsi-single --description {q('MOAVI Desk desktop template: ' + p['name'] + ' · ' + osd['name'])}", 'qm create')
         out = node.run(f'qm importdisk {v} {q(img)} {q(st)}', 'qm importdisk', timeout=3600)
         m = re.findall(r"'([^']+:[^']*vm-%d-disk-\d+[^']*)'" % v, out)
         vol = m[-1] if m else f'{st}:vm-{v}-disk-0'
@@ -429,8 +430,9 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
     node.run(f"qm set {v} --ide2 {q(st + ':cloudinit')} --ipconfig0 ip=dhcp", 'cloud-init drive')
     node.run(f'qm set {v} --ciupgrade 0', 'no upgrade on each clone', quiet=True, ok=(0, 2, 255))
     _step(bid, 'register', 97)
-    img_row = catalog.add_golden(cluster_id, opts['node'], v, 'qemu', opts['name'], p['summary'], 'desktop-template')
-    env = envcat.save(img_row['id'], 'desktop-template', kind=p['kind'], description=p['summary'])
+    summary = f"{p['name']} · {osd['name']} · {opts.get('desktop', 'xfce')}: {p['summary']}"
+    img_row = catalog.add_golden(cluster_id, opts['node'], v, 'qemu', opts['name'], summary[:300], 'desktop-template')
+    env = envcat.save(img_row['id'], 'desktop-template', kind=p['kind'], description=summary)
     if found:
         found['os_type'] = 'linux'
         envcat.set_probe(img_row['id'], found, 'desktop-template')
@@ -451,7 +453,7 @@ def _build_windows(bid, mgr, node, cluster_id, opts, vmid, password):
     node.run(f'mkdir -m 700 -p {q(work)}/moavi', 'staging dir', quiet=True)
     try:
         node.write(f'{work}/autounattend.xml', desktpl.autounattend(opts, password))
-        node.write(f'{work}/moavi/firstlogon.ps1', desktpl.firstlogon_ps1())
+        node.write(f'{work}/moavi/firstlogon.ps1', desktpl.firstlogon_ps1(server=bool(desktpl.os_of(opts).get('server'))))
         node.write(f'{work}/moavi/oobe.xml', desktpl.oobe_xml(opts['language']))
         node.run(f'genisoimage -quiet -J -r -V MOAVI -o {q(iso_dir + "/" + cd_name)} {q(work)}', 'genisoimage')
     finally:
@@ -460,11 +462,11 @@ def _build_windows(bid, mgr, node, cluster_id, opts, vmid, password):
     _step(bid, 'create', 10)
     node.run(f"qm create {v} --name {q(opts['name'])} --machine q35 --bios ovmf "
              f"--efidisk0 {q(st + ':1,efitype=4m,pre-enrolled-keys=1')} --tpmstate0 {q(st + ':1,version=v2.0')} "
-             f"--cpu host --cores {int(opts['cores'])} --memory {int(opts['memory_mb'])} --ostype win11 --agent 1 --vga std "
+             f"--cpu host --cores {int(opts['cores'])} --memory {int(opts['memory_mb'])} --ostype {desktpl.os_of(opts)['ostype']} --agent 1 --vga std "
              f"--scsihw virtio-scsi-single --scsi0 {q(st + ':' + str(int(opts['disk_gb'])) + ',discard=on,iothread=1,ssd=1')} "
              f"--net0 virtio,bridge={q(opts['bridge'])} --ide2 {q(opts['windows_iso'] + ',media=cdrom')} "
              f"--ide0 {q(opts['virtio_iso'] + ',media=cdrom')} --sata0 {q(cd + ',media=cdrom')} --boot {q('order=ide2;scsi0')} "
-             f"--description {q('MOAVI Desk desktop template: ' + desktpl.PRESETS['office-win11']['name'])}", 'qm create')
+             f"--description {q('MOAVI Desk desktop template: ' + desktpl.PRESETS['office']['name'] + ' · ' + desktpl.os_of(opts)['name'])}", 'qm create')
     _step(bid, 'install', 15)
     node.run(f'qm start {v}', 'qm start')
     # OVMF asks "Press any key to boot from CD or DVD": answer it for the first half minute
