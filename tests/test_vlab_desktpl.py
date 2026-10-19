@@ -191,7 +191,8 @@ class FakeNode:
             return 'Name Type Status Total Used Available %\nlocal dir active 1 1 1 1%\n'
         if cmd.startswith('pvesm path'):
             vol = cmd.split()[-1].strip("'")
-            return f"/var/lib/vz/template/{vol.split(':', 1)[1]}" if 'cidata' in vol else '/mnt/pve/ceph-fs/template/iso/Win11.iso'
+            store, rest = vol.split(':', 1)
+            return f"/var/lib/vz/template/{rest}" if store == 'local' else f"/mnt/pve/{store}/template/{rest}"
         if cmd.startswith('qm importdisk'):
             return "unused0: successfully imported disk 'local-lvm:vm-9100-disk-0'"
         if cmd.startswith('qm status'):
@@ -327,3 +328,42 @@ def test_the_list_offers_presets_and_builds(lab):
     admin, *_ = lab
     body = admin.get('/api/vlab/admin/desktop-templates').get_json()
     assert len(body['presets']) == 5 and body['builds'] == []
+
+
+
+# --- Windows from the Internet -----------------------------------------------------------------
+
+def test_windows_comes_only_from_microsoft():
+    base = {'os': 'win11', 'virtio_iso': 'auto'}
+    o, err = desktpl.validate('office', dict(base, windows_url='https://software.download.prss.microsoft.com/dbazure/Win11_24H2_Korean_x64.iso?t=abc&e=1'))
+    assert not err and o['windows_url'].startswith('https://software.download.prss.microsoft.com/') and o['virtio_auto'] is True
+    assert 'windows_iso' not in o and 'virtio_iso' not in o
+    for bad in ('http://software.download.prss.microsoft.com/a.iso', 'https://microsoft.com.evil.example/a.iso',
+                'https://example.com/Win11_Remiz_4in1.iso', 'https://evilmicrosoft.com/a.iso'):
+        assert desktpl.validate('office', dict(base, windows_url=bad))[1], bad
+    assert desktpl.validate('office', {'os': 'win11', 'windows_iso': 'a:iso/b.iso', 'virtio_iso': 'nope'})[1]
+
+
+def test_iso_names_and_repacks():
+    assert desktpl.iso_name_from_url('https://software.download.prss.microsoft.com/dbazure/Win11_24H2_Korean_x64.iso?t=1', 'win11') == 'Win11_24H2_Korean_x64.iso'
+    assert desktpl.iso_name_from_url('https://go.microsoft.com/fwlink/?linkid=2293312', 'ws2025') == 'moavi-ws2025.iso'
+    assert desktpl.REPACK_RE.search('Win11_24H2_26100.2894__4in1_x64_Remiz_25.01.18.iso')
+    assert desktpl.REPACK_RE.search('ko_windows_server_2022_with_update_aio_4in1_x64_v24.03.12_by_adguard.iso')
+    assert not desktpl.REPACK_RE.search('Win11_24H2_Korean_x64.iso')
+
+
+def test_a_windows_build_downloads_its_isos_and_cleans_up_on_failure(lab, monkeypatch):
+    admin, node, agent, started, dt = lab
+    r = admin.post(f'/api/vlab/admin/clusters/{CID}/desktop-templates/office/build',
+                   json={'node': 'pve1', 'storage': 'local-lvm', 'os': 'win11', 'virtio_iso': 'auto',
+                         'windows_url': 'https://software.download.prss.microsoft.com/dbazure/Win11_24H2_Korean_x64.iso?t=abc'})
+    assert r.status_code == 202, r.get_json()
+    bid = r.get_json()['build']['id']
+    agent['answers'][:] = ['failed guest tools']
+    _go(started)
+    b = admin.get(f'/api/vlab/admin/desktop-templates/builds/{bid}').get_json()['build']
+    assert b['status'] == 'failed'
+    joined = '\n'.join(node.cmds)
+    assert 'wget -q -O' in joined and 'Win11_24H2_Korean_x64.iso.part' in joined and desktpl.VIRTIO_URL in joined
+    assert '--ide2 local:iso/Win11_24H2_Korean_x64.iso,media=cdrom' in joined and '--ide0 local:iso/virtio-win-stable.iso,media=cdrom' in joined
+    assert any(c.startswith('rm -f') and f'moavi-unattend-{bid}.iso' in c for c in node.cmds)   # the answer CD (password) goes

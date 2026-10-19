@@ -45,6 +45,12 @@ WIN_FAILED = r'C:\moavi\failed.txt'
 WIN_STAGE = r'C:\moavi\stage.txt'
 
 CODE_SERVER_VERSION = '4.96.4'
+# the virtio-win drivers of the Fedora virtio-win project: a fixed URL of the latest stable ISO
+VIRTIO_URL = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso'
+VIRTIO_NAME = 'virtio-win-stable.iso'
+# Windows from the Internet: only Microsoft's own download servers (a link copied from its download page -
+# never a repackaged ISO from elsewhere)
+_MS_URL_RE = re.compile(r'^https://([a-z0-9-]+\.)*microsoft\.com/[^\s"\'<>]{1,2000}$', re.I)
 CUDA_TOOLKIT = 'cuda-toolkit-12-8'
 TORCH_INDEX = 'https://download.pytorch.org/whl/cu128'
 
@@ -65,12 +71,16 @@ OSES = {
     'rocky-9': {'name': 'Rocky Linux 9', 'platform': 'linux', 'family': 'rhel', 'distro': 'rocky', 'release': '9', 'base': 'rocky-9', 'cuda': 'rhel9'},
     'almalinux-10': {'name': 'AlmaLinux 10', 'platform': 'linux', 'family': 'rhel', 'distro': 'almalinux', 'release': '10', 'base': 'almalinux-10'},
     'almalinux-9': {'name': 'AlmaLinux 9', 'platform': 'linux', 'family': 'rhel', 'distro': 'almalinux', 'release': '9', 'base': 'almalinux-9', 'cuda': 'rhel9'},
-    'win11': {'name': 'Windows 11', 'platform': 'windows', 'ostype': 'win11', 'drivers': 'w11', 'edition': 'Windows 11 Pro', 'iso_hint': r'win(dows)?[ _-]?11'},
-    'win10': {'name': 'Windows 10', 'platform': 'windows', 'ostype': 'win10', 'drivers': 'w10', 'edition': 'Windows 10 Pro', 'iso_hint': r'win(dows)?[ _-]?10'},
+    'win11': {'name': 'Windows 11', 'platform': 'windows', 'ostype': 'win11', 'drivers': 'w11', 'edition': 'Windows 11 Pro', 'iso_hint': r'win(dows)?[ _-]?11',
+              'download_page': 'https://www.microsoft.com/ko-kr/software-download/windows11'},
+    'win10': {'name': 'Windows 10', 'platform': 'windows', 'ostype': 'win10', 'drivers': 'w10', 'edition': 'Windows 10 Pro', 'iso_hint': r'win(dows)?[ _-]?10',
+              'download_page': 'https://www.microsoft.com/ko-kr/software-download/windows10ISO'},
     'ws2025': {'name': 'Windows Server 2025', 'platform': 'windows', 'ostype': 'win11', 'drivers': '2k25', 'server': True,
-               'edition': 'Windows Server 2025 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2025|2k25'},
+               'edition': 'Windows Server 2025 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2025|2k25',
+               'download_page': 'https://www.microsoft.com/ko-kr/evalcenter/download-windows-server-2025'},
     'ws2022': {'name': 'Windows Server 2022', 'platform': 'windows', 'ostype': 'win11', 'drivers': '2k22', 'server': True,
-               'edition': 'Windows Server 2022 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2022|2k22'},
+               'edition': 'Windows Server 2022 SERVERDATACENTER', 'iso_hint': r'server[ _-]?2022|2k22',
+               'download_page': 'https://www.microsoft.com/ko-kr/evalcenter/download-windows-server-2022'},
 }
 DESKTOPS = ('xfce', 'gnome')
 
@@ -132,6 +142,18 @@ def os_of(opts):
     return OSES[opts['os']]
 
 
+def iso_name_from_url(url, os_id):
+    """The file name a downloaded Windows ISO gets: the name in the link (Win11_24H2_Korean_x64.iso), or
+    moavi-<os>.iso for a link without one (go.microsoft.com/fwlink/?linkid=...)."""
+    path = url.split('?', 1)[0].rstrip('/')
+    base = re.sub(r'[^A-Za-z0-9._+-]+', '_', path.rsplit('/', 1)[-1])
+    return base if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,190}\.iso', base, re.I) else f'moavi-{os_id}.iso'
+
+
+# ISOs whose name says they were repackaged by someone other than Microsoft (shown with a warning)
+REPACK_RE = re.compile(r'(\d+in1|remiz|adguard|_by_|ghost|lite|tiny11|tiny10|modified|repack)', re.I)
+
+
 def validate(preset_id, data):
     """(options, None) or (None, error text) for a build request (node / storage / bridge are checked
     against the cluster by the caller)."""
@@ -154,11 +176,23 @@ def validate(preset_id, data):
             return None, f'{k} must be a whole number from {lo} to {hi}'
         out[k] = v
     if o['platform'] == 'windows':
-        for k in ('windows_iso', 'virtio_iso'):
-            v = str(data.get(k) or '')
+        url = str(data.get('windows_url') or '').strip()
+        if url:
+            if not _MS_URL_RE.fullmatch(url):
+                return None, "windows_url: a download link of Microsoft (https://...microsoft.com/...) from its download page"
+            out['windows_url'] = url
+        else:
+            v = str(data.get('windows_iso') or '')
             if not _VOLID_RE.fullmatch(v):
-                return None, f'{k}: an ISO of a storage (storage:iso/name.iso)'
-            out[k] = v
+                return None, 'windows_iso: an ISO of a storage (storage:iso/name.iso), or windows_url'
+            out['windows_iso'] = v
+        v = str(data.get('virtio_iso') or '')
+        if v == 'auto' or data.get('virtio_auto') is True:
+            out['virtio_auto'] = True
+        elif _VOLID_RE.fullmatch(v):
+            out['virtio_iso'] = v
+        else:
+            return None, "virtio_iso: an ISO of a storage, or 'auto' to download the stable virtio-win"
         edition = str(data.get('edition') or o['edition']).strip()
         if not _EDITION_RE.fullmatch(edition):
             return None, f'edition: the image name in the ISO, e.g. "{o["edition"]}"'

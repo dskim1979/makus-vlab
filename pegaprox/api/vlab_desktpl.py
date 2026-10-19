@@ -7,7 +7,7 @@ has the catalog and the texts).
   POST /api/vlab/admin/clusters/<cid>/desktop-templates/<preset>/build
        {node, storage, bridge, name?, cores?, memory_mb?, disk_gb?, vmid?,
         os?, desktop? (xfce | gnome),
-        windows_iso, virtio_iso, edition?, language?, product_key?   (office: Windows 11 / 10 / Server 2025 / 2022)
+        windows_iso | windows_url (Microsoft only), virtio_iso | "auto", edition?, language?, product_key?   (office)
         vendor_dir?, accept_eula?, agree?              (npu / fpga),
         iso_storage?}                                  -> 202 {build, admin_password (Windows: shown once)}   vlab.pool.manage
   GET  /api/vlab/admin/desktop-templates/builds/<id>              one build with its log                vlab.pool.view
@@ -299,6 +299,12 @@ def _run(bid, cluster_id, opts, vmid, password):
         _update(bid, status='failed', error=str(e)[:500], finished_at=now(), log=f'FAILED: {e}')
     finally:
         if node:
+            # a build that stopped early leaves its setup CD behind: the answer CD keeps the Windows password
+            for path in opts.get('_cleanup', []):
+                try:
+                    node.run(f'rm -f {shlex.quote(path)}', 'setup CD cleanup', quiet=True, ok=(0, 1))
+                except Exception:
+                    pass
             node.close()
         with _lock:
             _live.discard(bid)
@@ -401,6 +407,7 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
     cd_name = f'moavi-cidata-{bid}.iso'
     cd_vol = f'{iso_store}:iso/{cd_name}'
     path = node.run(f'pvesm path {q(cd_vol)}', 'CD path', quiet=True).strip()
+    opts.setdefault('_cleanup', []).append(path)
     work = f'/tmp/moavi-cidata-{uuid.uuid4().hex}'
     node.run(f'mkdir -m 700 -p {q(work)}', 'staging dir', quiet=True)
     try:
@@ -442,13 +449,42 @@ def _build_linux(bid, mgr, node, cluster_id, opts, vmid):
             log=f"golden image '{opts['name']}' (VMID {v}) ready")
 
 
+def _download_iso(bid, node, store, url, name, label):
+    """An ISO from the Internet into the node's ISO storage (kept for the next build; skipped when there)."""
+    from pegaprox.utils.url_security import SsrfError, sanitize_outbound_url
+    q = shlex.quote
+    try:
+        sanitize_outbound_url(url, allowed_schemes=('https',), allow_private=False, allow_loopback=False)
+    except SsrfError as e:
+        raise BuildError(f'{label} URL refused: {e}')
+    vol = f'{store}:iso/{name}'
+    path = node.run(f'pvesm path {q(vol)}', 'ISO path', quiet=True).strip()
+    if node.run(f'test -s {q(path)} && echo have || true', 'ISO there?', quiet=True).strip() == 'have':
+        _update(bid, log=f'{label}: {name} is already on {store}')
+        return vol
+    _update(bid, log=f'{label}: downloading {name} to {store}')
+    node.run(f'wget -q -O {q(path + ".part")} {q(url)} && mv -f {q(path + ".part")} {q(path)}', f'{label} download', timeout=7200)
+    return vol
+
+
 def _build_windows(bid, mgr, node, cluster_id, opts, vmid, password):
     q, v, st = shlex.quote, int(vmid), opts['storage']
+    if opts.get('windows_url') or opts.get('virtio_auto'):
+        _step(bid, 'download', 3, 'ISOs from the Internet')
+        have = _content_storages(node, 'iso')
+        store = opts.get('iso_storage') or ('local' if 'local' in have else (have[0] if have else ''))
+        if not store or store not in have:
+            raise BuildError('No storage on this node keeps ISO images (for the downloaded ISOs).', 'NO_ISO_STORAGE')
+        if opts.get('windows_url'):
+            opts['windows_iso'] = _download_iso(bid, node, store, opts['windows_url'], desktpl.iso_name_from_url(opts['windows_url'], opts['os']), 'Windows')
+        if opts.get('virtio_auto'):
+            opts['virtio_iso'] = _download_iso(bid, node, store, desktpl.VIRTIO_URL, desktpl.VIRTIO_NAME, 'virtio-win')
     iso_store = opts['windows_iso'].split(':', 1)[0]
     _step(bid, 'answer-file', 5, 'unattended setup CD')
     iso_path = node.run(f"pvesm path {q(opts['windows_iso'])}", 'ISO path', quiet=True).strip()
     iso_dir = iso_path.rsplit('/', 1)[0]
     cd_name = f'moavi-unattend-{bid}.iso'
+    opts.setdefault('_cleanup', []).append(f'{iso_dir}/{cd_name}')
     work = f'/tmp/moavi-unattend-{uuid.uuid4().hex}'
     node.run(f'mkdir -m 700 -p {q(work)}/moavi', 'staging dir', quiet=True)
     try:
