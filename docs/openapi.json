@@ -65189,6 +65189,7 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "{enabled?, networks?, user_password, otp?} - switching on and changing the networks need the password again and an allowed network; switching off does not (it only takes access away).",
         "requestBody": {
           "required": false,
           "content": {
@@ -65233,6 +65234,7 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "{name, scope, days?, sources?, user_password, otp?} - a manage token only for a platform administrator (admin.settings); sources default to the network of the PC asking.",
         "requestBody": {
           "required": false,
           "content": {
@@ -65277,6 +65279,7 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "Revoking only takes access away: no password asked, from anywhere.",
         "parameters": [
           {
             "name": "token_id",

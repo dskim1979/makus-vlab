@@ -4,10 +4,17 @@
   GET    /api/vlab/mcp                          405 - this server opens no stream of its own
   GET    /api/vlab/mcp/stdio.py                 the stdio bridge for clients that only start a local program
   GET    /api/vlab/mcp/moavi-desk.mcpb          the Claude Desktop extension (Node bridge; address, token, certificate asked at install)
-  GET    /api/vlab/admin/mcp                    {enabled, tokens, tools, url}           vlab.pool.view
-  PUT    /api/vlab/admin/mcp                    {enabled}                               admin.settings
-  POST   /api/vlab/admin/mcp/tokens             {name, scope, days} -> {token, record}  vlab.pool.view (own token)
+  GET    /api/vlab/admin/mcp                    {enabled, networks, tokens, tools, inside, ...}       vlab.pool.view
+  PUT    /api/vlab/admin/mcp                    {enabled?, networks?, user_password, otp?}           admin.settings
+  POST   /api/vlab/admin/mcp/tokens             {name, scope, days?, sources?, user_password, otp?}  vlab.pool.view (own token)
   DELETE /api/vlab/admin/mcp/tokens/<id>        revoke (own token; any with admin.settings)
+
+Internal network only: every MCP call and download comes from the allowed networks (client address
+as get_client_ip reads it - X-Forwarded-For from a trusted proxy only), and a token from its own
+sources. Switching on, changing the networks and making a token need the password again (and the
+2FA code), and the admin's own address inside the networks. A manage token is for platform
+administrators (admin.settings). Issued and revoked tokens, a token's first use from an address,
+every manage tool call and every refusal go to the alert channels (vlab_notices.admins).
 
 The MCP side takes `Authorization: Bearer mcp_...` only - no session cookie, so no page can make a
 browser call it. A tool is a call of an existing admin route, made inside the engine as the token's
@@ -18,13 +25,16 @@ true. Every tool call is in the audit log ('vlab.mcp.call'), and the lines the r
 themselves say they came through MCP. Passwords in an answer are not handed to the AI client.
 """
 import json
+import logging
 import os
 import re
+import time
 
 from flask import Blueprint, Response, current_app, g, jsonify, request
 
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import MCP_SESSION_ENVIRON, require_auth
+from pegaprox.utils.ratelimit import SlidingWindow
 from pegaprox.vlab import VLAB_API_VERSION
 from pegaprox.vlab import mcp
 
@@ -410,6 +420,9 @@ def _handle(msg, rec):
             name = str(params.get('name') or '')
             result, status = _call_tool(name, params.get('arguments') or {}, rec)
             log_audit(rec['owner'], 'vlab.mcp.call', f"{name} ({rec['name']}, {rec['scope']}): {status}", _ctx()['ip'])
+            if name in TOOLS and TOOLS[name]['scope'] == 'manage' and status != 'scope':
+                _tell('manage', '관리 도구 호출', f"{rec['owner']} ran {name} through '{rec['name']}' from {_ctx()['ip']}: {status}",
+                      user=rec['owner'], ip=_ctx()['ip'], severity='warning' if TOOLS[name]['destructive'] else 'info')
         elif method in ('resources/list', 'prompts/list'):
             result = {method.split('/')[0]: []}
         else:
@@ -451,6 +464,10 @@ def mcp_endpoint():
     from pegaprox.core.db import get_db
     if not _origin_ok():
         return _bad('Origin not allowed', 403, code='ORIGIN')
+    denied = _refuse_outside('MCP call')
+    if denied:
+        return denied
+    ip = get_client_ip()
     auth = request.headers.get('Authorization', '')
     token = auth[7:].strip() if auth.lower().startswith('bearer ') else ''
     if not token:
@@ -458,9 +475,15 @@ def mcp_endpoint():
     rec, why = mcp.by_token(token)
     if not rec:
         return _unauthorized({'UNKNOWN': 'Unknown token', 'REVOKED': 'The token was revoked',
-                              'EXPIRED': 'The token has expired'}[why], f'TOKEN_{why}')
+                              'EXPIRED': 'The token has expired',
+                              'IDLE': f'The token was revoked: unused for {mcp.IDLE_DAYS} days'}[why], f'TOKEN_{why}')
     if not mcp.settings()['enabled']:
         return _bad('MCP is switched off (플랫폼 설정 > MCP 연동)', 403, code='MCP_OFF')
+    if not mcp.ip_in(ip, rec['sources']):
+        _tell('source', '토큰 허용 출발지 밖 사용 거절',
+              f"MCP token '{rec['name']}' of {rec['owner']} used from {ip}, outside {', '.join(rec['sources']) or '(none)'}",
+              key=(rec['id'], ip), user=rec['owner'], ip=ip)
+        return _bad('This token may not be used from this address', 403, code='TOKEN_SOURCE')
     user = get_db().get_user(rec['owner'])
     if not user or not user.get('enabled', True):
         return _unauthorized('The account of this token is gone or disabled', 'ACCOUNT_DISABLED')
@@ -470,12 +493,13 @@ def mcp_endpoint():
         data = json.loads(request.get_data(cache=False, as_text=True) or 'null')
     except ValueError:
         return jsonify({'jsonrpc': '2.0', 'id': None, 'error': {'code': -32700, 'message': 'Parse error'}}), 400
-    ip = get_client_ip()
     g.vlab_mcp = dict(session={'user': rec['owner'], 'role': user.get('role', 'viewer'), 'mcp_token': rec['id'],
                          'mcp_name': rec['name'], 'mcp_scope': rec['scope']},
                 ip=ip, base=request.host_url)
     try:
-        mcp.used(rec['id'], ip)
+        if mcp.used(rec['id'], ip):
+            _tell('new_ip', '처음 보는 주소에서 토큰 사용', f"MCP token '{rec['name']}' of {rec['owner']} used from {ip} for the first time",
+                  key=(rec['id'], ip), user=rec['owner'], ip=ip)
     except Exception:          # a standby refuses writes: the call itself still goes on
         pass
     batch = isinstance(data, list)
@@ -489,6 +513,9 @@ def mcp_endpoint():
 
 @bp.route('/api/vlab/mcp/stdio.py', methods=['GET'])
 def stdio_bridge():
+    denied = _refuse_outside('MCP download')
+    if denied:
+        return denied
     path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vlab', 'mcp_stdio.py')
     with open(path, encoding='utf-8') as f:
         return Response(f.read(), mimetype='text/x-python',
@@ -540,6 +567,9 @@ def _public_base():
 @bp.route('/api/vlab/mcp/moavi-desk.mcpb', methods=['GET'])
 def mcpb_bundle():
     """No secret inside: the address this was downloaded from is the default, the token is asked at install."""
+    denied = _refuse_outside('MCP download')
+    if denied:
+        return denied
     import io
     import zipfile
     base = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vlab', 'mcpb')
@@ -552,7 +582,45 @@ def mcpb_bundle():
                     headers={'Content-Disposition': 'attachment; filename="moavi-desk.mcpb"', 'Cache-Control': 'no-store'})
 
 
-# --- admin: on / off, tokens ---------------------------------------------------------------
+
+# --- notices to the administrators -----------------------------------------------------------
+
+_told = {}            # (kind, key) -> when: refusals and new addresses are told once an hour, not per call
+TELL_EVERY = 3600
+
+
+def _tell(kind, title, text, key=None, **data):
+    """To the alert channels and the alert mail (경보), and the audit log. `key` set: at most once an hour."""
+    if key is not None:
+        last = _told.get((kind, key))
+        if last and time.time() - last < TELL_EVERY:
+            return
+        if len(_told) > 5000:
+            _told.clear()
+        _told[(kind, key)] = time.time()
+    log_audit(data.get('user') or 'system', f'vlab.mcp.{kind}', text, data.get('ip') or None)
+    from pegaprox.api.vlab_notices import admins
+    admins(f'MCP: {title}', text, dict(data, event=f'mcp.{kind}', severity=data.get('severity', 'warning')))
+
+
+def _outside(ip):
+    return not mcp.ip_in(ip, mcp.settings()['networks'])
+
+
+def _refuse_outside(what):
+    """403 for a caller outside the allowed networks, told to the administrators."""
+    ip = get_client_ip()
+    if not _outside(ip):
+        return None
+    _tell('denied', '허용 네트워크 밖 접근 거절', f'{what}: {ip} is outside the allowed networks', key=(what, ip),
+          ip=ip, user=(getattr(request, 'session', None) or {}).get('user', ''))
+    return _bad('Not from an allowed network (플랫폼 설정 > MCP 연동 > 허용 네트워크)', 403, code='MCP_NETWORK')
+
+
+# --- admin: on / off, networks, tokens -------------------------------------------------------
+
+_reauth_attempts = SlidingWindow(limit=5, window=300, max_keys=2048, name='mcp-reauth')
+
 
 def _can(perm):
     from pegaprox.api.helpers import acting_user
@@ -560,32 +628,127 @@ def _can(perm):
     return has_permission(acting_user() or {}, perm)
 
 
+def _account(username):
+    from pegaprox.core.db import get_db
+    try:
+        return get_db().get_user(username)
+    except Exception:
+        return None
+
+
+def _needs(user):
+    """What a re-check asks this account for: 'password' (+ 'otp'), or 'recent' for one without a password."""
+    from pegaprox.utils.oidc import OIDC_AUTH_SOURCES
+    if not isinstance(user, dict):
+        return []
+    if user.get('auth_source') in OIDC_AUTH_SOURCES and not user.get('password_hash'):
+        return ['recent']
+    return ['password'] + (['otp'] if user.get('totp_enabled') and user.get('totp_secret') else [])
+
+
+def _refuse_without_reauth(what, data):
+    """403 unless the caller proved just now who they are: the account password (and the 2FA code when the
+    account has one) in this request, a sign-in under 10 minutes old for an account without a password.
+    A session cookie alone is not enough, an API token never is."""
+    session = getattr(request, 'session', None) or {}
+    if session.get('api_token') or session.get('mcp_token'):
+        return _bad('This needs an interactive sign-in', 403, code='MCP_REAUTH')
+    username = session.get('user', '')
+    user = _account(username)
+    needs = _needs(user)
+    if not needs:
+        return _bad('Confirm with your password', 403, code='MCP_REAUTH', needs=['password'])
+    if needs == ['recent']:
+        created = session.get('created_at')
+        if not (isinstance(created, (int, float)) and not isinstance(created, bool) and 0 <= time.time() - created <= 600):
+            return _bad('Sign in again, then retry within 10 minutes', 403, code='MCP_REAUTH_RECENT', needs=needs)
+        return None
+    password, otp = data.get('user_password'), str(data.get('otp') or '').strip()
+    if not isinstance(password, str) or not password or len(password) > 1024 or ('otp' in needs and not otp):
+        return _bad('Confirm with your password' + (' and the 2FA code' if 'otp' in needs else ''), 403,
+                    code='MCP_REAUTH', needs=needs)
+    if _reauth_attempts.full(username):            # failures only are counted, below
+        resp = jsonify({'error': 'Too many attempts - wait a few minutes', 'code': 'MCP_REAUTH'})
+        resp.headers['Retry-After'] = '300'
+        return resp, 429
+    from pegaprox.utils.auth import recheck_account_password
+    ok, _ = recheck_account_password(username, password, user, audit_action='vlab.mcp.reauth_failed', context=what)
+    if not ok:
+        _reauth_attempts.allow(username)
+        return _bad('The password is not correct', 403, code='MCP_REAUTH', needs=needs)
+    if 'otp' in needs:
+        try:
+            import pyotp
+            from pegaprox.api.auth import _totp_replayed
+            good = not _totp_replayed(username, otp) and pyotp.TOTP(user['totp_secret']).verify(otp, valid_window=1)
+        except Exception as e:
+            logging.warning(f'[VLAB] MCP 2FA re-check for {username}: {e}')
+            good = False
+        if not good:
+            _reauth_attempts.allow(username)
+            log_audit(username, 'vlab.mcp.reauth_failed', f'2FA code not accepted for {what}', get_client_ip())
+            return _bad('The 2FA code is not correct', 403, code='MCP_REAUTH', needs=needs)
+    return None
+
+
 @bp.route('/api/vlab/admin/mcp', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
 def admin_mcp():
     me = request.session.get('user', '')
     every = _can('admin.settings')
+    try:
+        for r in mcp.revoke_idle():
+            _tell('idle', '오래 안 쓴 토큰 폐기', f"MCP token '{r['name']}' of {r['owner']} (...{r['token_hint']}) revoked: "
+                  f'unused for {mcp.IDLE_DAYS} days', user=r['owner'], severity='info')
+    except Exception as e:          # a standby refuses writes
+        logging.debug(f'[VLAB] MCP idle sweep: {e}')
+    ip = get_client_ip()
     tools = [{'name': n, 'title': t['title'], 'scope': t['scope'], 'destructive': t['destructive']} for n, t in TOOLS.items()]
     return jsonify(dict(mcp.settings(), tokens=mcp.list_tokens(None if every else me), all_tokens=every,
-                        can_manage=_can('vlab.pool.manage'), tools=tools, path='/api/vlab/mcp',
-                        protocol=PROTOCOL_VERSIONS[0]))
+                        can_manage=every, tools=tools, path='/api/vlab/mcp', protocol=PROTOCOL_VERSIONS[0],
+                        client_ip=ip, inside=not _outside(ip), own_network=mcp.own_network(ip),
+                        lifetime={k: {'default': v[0], 'max': v[1]} for k, v in mcp.LIFETIME.items()},
+                        idle_days=mcp.IDLE_DAYS, reauth=_needs(_account(me))))
 
 
 @bp.route('/api/vlab/admin/mcp', methods=['PUT'])
 @require_auth(perms=['admin.settings'])
 def admin_mcp_switch():
+    """{enabled?, networks?, user_password, otp?} - switching on and changing the networks need the password
+    again and an allowed network; switching off does not (it only takes access away)."""
     data = request.get_json(silent=True) or {}
-    if not isinstance(data.get('enabled'), bool):
+    if 'enabled' in data and not isinstance(data['enabled'], bool):
         return _bad('enabled: true or false')
+    nets = None
+    if 'networks' in data:
+        nets, err = mcp.parse_networks(data['networks'])
+        if err:
+            return _bad(err)
+    if 'enabled' not in data and nets is None:
+        return _bad('enabled or networks')
+    ip = get_client_ip()
+    if not (data.get('enabled') is False and nets is None):
+        denied = _refuse_outside('MCP settings') or _refuse_without_reauth('MCP settings', data)
+        if denied:
+            return denied
+        if nets is not None and not mcp.ip_in(ip, nets):
+            return _bad(f'Your own address ({ip}) would be outside these networks', 400, code='MCP_NETWORK_SELF')
     me = request.session.get('user', '')
-    saved = mcp.set_enabled(data['enabled'], by=me)
-    log_audit(me, 'vlab.mcp.settings', f"MCP server {'on' if saved['enabled'] else 'off'}", get_client_ip())
+    saved = mcp.save_settings(enabled=data.get('enabled'), networks=nets, by=me)
+    what = []
+    if 'enabled' in data:
+        what.append('on' if saved['enabled'] else 'off')
+    if nets is not None:
+        what.append('networks ' + ', '.join(saved['networks']))
+    _tell('settings', 'MCP 설정 변경', f"{me}: MCP {'; '.join(what)}", user=me, ip=ip, severity='info')
     return jsonify(saved)
 
 
 @bp.route('/api/vlab/admin/mcp/tokens', methods=['POST'])
 @require_auth(perms=['vlab.pool.view'])
 def admin_mcp_issue():
+    """{name, scope, days?, sources?, user_password, otp?} - a manage token only for a platform administrator
+    (admin.settings); sources default to the network of the PC asking."""
     data = request.get_json(silent=True) or {}
     me = request.session.get('user', '')
     name = str(data.get('name') or '').strip()
@@ -594,25 +757,42 @@ def admin_mcp_issue():
     scope = data.get('scope')
     if scope not in mcp.SCOPES:
         return _bad('scope: read or manage')
-    if scope == 'manage' and not _can('vlab.pool.manage'):
-        return _bad('A manage token needs the vlab.pool.manage permission', 403, code='MISSING_PERMISSION')
-    days = data.get('days', 90)
-    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= mcp.MAX_DAYS:
-        return _bad(f'days: a whole number from 1 to {mcp.MAX_DAYS}')
+    if scope == 'manage' and not _can('admin.settings'):
+        return _bad('A manage token is for platform administrators only - make a read token', 403, code='MISSING_PERMISSION')
+    default_days, max_days = mcp.LIFETIME[scope]
+    days = data.get('days', default_days)
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= max_days:
+        return _bad(f'days: a whole number from 1 to {max_days} for a {scope} token')
+    ip = get_client_ip()
+    if data.get('sources') in (None, [], ''):
+        own = mcp.own_network(ip)
+        if not own:
+            return _bad('sources: give the networks the token may be used from')
+        sources = [own]
+    else:
+        sources, err = mcp.parse_networks(data.get('sources'))
+        if err:
+            return _bad(err.replace('networks:', 'sources:'))
+    denied = _refuse_outside('MCP token') or _refuse_without_reauth('MCP token', data)
+    if denied:
+        return denied
     if mcp.active_count(me) >= mcp.MAX_TOKENS_PER_USER:
         return _bad(f'At most {mcp.MAX_TOKENS_PER_USER} active tokens per account - revoke one first', 409)
-    token, rec = mcp.issue(me, name, scope, days, by=me)
-    log_audit(me, 'vlab.mcp.token', f"MCP token '{name}' ({scope}, {days} days, ...{rec['token_hint']}) issued", get_client_ip())
+    token, rec = mcp.issue(me, name, scope, days, by=me, sources=sources, ip=ip)
+    text = f"MCP token '{name}' ({scope}, {days} days, from {', '.join(sources)}, ...{rec['token_hint']}) issued by {me} at {ip}"
+    _tell('issued', '토큰 발급', text, user=me, ip=ip, severity='info')
     return jsonify({'token': token, 'record': rec}), 201
 
 
 @bp.route('/api/vlab/admin/mcp/tokens/<token_id>', methods=['DELETE'])
 @require_auth(perms=['vlab.pool.view'])
 def admin_mcp_revoke(token_id):
+    """Revoking only takes access away: no password asked, from anywhere."""
     me = request.session.get('user', '')
     rec = mcp.get(token_id)
     if not rec or (rec['owner'] != me and not _can('admin.settings')):
         return _bad('Token not found', 404)
     rec = mcp.revoke(token_id, by=me)
-    log_audit(me, 'vlab.mcp.token', f"MCP token '{rec['name']}' of {rec['owner']} (...{rec['token_hint']}) revoked", get_client_ip())
+    text = f"MCP token '{rec['name']}' of {rec['owner']} (...{rec['token_hint']}) revoked by {me}"
+    _tell('revoked', '토큰 폐기', text, user=me, ip=get_client_ip(), severity='info')
     return jsonify({'record': rec})
