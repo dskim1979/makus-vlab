@@ -30,6 +30,7 @@ SCOPES = ('read', 'manage')
 # scope -> (default days, most days)
 LIFETIME = {'manage': (7, 90), 'read': (30, 365)}
 IDLE_DAYS = 30
+KEEP_DAYS = 90        # a revoked or run-out token's row is deleted after this; the audit log keeps the story
 MAX_TOKENS_PER_USER = 20
 MAX_NETWORKS = 50
 MAX_SEEN = 50
@@ -181,15 +182,31 @@ def _days_ago(days):
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec='seconds')
 
 
-def revoke_idle():
-    """Revoke the live tokens not used for IDLE_DAYS (counted from their making when never used). The ones revoked."""
+def _legacy(r):
+    """Made before the internal-network rules: no sources, or a manage token living past its limit. Never usable."""
+    if not _list(r['sources']):
+        return True
+    return r['scope'] == 'manage' and r['expires_at'] > (
+        datetime.fromisoformat(r['created_at']) + timedelta(days=LIFETIME['manage'][1], hours=1)).isoformat(timespec='seconds')
+
+
+def sweep():
+    """Revoke the live tokens not used for IDLE_DAYS ('idle') and the ones made before the rules ('legacy'); delete
+    the rows revoked or run out more than KEEP_DAYS ago (their audit lines stay). (revoked rows, deleted count)."""
+    out = []
     cut = _days_ago(IDLE_DAYS)
-    rows = db().query('SELECT * FROM vlab_mcp_tokens WHERE revoked_at IS NULL AND expires_at > ? '
-                      'AND COALESCE(last_used_at, created_at) < ?', (now(), cut))
-    for r in rows:
-        db().execute("UPDATE vlab_mcp_tokens SET revoked_at = ?, revoked_by = 'idle' WHERE id = ? AND revoked_at IS NULL",
-                     (now(), r['id']))
-    return [_view(r) for r in rows]
+    for r in db().query('SELECT * FROM vlab_mcp_tokens WHERE revoked_at IS NULL AND expires_at > ?', (now(),)):
+        why = 'legacy' if _legacy(r) else 'idle' if (r['last_used_at'] or r['created_at']) < cut else None
+        if why:
+            db().execute('UPDATE vlab_mcp_tokens SET revoked_at = ?, revoked_by = ? WHERE id = ? AND revoked_at IS NULL',
+                         (now(), why, r['id']))
+            out.append(dict(_view(r), revoked_by=why))
+    old = _days_ago(KEEP_DAYS)
+    gone = db().query('SELECT id FROM vlab_mcp_tokens WHERE (revoked_at IS NOT NULL AND revoked_at < ?) '
+                      'OR (revoked_at IS NULL AND expires_at < ?)', (old, old))
+    for r in gone:
+        db().execute('DELETE FROM vlab_mcp_tokens WHERE id = ?', (r['id'],))
+    return out, len(gone)
 
 
 def list_tokens(owner=None):
@@ -230,7 +247,8 @@ def active_count(owner):
 
 
 def by_token(token):
-    """(record, None) or (None, why): UNKNOWN, REVOKED, EXPIRED, IDLE (revoked now: unused for IDLE_DAYS)."""
+    """(record, None) or (None, why): UNKNOWN, REVOKED, EXPIRED, LEGACY (revoked now: made before the rules),
+    IDLE (revoked now: unused for IDLE_DAYS)."""
     if not token or not str(token).startswith(TOKEN_PREFIX):
         return None, 'UNKNOWN'
     r = db().query_one('SELECT * FROM vlab_mcp_tokens WHERE token_hash = ?', (_hash(token),))
@@ -240,6 +258,9 @@ def by_token(token):
         return None, 'REVOKED'
     if r['expires_at'] <= now():
         return None, 'EXPIRED'
+    if _legacy(r):
+        db().execute("UPDATE vlab_mcp_tokens SET revoked_at = ?, revoked_by = 'legacy' WHERE id = ?", (now(), r['id']))
+        return None, 'LEGACY'
     if (r['last_used_at'] or r['created_at']) < _days_ago(IDLE_DAYS):
         db().execute("UPDATE vlab_mcp_tokens SET revoked_at = ?, revoked_by = 'idle' WHERE id = ?", (now(), r['id']))
         return None, 'IDLE'

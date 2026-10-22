@@ -183,6 +183,30 @@ def test_lifetimes_and_idle_tokens(env, net):
     assert mcp.get(r2['id'])['revoked_by'] == 'idle'
 
 
+def test_tokens_made_before_the_rules_are_revoked_and_old_rows_go(env, net):
+    api, admin, alice, bob, viewer = env
+    where, told = net
+    _on(admin)
+    # as the first release made them: no sources; a manage token for a year
+    t1, r1 = _token(admin, 'manage', '노트북')
+    mcp.db().execute("UPDATE vlab_mcp_tokens SET sources = '[]' WHERE id = ?", (r1['id'],))
+    _, r2 = _token(admin, 'manage', '관리')
+    mcp.db().execute("UPDATE vlab_mcp_tokens SET expires_at = '2027-10-22T10:34:00+00:00' WHERE id = ?", (r2['id'],))
+    _, r3 = _token(admin, 'read', 'fine')
+    r = _rpc(api, t1, 'ping')
+    assert r.status_code == 401 and r.get_json()['code'] == 'TOKEN_LEGACY'
+    listing = admin.get('/api/vlab/admin/mcp').get_json()
+    by_id = {t['id']: t for t in listing['tokens']}
+    assert by_id[r1['id']]['revoked_by'] == 'legacy' and not by_id[r1['id']]['active']
+    assert by_id[r2['id']]['revoked_by'] == 'legacy' and by_id[r3['id']]['active']
+    assert any('legacy' in str(t[2]['event']) for t in told)
+    # revoked or run out more than 90 days ago: the row goes, the audit lines stay
+    mcp.db().execute("UPDATE vlab_mcp_tokens SET revoked_at = '2026-01-01T00:00:00+00:00' WHERE id = ?", (r1['id'],))
+    mcp.db().execute("UPDATE vlab_mcp_tokens SET expires_at = '2026-01-01T00:00:00+00:00', revoked_at = NULL WHERE id = ?", (r3['id'],))
+    ids = {t['id'] for t in admin.get('/api/vlab/admin/mcp').get_json()['tokens']}
+    assert r1['id'] not in ids and r3['id'] not in ids and r2['id'] in ids
+
+
 def test_manage_tokens_are_for_platform_administrators(env, net, seed):
     api, admin, alice, bob, viewer = env
     from pegaprox.core.db import get_db

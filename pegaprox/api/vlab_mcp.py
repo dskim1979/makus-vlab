@@ -476,7 +476,9 @@ def mcp_endpoint():
     if not rec:
         return _unauthorized({'UNKNOWN': 'Unknown token', 'REVOKED': 'The token was revoked',
                               'EXPIRED': 'The token has expired',
-                              'IDLE': f'The token was revoked: unused for {mcp.IDLE_DAYS} days'}[why], f'TOKEN_{why}')
+                              'IDLE': f'The token was revoked: unused for {mcp.IDLE_DAYS} days',
+                              'LEGACY': 'The token was made before the internal-network rules and was revoked - issue a new one'}[why],
+                             f'TOKEN_{why}')
     if not mcp.settings()['enabled']:
         return _bad('MCP is switched off (플랫폼 설정 > MCP 연동)', 403, code='MCP_OFF')
     if not mcp.ip_in(ip, rec['sources']):
@@ -697,11 +699,14 @@ def admin_mcp():
     me = request.session.get('user', '')
     every = _can('admin.settings')
     try:
-        for r in mcp.revoke_idle():
-            _tell('idle', '오래 안 쓴 토큰 폐기', f"MCP token '{r['name']}' of {r['owner']} (...{r['token_hint']}) revoked: "
-                  f'unused for {mcp.IDLE_DAYS} days', user=r['owner'], severity='info')
+        revoked, _ = mcp.sweep()
+        for r in revoked:
+            why = (f'unused for {mcp.IDLE_DAYS} days' if r['revoked_by'] == 'idle'
+                   else 'made before the internal-network rules (no sources or too long a life) - issue a new one')
+            _tell(r['revoked_by'], '토큰 자동 폐기', f"MCP token '{r['name']}' of {r['owner']} (...{r['token_hint']}) revoked: {why}",
+                  user=r['owner'], severity='info')
     except Exception as e:          # a standby refuses writes
-        logging.debug(f'[VLAB] MCP idle sweep: {e}')
+        logging.debug(f'[VLAB] MCP token sweep: {e}')
     ip = get_client_ip()
     tools = [{'name': n, 'title': t['title'], 'scope': t['scope'], 'destructive': t['destructive']} for n, t in TOOLS.items()]
     return jsonify(dict(mcp.settings(), tokens=mcp.list_tokens(None if every else me), all_tokens=every,
