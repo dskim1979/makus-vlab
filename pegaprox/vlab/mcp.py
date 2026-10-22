@@ -1,5 +1,6 @@
-"""MOAVI Desk: MCP access (플랫폼 설정 > MCP 연동) - Claude Code, Gemini CLI, OpenAI Codex / Responses API
-or a local LLM client (LM Studio, Open WebUI with Ollama) manages VMs through the engine's MCP server.
+"""MOAVI Desk: MCP access (플랫폼 설정 > MCP 연동) - an MCP client on the admin's PC or an internal server
+(Claude Desktop, Claude Code, Gemini CLI, Codex CLI, a local LLM app) manages VMs through the engine's MCP
+server at its internal address; the server is not meant to be opened to the Internet.
 
 The server is off until an admin switches it on. Each token belongs to the account that made it and
 acts as that account: the same roles, the same clusters, the same permission checks as in the
