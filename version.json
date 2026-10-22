@@ -220,6 +220,7 @@
     "pegaprox/vlab/ci.py",
     "pegaprox/vlab/mcp.py",
     "pegaprox/vlab/mcp_stdio.py",
+    "pegaprox/vlab/mcpb/server/index.js",
     "pegaprox/vlab/accel_bookings.py",
     "pegaprox/vlab/jtag_gw.py",
     "pegaprox/vlab/forecast.py",

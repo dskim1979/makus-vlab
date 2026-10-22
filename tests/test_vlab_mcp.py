@@ -192,3 +192,22 @@ def test_the_stdio_bridge_is_served(env):
     api, admin, alice, bob, viewer = env
     r = api.app.test_client().get('/api/vlab/mcp/stdio.py', base_url='http://localhost')
     assert r.status_code == 200 and b'MOAVI_MCP_TOKEN' in r.data
+
+
+def test_the_claude_desktop_extension_is_served(env):
+    import io
+    import json
+    import zipfile
+    api, admin, alice, bob, viewer = env
+    r = api.app.test_client().get('/api/vlab/mcp/moavi-desk.mcpb', base_url='http://192.168.0.9:8443',
+                                  headers={'X-Forwarded-Proto': 'https'})
+    assert r.status_code == 200 and r.headers['Content-Disposition'].endswith('moavi-desk.mcpb"')
+    z = zipfile.ZipFile(io.BytesIO(r.data))
+    assert sorted(z.namelist()) == ['manifest.json', 'server/index.js']
+    m = json.loads(z.read('manifest.json'))
+    assert m['name'] == 'moavi-desk' and m['server']['type'] == 'node' and m['server']['entry_point'] == 'server/index.js'
+    assert m['user_config']['server_url']['default'] == 'https://192.168.0.9:8443/api/vlab/mcp'
+    assert m['user_config']['token']['sensitive'] is True and 'default' not in m['user_config']['token']
+    assert m['server']['mcp_config']['env']['MOAVI_DESK_TOKEN'] == '${user_config.token}'
+    assert {t['name'] for t in m['tools']} >= {'list_desktops', 'delete_desktop'}
+    assert b'MOAVI_DESK_TOKEN' in z.read('server/index.js')
