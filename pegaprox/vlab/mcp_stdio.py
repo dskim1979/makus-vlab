@@ -9,7 +9,7 @@ writes the answers to stdout. Python 3.8+, standard library only.
   MOAVI_MCP_CA      optional: the CA certificate (PEM) of a private certificate
   MOAVI_MCP_INSECURE=1  optional: do not check the certificate (test servers only)
 
-  {"mcpServers": {"moavi": {"command": "python3", "args": ["moavi_mcp_stdio.py"],
+  {"mcpServers": {"moavi-desk": {"command": "python3", "args": ["moavi_mcp_stdio.py"],
                             "env": {"MOAVI_MCP_URL": "...", "MOAVI_MCP_TOKEN": "mcp_..."}}}}
 """
 import json
