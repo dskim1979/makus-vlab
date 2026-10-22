@@ -202,6 +202,9 @@ def create_app():
             # no session to protect; the client secret / the bearer token is the gate
             '/api/vlab/oidc/token',
             '/api/vlab/oidc/userinfo',
+            # MOAVI Desk - the MCP server (pegaprox/api/vlab_mcp.py) takes a bearer mcp_ token only, never
+            # the session cookie, so there is no session to protect; AI clients send no Origin
+            '/api/vlab/mcp',
         )
         if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
                 and request.path.startswith('/api/')
