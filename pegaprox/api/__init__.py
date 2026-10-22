@@ -71,6 +71,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_features import bp as vlab_features_bp  # MOAVI Desk: 사이트 프로필 · 기능 묶음
     from pegaprox.api.vlab_ops_notices import bp as vlab_ops_notices_bp  # MOAVI Desk: 운영 알림(관리자)
     from pegaprox.api.vlab_builds import bp as vlab_builds_bp  # MOAVI Desk: 빌드 결과물 · CI 연동
+    from pegaprox.api.vlab_mcp import bp as vlab_mcp_bp  # MOAVI Desk: 관리자용 MCP 서버
     from pegaprox.api.vlab_accel_book import bp as vlab_accel_book_bp  # MOAVI Desk: 카드 · 보드 예약
     from pegaprox.api.vlab_forecast import bp as vlab_forecast_bp  # MOAVI Desk: 증설 예측
     from pegaprox.api.vlab_directory import bp as vlab_directory_bp  # MOAVI Desk: 내장 디렉터리 (Samba AD DC) · 도메인 가입
@@ -144,6 +145,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_features_bp)
     app.register_blueprint(vlab_ops_notices_bp)
     app.register_blueprint(vlab_builds_bp)
+    app.register_blueprint(vlab_mcp_bp)
     app.register_blueprint(vlab_accel_book_bp)
     app.register_blueprint(vlab_forecast_bp)
     app.register_blueprint(vlab_warpgate_bp)

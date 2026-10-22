@@ -161,6 +161,10 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     via = _via_standby()
     if via:
         details = f'{details} (via standby {via})' if details else f'via standby {via}'
+    # MOAVI Desk - a route an AI client called through the MCP server (pegaprox/api/vlab_mcp.py)
+    mcp_call = request.environ.get('vlab.mcp_session') if has_request_context() else None
+    if mcp_call:
+        details = f"{details or ''} (MCP: {mcp_call.get('mcp_name', '')})".strip()
 
     entry = {
         'timestamp': datetime.now().isoformat(),

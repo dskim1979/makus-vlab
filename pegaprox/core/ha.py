@@ -346,6 +346,8 @@ SYNC_TABLES = (
     'vlab_notice_prefs', 'vlab_notice_sent',
     # CI connections to the build farm (pegaprox/vlab/ci.py) and card / board bookings (pegaprox/vlab/accel_bookings.py)
     'vlab_ci_links', 'vlab_accel_bookings',
+    # the MCP server's tokens, kept as hashes (pegaprox/vlab/mcp.py)
+    'vlab_mcp_tokens',
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)

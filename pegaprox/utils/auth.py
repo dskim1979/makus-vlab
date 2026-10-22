@@ -1366,6 +1366,12 @@ def lift_body_deadline(owner=None):
     clock.lift(release=lambda: release_body(key))
 
 
+# MOAVI Desk - the identity of an MCP tool call (pegaprox/api/vlab_mcp.py). The MCP route checks the
+# mcp_ token and calls the admin route in-process with this key in the WSGI environ; a client cannot
+# put a key there (headers arrive as HTTP_*), so it is never read from outside.
+MCP_SESSION_ENVIRON = 'vlab.mcp_session'
+
+
 def require_auth(roles: list = None, perms: list = None):
     """auth decorator for protected routes
 
@@ -1377,10 +1383,20 @@ def require_auth(roles: list = None, perms: list = None):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             session = None
-            
+
+            # MOAVI Desk - a tool call of the MCP server, as the token's owner. Not an api_token:
+            # the owner's current role is refreshed below like a sign-in. A read token only reads.
+            mcp_session = request.environ.get(MCP_SESSION_ENVIRON)
+            if mcp_session:
+                session = dict(mcp_session)
+                if session.get('mcp_scope') != 'manage' and request.method not in ('GET', 'HEAD'):
+                    return jsonify({'error': 'This MCP token is read-only', 'code': 'MCP_READ_ONLY'}), 403
+
             # MK: Feb 2026 - Check API token first (Authorization: Bearer pgx_...)
             auth_header = request.headers.get('Authorization', '')
-            if auth_header.startswith('Bearer pgx_'):
+            if session:
+                pass
+            elif auth_header.startswith('Bearer pgx_'):
                 token = auth_header[7:]  # Strip 'Bearer '
                 session = validate_api_token(token)
             
