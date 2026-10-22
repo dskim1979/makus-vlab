@@ -3,6 +3,7 @@
   POST   /api/vlab/mcp                          MCP Streamable HTTP (JSON-RPC 2.0; JSON answers, no SSE stream)
   GET    /api/vlab/mcp                          405 - this server opens no stream of its own
   GET    /api/vlab/mcp/stdio.py                 the stdio bridge for clients that only start a local program
+  GET    /api/vlab/mcp/moavi-desk.mcpb          the Claude Desktop extension (Node bridge; address, token, certificate asked at install)
   GET    /api/vlab/admin/mcp                    {enabled, tokens, tools, url}           vlab.pool.view
   PUT    /api/vlab/admin/mcp                    {enabled}                               admin.settings
   POST   /api/vlab/admin/mcp/tokens             {name, scope, days} -> {token, record}  vlab.pool.view (own token)
@@ -492,6 +493,63 @@ def stdio_bridge():
     with open(path, encoding='utf-8') as f:
         return Response(f.read(), mimetype='text/x-python',
                         headers={'Content-Disposition': 'attachment; filename="moavi_mcp_stdio.py"'})
+
+
+def mcpb_manifest(server_url):
+    """The extension's manifest (MCPB): Claude Desktop asks for the address, the token (kept in the OS
+    keychain) and, for a self-signed certificate, the certificate file, and runs server/index.js with its Node."""
+    return {
+        'manifest_version': '0.2',
+        'name': 'moavi-desk',
+        'display_name': 'MOAVI Desk',
+        'version': '1.0.0',
+        'description': 'MOAVI Desk VDI 관리: VM · 데스크톱 풀 조회와 만들기 · 전원 · 스냅샷 · 배정',
+        'long_description': ('MOAVI Desk 관리자 도구를 Claude Desktop에서 씁니다. 토큰은 MOAVI Desk 운영 › 플랫폼 설정 › '
+                             'MCP 연동에서 발급하고, 토큰 주인의 권한 그대로 움직이며 모든 호출이 감사 로그에 남습니다.'),
+        'author': {'name': 'Makus Systems'},
+        'server': {
+            'type': 'node',
+            'entry_point': 'server/index.js',
+            'mcp_config': {
+                'command': 'node',
+                'args': ['${__dirname}/server/index.js'],
+                'env': {'MOAVI_DESK_URL': '${user_config.server_url}', 'MOAVI_DESK_TOKEN': '${user_config.token}',
+                        'MOAVI_DESK_CA': '${user_config.ca_file}'},
+            },
+        },
+        'tools': [{'name': n, 'description': t['title']} for n, t in TOOLS.items()],
+        'user_config': {
+            'server_url': {'type': 'string', 'title': 'MOAVI Desk MCP 주소', 'required': True, 'default': server_url,
+                           'description': 'https://<서버>/api/vlab/mcp'},
+            'token': {'type': 'string', 'title': 'MCP 토큰', 'sensitive': True, 'required': True,
+                      'description': '플랫폼 설정 › MCP 연동에서 발급한 mcp_ 토큰'},
+            'ca_file': {'type': 'file', 'title': '서버 인증서 (자체 서명일 때)', 'required': False,
+                        'description': 'MCP 연동 화면에서 내려받은 moavi-gateway.crt'},
+        },
+        'compatibility': {'platforms': ['darwin', 'win32', 'linux'], 'runtimes': {'node': '>=16.0.0'}},
+    }
+
+
+def _public_base():
+    """https://host[:port] as the browser sees it: nginx speaks plain HTTP to the engine and says the scheme.
+    Taken as sent: it only fills in the default address of the downloader's own copy, which they see and can change."""
+    scheme = request.headers.get('X-Forwarded-Proto')
+    return f"{scheme if scheme in ('http', 'https') else request.scheme}://{request.host}"
+
+
+@bp.route('/api/vlab/mcp/moavi-desk.mcpb', methods=['GET'])
+def mcpb_bundle():
+    """No secret inside: the address this was downloaded from is the default, the token is asked at install."""
+    import io
+    import zipfile
+    base = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vlab', 'mcpb')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('manifest.json', json.dumps(mcpb_manifest(_public_base() + '/api/vlab/mcp'),
+                                               ensure_ascii=False, indent=2))
+        z.write(os.path.join(base, 'server', 'index.js'), 'server/index.js')
+    return Response(buf.getvalue(), mimetype='application/zip',
+                    headers={'Content-Disposition': 'attachment; filename="moavi-desk.mcpb"', 'Cache-Control': 'no-store'})
 
 
 # --- admin: on / off, tokens ---------------------------------------------------------------

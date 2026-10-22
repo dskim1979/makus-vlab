@@ -65119,6 +65119,24 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/vlab/mcp/moavi-desk.mcpb": {
+      "get": {
+        "operationId": "vlab_mcp.mcpb_bundle_get",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "No secret inside: the address this was downloaded from is the default, the token is asked at install.",
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/api/vlab/admin/mcp": {
       "get": {
         "operationId": "vlab_mcp.admin_mcp_get",
