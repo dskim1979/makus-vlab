@@ -269,6 +269,15 @@ static NTSTATUS TryLogon(const KV& st, bool unlock, NTSTATUS* sub) {
     std::vector<BYTE> buf;
     *sub = 0;
     if (!PackCertLogon(st, unlock, buf)) return (NTSTATUS)0xC000000DL;
+    // LogonUI takes the buffer with offsets; LsaLogonUser from a process wants real pointers into it
+    {
+        BYTE* base = buf.data();
+        KERB_CERTIFICATE_LOGON* kl = (KERB_CERTIFICATE_LOGON*)base;
+        UNICODE_STRING* us[] = { &kl->DomainName, &kl->UserName, &kl->Pin };
+        for (auto u : us)
+            if (u->Buffer) u->Buffer = (PWSTR)(base + (ULONG_PTR)u->Buffer);
+        kl->CspData = base + (ULONG_PTR)kl->CspData;
+    }
     HANDLE lsa = nullptr;
     LSA_STRING name;
     char proc[] = "MoaviLogonSelftest";
@@ -310,18 +319,19 @@ static int Selftest(bool all) {
     const wchar_t* names[] = { L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
+    const wchar_t* pins[] = { L"", L"0000" };    // not a secret: the software key has no PIN
     int rc = 1;
-    for (auto m : modes) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) {
+    for (auto m : modes) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) for (auto pn : pins) {
         KV t = st;
-        if (all) { t[L"mode"] = m; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; }
+        if (all) { t[L"mode"] = m; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; t[L"pin"] = pn; }
         bool unlock = t[L"struct"] == L"unlock";
         NTSTATUS sub = 0;
         NTSTATUS r = TryLogon(t, unlock, &sub);
         wchar_t line[200];
-        swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s -> 0x%08lx / 0x%08lx\n",
+        swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s pin=%s -> 0x%08lx / 0x%08lx\n",
                    t[L"mode"].empty() ? L"hash" : t[L"mode"].c_str(), t[L"names"].empty() ? L"on" : t[L"names"].c_str(),
                    unlock ? L"unlock" : L"plain", t[L"pkg"].empty() ? L"Negotiate" : t[L"pkg"].c_str(),
-                   (unsigned long)r, (unsigned long)sub);
+                   t[L"pin"].empty() ? L"empty" : L"set", (unsigned long)r, (unsigned long)sub);
         OutW(line);
         Log(L"selftest: %s", line);
         if (r == 0) { rc = 0; if (all) goto done; }
