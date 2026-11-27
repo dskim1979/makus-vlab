@@ -520,3 +520,88 @@ def _build_windows(bid, mgr, node, cluster_id, opts, vmid, password):
     node.run(f'qm template {v}', 'qm template')
     _update(bid, status='completed', step='done', progress=100, finished_at=now(), result={'template_vmid': v},
             log=f"template '{opts['name']}' (VMID {v}) ready - make a pool from it under 데스크톱 풀")
+
+
+# ---- 가상머신 > VM 만들기: drivers and guest agent for a Windows VM made by hand -------------------------
+
+def _iso_store(node, wanted):
+    have = _content_storages(node, 'iso')
+    store = wanted or ('local' if 'local' in have else (have[0] if have else ''))
+    if not store or store not in have:
+        raise BuildError('No storage on this node keeps ISO images.', 'NO_ISO_STORAGE')
+    return store
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/drivers-cd', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'vm.create'])
+def drivers_cd(cluster_id, node):
+    """{drivers: w11 | w10, storage?} -> {volid}: the drivers CD (autounattend.xml only: virtio drivers while
+    Windows setup runs, the guest tools and QEMU guest agent at the first logon), made on the node with
+    genisoimage. VM 만들기 puts it in a third CD drive next to the Windows and virtio-win ISOs."""
+    from pegaprox.api.vlab_next import _build_target
+    data = _body()
+    drivers = data.get('drivers') or 'w11'
+    storage = data.get('storage') or None
+    if drivers not in desktpl.DRIVER_SETS:
+        return _bad('drivers is w11 or w10')
+    mgr, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    q = shlex.quote
+    n = None
+    try:
+        n = _Node(mgr, node, None)
+        store = _iso_store(n, storage)
+        name = desktpl.driver_cd_name(drivers)
+        path = n.run(f'pvesm path {q(store + ":iso/" + name)}', 'ISO path', quiet=True).strip()
+        work = f'/tmp/moavi-drivers-{uuid.uuid4().hex}'
+        n.run(f'mkdir -m 700 -p {q(work)}', 'staging dir', quiet=True)
+        try:
+            n.write(f'{work}/autounattend.xml', desktpl.driver_unattend(drivers))
+            n.run(f'genisoimage -quiet -J -r -V MOAVI_DRV -o {q(path + ".part")} {q(work)} && mv -f {q(path + ".part")} {q(path)}',
+                  'genisoimage', timeout=120, quiet=True)
+        finally:
+            n.run(f'rm -rf {q(work)}', 'cleanup', quiet=True, ok=(0, 1))
+    except BuildError as e:
+        return _bad(str(e), 502, getattr(e, 'code', None))
+    finally:
+        if n:
+            n.close()
+    log_audit(core._user(), 'vlab.drivers_cd', f"drivers CD {name} on {node}/{store}", get_client_ip())
+    return jsonify({'volid': f'{store}:iso/{name}'})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/nodes/<node>/virtio-iso', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage', 'vm.create'])
+def virtio_download(cluster_id, node):
+    """{storage?} -> {volid, task}: the stable virtio-win ISO from fedorapeople into the node's ISO storage,
+    as a Proxmox download task (about 700 MB). {volid, have: true} when it is there already."""
+    from pegaprox.api.vlab_next import _build_target
+    storage = _body().get('storage') or None
+    mgr, err = _build_target(cluster_id, node, storage)
+    if err:
+        return err
+    n = None
+    try:
+        n = _Node(mgr, node, None)
+        store = _iso_store(n, storage)
+        vol = f'{store}:iso/{desktpl.VIRTIO_NAME}'
+        path = n.run(f'pvesm path {shlex.quote(vol)}', 'ISO path', quiet=True).strip()
+        have = n.run(f'test -s {shlex.quote(path)} && echo have || true', 'ISO there?', quiet=True).strip() == 'have'
+    except BuildError as e:
+        return _bad(str(e), 502, getattr(e, 'code', None))
+    finally:
+        if n:
+            n.close()
+    if have:
+        return jsonify({'volid': vol, 'have': True})
+    resp = mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/storage/{store}/download-url",
+                         data={'url': desktpl.VIRTIO_URL, 'filename': desktpl.VIRTIO_NAME, 'content': 'iso'})
+    if resp is None or getattr(resp, 'status_code', 0) != 200:
+        return _bad(f"Proxmox refused: {str(getattr(resp, 'text', '') or '')[:200]}", 502)
+    try:
+        upid = (resp.json() or {}).get('data')
+    except Exception:
+        upid = None
+    log_audit(core._user(), 'vlab.virtio_iso', f"virtio-win ISO download to {node}/{store}", get_client_ip())
+    return jsonify({'volid': vol, 'task': upid}), 202

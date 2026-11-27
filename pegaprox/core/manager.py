@@ -14090,6 +14090,9 @@ echo "AGENT_INSTALLED_OK"
             # VirtIO drivers ISO for Windows (secondary CD-ROM)
             if vm_config.get('virtio_iso'):
                 data['ide3'] = f"{vm_config['virtio_iso']},media=cdrom"
+            # MOAVI Desk: the drivers CD (autounattend.xml with the virtio drivers and guest tools) as a third CD
+            if vm_config.get('drivers_cd'):
+                data['sata5'] = f"{vm_config['drivers_cd']},media=cdrom"
             
             boot_order.append('net0')
             data['boot'] = 'order=' + ';'.join(boot_order)

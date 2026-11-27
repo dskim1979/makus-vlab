@@ -3174,6 +3174,7 @@ _CREATE_FIELDS = {
     'ostype': lambda v: v in ('win11', 'win10', 'l26', 'other'),
     'iso': _iso_ref,
     'virtio_iso': _iso_ref,
+    'drivers_cd': _iso_ref,
     'sockets': _whole(1, 4),
     'cores': _whole(1, 128),
     'cpu': lambda v: v in ('host', 'x86-64-v2-AES', 'x86-64-v3', 'kvm64'),

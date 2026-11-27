@@ -613,6 +613,38 @@ def autounattend(opts, admin_password):
             f'  <settings pass="oobeSystem">\n{oobe_intl}\n{oobe_shell}\n  </settings>\n</unattend>\n')
 
 
+# 가상머신 > VM 만들기: the drivers CD. Only drivers and the guest tools - disk, edition, account and the rest of
+# Windows setup stay the admin's own clicks. No password or other secret on it, so one CD per driver set serves every VM.
+DRIVER_SETS = {'w11': ('w11', '2k25'), 'w10': ('w10', '2k22')}
+_DRIVER_LETTERS = 'DEFGHI'
+
+
+def driver_cd_name(drivers):
+    return f'moavi-drivers-{drivers}.iso'
+
+
+def driver_unattend(drivers):
+    """autounattend.xml of the drivers CD: virtio storage, network and balloon drivers while Windows setup runs
+    (WinPE for the disk, offline servicing so the network works in OOBE), and virtio-win-guest-tools.exe
+    (drivers, QEMU guest agent, SPICE) silently at the first logon of the first account."""
+    folders = DRIVER_SETS[drivers]
+    paths = [(d, f, o) for f in _VIRTIO_DIRS for o in folders for d in _DRIVER_LETTERS]
+    lines = '\n'.join(
+        f'        <PathAndCredentials wcm:action="add" wcm:keyValue="{i}"><Path>{d}:\\{f}\\{o}\\amd64</Path></PathAndCredentials>'
+        for i, (d, f, o) in enumerate(paths, start=1))
+    pe = _component('Microsoft-Windows-PnpCustomizationsWinPE', 'windowsPE', f'      <DriverPaths>\n{lines}\n      </DriverPaths>')
+    offline = _component('Microsoft-Windows-PnpCustomizationsNonWinPE', 'offlineServicing', f'      <DriverPaths>\n{lines}\n      </DriverPaths>')
+    tools = (f'cmd /c for %d in ({" ".join(_DRIVER_LETTERS)}) do if exist %d:\\virtio-win-guest-tools.exe '
+             f'start "" /wait %d:\\virtio-win-guest-tools.exe /install /passive /norestart')
+    oobe = _component('Microsoft-Windows-Shell-Setup', 'oobeSystem', f'''      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add"><Order>1</Order><CommandLine>{xml_escape(tools)}</CommandLine><Description>virtio guest tools and QEMU guest agent</Description></SynchronousCommand>
+      </FirstLogonCommands>''')
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<unattend xmlns="urn:schemas-microsoft-com:unattend">\n'
+            f'  <settings pass="windowsPE">\n{pe}\n  </settings>\n'
+            f'  <settings pass="offlineServicing">\n{offline}\n  </settings>\n'
+            f'  <settings pass="oobeSystem">\n{oobe}\n  </settings>\n</unattend>\n')
+
+
 # apps every office desktop gets (direct MSI links of the vendors - winget is not ready on a fresh install)
 WIN_APPS = (
     ('Google Chrome', 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'),
