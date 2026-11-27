@@ -70,15 +70,20 @@
 → Decrypt → SignHash; 로그온 뒤 pending `state=done`, CN=test 인증서 저장소에 없음; 엔진 감사 `vlab.logon.issue`
 (일련번호·만료·포털 세션 해시) 다음 `vlab.warpgate.connect`.
 
-### 남은 일
-- VM이 소비/결과를 엔진에 알려 주지 않음: `vlab_logon_issued.state`는 `armed`에서 멈춤(VM 쪽 pending은 `done`).
-- 콘솔: 풀 정책 "데스크톱 자동 로그인" 스위치·데스크톱 상태 칩(이 저장소는 API만).
-- 다른 풀·데스크톱: 설치는 데스크톱마다 `POST …/logon-sso/install`(조인 스크립트에 넣기), 게이트웨이 주소 설정.
-- 장치 연결 방식(rdpgw): mstsc가 NLA에서 먼저 비밀번호를 물음 — 대상 아님.
-- LSA 보호(RunAsPPL) 켜진 VM: 서명 안 된 CSP는 LSASS에 못 들어감 → 코드 서명(제품화) 필요. 지금은 `lsa_ppl`로 보고만.
-- 시계: 내장 DC에 NTP(123/udp) 없음 — VM 시계가 5분 넘게 어긋나면 실패.
-- VM 119에 남은 시험 흔적: vTPM, TPM 가상 스마트카드 "MOAVI Logon", 정책 `fEnableSmartCard=0`(1.2.2 설치가 넣음;
-  지금 구조엔 필요 없음 — 되돌리려면 그 값 삭제), 등록만 된 KSP.
+### 1.3.4에서 마무리한 것 (2026-11-27, .55에서 확인)
+- 자동 설치: `desktop_sso` 풀의 Windows 데스크톱에 엔진이 스스로 설치(새 데스크톱·스위치 켬·새 모듈 버전), 재부팅 없음.
+  콘솔 풀 화면에 "자동 로그인 <버전> / 설치 대기 / 설치 실패 / 안 됨: LSA 보호" + 다시 설치.
+- VM이 직전 로그온 결과를 다음 `prepare`에서 알려 주고, 엔진이 `vlab_logon_issued`를 used / failed / expired로 바꾼다.
+- LSA 보호(RunAsPPL) VM: CP가 자동 로그온을 내지 않고(평소 화면), 설치 기록 `unsupported`(LSA_PPL), 인증서 발급 안 함.
+  실제로 쓰려면 CSP 코드 서명(EV/Microsoft 서명)이 필요 — 제품화 과제.
+- 장치 연결 방식(rdpgw): `desktop_sso` 풀이면 그 데스크톱 RDP의 NLA를 끄고(`moavi-logon.exe rdp-nla off`, 감사
+  `vlab.logon.nla`) .rdp에서 CredSSP·프롬프트를 뺀다 → 로그온 화면에서 인증서 로그온. **3389는 게이트웨이만 닿는다는
+  방화벽 전제**. 실장비 시험은 아직(TEST 풀은 Warpgate 경로).
+- 시계: 내장 DC(vlab-directory)가 chrony로 NTP 123/udp 제공, samba `ntp_signd`로 서명(Windows NT5DS). VM 119:
+  `w32tm /query /source` = dc1.moavi.lan, 오차 ~2 ms.
+- 쓰지 않는 KSP 배포 중단(설치기가 예전 것 등록 해제·삭제). VM 119 시험 흔적 정리: TPM 가상 스마트카드 삭제,
+  `fEnableSmartCard` 정책 값 삭제, SCardSvr Manual, vsc.txt 삭제. vTPM은 남김. 옛 CSP 파일 2개는 LSASS가 들고 있어
+  다음 재부팅 뒤 설치 때 지워진다.
 
 ---
 
