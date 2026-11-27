@@ -220,7 +220,8 @@ def start_build(cluster_id, preset_id):
                  (bid, cluster_id, node, preset_id, opts['name'], int(vmid or 0), json.dumps(opts), core._user(), t, t))
     with _lock:
         _live.add(bid)
-    threading.Thread(target=_run, args=(bid, cluster_id, opts, vmid, password), daemon=True,
+    from pegaprox.core import ha
+    threading.Thread(target=ha.as_job(_run, f'desktop template build {bid}'), args=(bid, cluster_id, opts, vmid, password), daemon=True,
                      name=f'desktpl-{bid}').start()
     log_audit(core._user(), 'vlab.desktpl.build',
               f"desktop template '{opts['name']}' ({preset_id}) on {node}/{storage}", get_client_ip())

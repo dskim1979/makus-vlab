@@ -337,6 +337,14 @@ EXITS = {
     ('pegaprox/api/pbs.py', 'probe_pbs_fingerprint', 'socket'): (1, 'read'),
     # MOAVI Desk: the gateway and licence-server port checks (an admin's request, no cluster)
     ('pegaprox/api/vlab_next.py', '_tcp_probe', 'socket'): (1, 'read'),
+    # MOAVI Desk: 템플릿 만들기 and the VM 만들기 drivers CD - qm/pvesm/genisoimage on the node over the
+    # manager's guarded _ssh_connect, and the answer files written there by SFTP on that client
+    ('pegaprox/api/vlab_desktpl.py', '_Node.run', 'ssh-exec'): (1, 'client'),
+    ('pegaprox/api/vlab_desktpl.py', '_Node.write', 'ssh-exec'): (1, 'client'),
+    # MOAVI Desk: the stdio bridge of the MCP server (a separate process on an admin's PC, calls this server's /mcp)
+    ('pegaprox/vlab/mcp_stdio.py', 'main', 'http-urllib'): (1, 'external'),
+    # MOAVI Desk: is the RD gateway container up (TCP connect inside the compose network)
+    ('pegaprox/vlab/rdpgw.py', 'reachable', 'socket'): (1, 'read'),
     # MOAVI Desk: a desktop's RDP/SSH/VNC port probe on connect (a user's request, no cluster write)
     ('pegaprox/api/vlab_next.py', 'rdp_listening', 'socket'): (1, 'read'),
     # MOAVI Desk: the Warpgate bastion admin API (an external gateway service, not a cluster/node/BMC)
@@ -719,6 +727,8 @@ AUTOMATIONS = {
     ('pegaprox/api/clusters.py', 'update_ha_config'): (2, 'job'),
     # MOAVI Desk: loan returns and the pool policies' idle shutdown / session limit, once a minute
     ('pegaprox/vlab/loans.py', 'start_loan_thread'): (1, 'confirm'),
+    # MOAVI Desk: 템플릿 만들기 - an admin's build that runs on after the request (qm create, install, template)
+    ('pegaprox/api/vlab_desktpl.py', 'start_build'): (1, 'job'),
     # MOAVI Desk: Warpgate first-start connect and the removal of a gone desktop's targets
     # (the Warpgate admin API and the DB only, no cluster)
     ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
