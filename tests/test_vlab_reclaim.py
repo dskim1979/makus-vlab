@@ -115,9 +115,11 @@ def test_totals_count_a_vm_once_and_say_how_many_more_desktops_fit():
          'free': rc._free(cards=1)}
     e = {'key': 'orphan:c:9', 'kind': 'orphan', 'cluster_id': 'c', 'vmid': 9, 'exempt': True,
          'free': rc._free(16, 64, 500)}
-    t = rc.totals([a, b, c, d, e], {'vcpu': 2, 'ram_gb': 4})
+    f = {'key': 'orphan:c:8', 'kind': 'orphan', 'cluster_id': 'c', 'vmid': 8, 'exempt': False,
+         'free': rc._free(8, 16, 100), 'action': {'id': 'review'}}
+    t = rc.totals([a, b, c, d, e, f], {'vcpu': 2, 'ram_gb': 4})
     assert (t['vcpu'], t['ram_gb'], t['disk_gb'], t['cards'], t['seats']) == (4, 8.0, 100.0, 1, 1)
-    assert t['more_desktops'] == 2 and t['items'] == 4
+    assert t['more_desktops'] == 2 and t['items'] == 5 and t['review'] == 1    # the orphan to check is not counted
     assert rc.counts([a, b, c, d, e]) == {'unused': 1, 'oversized': 1, 'stopped': 1, 'orphan': 0, 'snapshot': 0, 'loan': 1}
 
 
@@ -192,10 +194,10 @@ def test_the_report_lists_every_kind_it_finds_with_totals(env):
 def test_an_exempt_item_leaves_the_list_and_the_totals_until_taken_off(env):
     e = env
     key = f'orphan:{CID}:401'
-    before = _report(e)['totals']['vcpu']
+    before = _report(e)['totals']['review']
     assert e['admin'].post('/api/vlab/admin/reclaim/exempt', json={'key': key, 'target': 'stray', 'note': '빌드 서버'}).status_code == 200
     rep = _report(e)
-    assert key not in {i['key'] for i in rep['items']} and rep['exempt_count'] == 1 and rep['totals']['vcpu'] < before
+    assert key not in {i['key'] for i in rep['items']} and rep['exempt_count'] == 1 and rep['totals']['review'] == before - 1
     assert any(i['key'] == key and i['exempt'] for i in _report(e, exempt=1)['items'])
     assert e['admin'].post('/api/vlab/admin/reclaim/exempt', json={'key': 'nonsense'}).status_code == 400
     assert e['admin'].delete('/api/vlab/admin/reclaim/exempt', query_string={'key': key}).status_code == 200
