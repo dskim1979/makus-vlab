@@ -830,9 +830,10 @@ def test_template_details_say_whether_a_linked_clone_works(cloning, monkeypatch,
                         lambda cid, m: [{'storage': store_name, 'plugintype': plugin, 'node': 'pve1'}])
     mgr.get_vm_config.return_value = {'success': True, 'config': {'raw': {
         'scsi0': disk, 'ide2': 'local:iso/virtio.iso,media=cdrom', 'efidisk0': disk.replace('disk-0', 'disk-1'),
-        'net0': 'virtio=AA:BB,bridge=vmbr0'}}}
+        'net0': 'virtio=AA:BB,bridge=vmbr0', 'ostype': 'win11'}}}
     (t,) = admin.get(f'/api/vlab/admin/clusters/{CID}/templates?details=1').get_json()['templates']
     assert [d['key'] for d in t['disks']] == ['efidisk0', 'scsi0'] and t['disks'][1]['plugin'] == plugin
+    assert t['ostype'] == 'win11'
     assert t['linked_clone'] is linked and t['pools'] == 0
 
 
@@ -844,6 +845,7 @@ def test_template_details_count_pools_cloned_from_it(cloning, monkeypatch):
     admin.post(f"/api/vlab/admin/pools/{pool['id']}/clone", json={'template_vmid': 900, 'count': 1, 'name_prefix': 'lab'})
     (t,) = admin.get(f'/api/vlab/admin/clusters/{CID}/templates?details=1').get_json()['templates']
     assert (t['pools'], t['disks'], t['linked_clone']) == (1, None, None)      # config unreadable: unknown
+    assert t['ostype'] == ''
 
 
 def test_clone_creates_provisioning_desktops_with_free_ids(cloning):

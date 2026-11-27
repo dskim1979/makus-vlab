@@ -2067,8 +2067,10 @@ def cluster_templates(cluster_id):
             t = {'vmid': vmid, 'name': vm.get('name') or f'tpl-{vmid}', 'node': vm.get('node', ''),
                  'type': vm.get('type'), 'spec': spec}
             if details:
-                disks = _template_disks(cluster_id, vm)
+                raw = {}
+                disks = _template_disks(cluster_id, vm, raw)
                 t['disks'] = [dict(x, plugin=plugin.get(x['storage'], '')) for x in disks] if disks is not None else None
+                t['ostype'] = str(raw.get('ostype') or '')
                 t['linked_clone'] = _linked_clone_ok(t['disks'], vm.get('type'))
                 t['pools'] = len(from_tpl.get(vmid, ()))
             out.append(t)
@@ -2094,9 +2096,9 @@ def _storage_plugins(cluster_id):
     return {s.get('storage'): s.get('plugintype') or '' for s in rows if s.get('storage')}
 
 
-def _template_disks(cluster_id, vm):
+def _template_disks(cluster_id, vm, raw_out=None):
     """[{key, storage, volume}] of the template's disks (CD-ROMs left out); None when the
-    config cannot be read."""
+    config cannot be read. raw_out (a dict) receives the config as read."""
     mgr = cluster_managers.get(cluster_id)
     try:
         r = mgr.get_vm_config(vm.get('node', ''), int(vm['vmid']), vm.get('type'))
@@ -2106,6 +2108,8 @@ def _template_disks(cluster_id, vm):
     raw = r.get('config', {}).get('raw') if isinstance(r, dict) and r.get('success') else None
     if not isinstance(raw, dict):
         return None
+    if isinstance(raw_out, dict):
+        raw_out.update(raw)
     out = []
     for k, v in sorted(raw.items()):
         if not _DISK_KEY.match(k) or not isinstance(v, str) or 'media=cdrom' in v:
