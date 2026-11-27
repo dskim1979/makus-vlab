@@ -48883,6 +48883,51 @@
         ]
       }
     },
+    "/api/vlab/admin/clusters/{cluster_id}/rrd": {
+      "get": {
+        "operationId": "vlab.cluster_rrd_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "클러스터 > 개요 history: CPU and memory use of the whole cluster over ?timeframe=hour|day|week|month|year, from each online node's Proxmox rrddata - CPU weighted by the node's cores, memory by its size. {timeframe, points: [{t, cpu, mem}]} in percent; a node that does not answer is left out (nodes_missing).",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
     "/api/vlab/admin/clusters/{cluster_id}/storage": {
       "get": {
         "operationId": "vlab.cluster_storage_get",
@@ -51379,6 +51424,61 @@
             }
           }
         ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/pools/{pool_id}/desktops/prune": {
+      "post": {
+        "operationId": "vlab.prune_desktops_post",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Drop the pool's desktops whose guest is gone from the cluster (deleted in Proxmox).",
+        "parameters": [
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -57147,7 +57247,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "{cores?, sockets?, memory_mb?} - vCPUs and memory.",
+        "summary": "{cores?, sockets?, memory_mb?, name?} - vCPUs, memory, and the VM's name (the desktop takes it too).",
         "parameters": [
           {
             "name": "desktop_id",
