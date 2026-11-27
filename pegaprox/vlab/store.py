@@ -278,6 +278,7 @@ def remove_desktop(desktop_id):
     db().execute('DELETE FROM vlab_desktops WHERE id = ?', (desktop_id,))
     _forget_warpgate(desktop_id)
     _release_netiso(desktop_id)
+    _release_netseg(desktop_id)
 
 
 def _release_netiso(desktop_id):
@@ -287,6 +288,15 @@ def _release_netiso(desktop_id):
         release_desktop(desktop_id)
     except Exception as e:
         logging.warning(f'[VLAB] network isolation release for {desktop_id} skipped: {str(e)[:200]}')
+
+
+def _release_netseg(desktop_id):
+    """네트워크 분리: the VM back on its old bridge (best effort; pegaprox/api/vlab_netseg.py)."""
+    try:
+        from pegaprox.api.vlab_netseg import release_desktop
+        release_desktop(desktop_id)
+    except Exception as e:
+        logging.warning(f'[VLAB] network segment release for {desktop_id} skipped: {str(e)[:200]}')
 
 
 def _forget_warpgate(desktop_id):
