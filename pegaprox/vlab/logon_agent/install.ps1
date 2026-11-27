@@ -109,6 +109,15 @@ try {
         'vsc=no-tpm'
     }
 
+    # 4c. RDP sessions use the VM's own card readers: with smart card redirection on, Windows sends a
+    # session's smart card calls to the RDP client (Warpgate has no readers) and the logon never sees
+    # the VM's virtual smart card (Smart Card Logon event 5, STATUS_SMARTCARD_SUBSYSTEM_FAILURE).
+    # Policy "Do not allow smart card device redirection".
+    $ts = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+    if (-not (Test-Path $ts)) { New-Item -Force $ts | Out-Null }
+    Set-ItemProperty -Path $ts -Name 'fEnableSmartCard' -Value 0 -Type DWord
+    'scard_redirect=off'
+
     # 5. trust the MOAVI Desk Logon CA: Root (chain) and NTAuth (smart card logon)
     $ca = Join-Path $Setup 'moavi-logon-ca.cer'
     $r1 = certutil -f -addstore Root $ca 2>&1
