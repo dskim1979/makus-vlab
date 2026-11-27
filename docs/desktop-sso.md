@@ -64,7 +64,14 @@
 | 1.3.1 | Type 1 | LSASS가 CSP 로드·인증서·PIN·서명 OK, `ImportKey`(KDC 응답 키) 거부에서 실패 |
 | **1.3.2** | 세션 키 가져오기 | **selftest 성공(4624 MOAVI\test) → 실제 RDP 로그온 성공(바탕 화면)** |
 
+실제 RDP 로그온 증거 (18:51:39 KST): Security 4624 MOAVI\test, LogonType 10, Negotiate, Logon GUID 있음·LM 없음
+(= Kerberos), `klist sessions` "MOAVI\test Kerberos:RemoteInteractive"; logon.log `cp: logon result 0x00000000`, LSASS
+(pid 800)의 `csp:` 순서 AcquireContext → GetUserKey → KP_CERTIFICATE → PIN → SignHash → ImportKey(SIMPLEBLOB 3DES)
+→ Decrypt → SignHash; 로그온 뒤 pending `state=done`, CN=test 인증서 저장소에 없음; 엔진 감사 `vlab.logon.issue`
+(일련번호·만료·포털 세션 해시) 다음 `vlab.warpgate.connect`.
+
 ### 남은 일
+- VM이 소비/결과를 엔진에 알려 주지 않음: `vlab_logon_issued.state`는 `armed`에서 멈춤(VM 쪽 pending은 `done`).
 - 콘솔: 풀 정책 "데스크톱 자동 로그인" 스위치·데스크톱 상태 칩(이 저장소는 API만).
 - 다른 풀·데스크톱: 설치는 데스크톱마다 `POST …/logon-sso/install`(조인 스크립트에 넣기), 게이트웨이 주소 설정.
 - 장치 연결 방식(rdpgw): mstsc가 NLA에서 먼저 비밀번호를 물음 — 대상 아님.
