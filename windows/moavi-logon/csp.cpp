@@ -38,7 +38,7 @@ static const wchar_t* CSP_NAME_W = L"MOAVI Logon Cryptographic Provider";
 static const DWORD PROV_MAGIC = 0x4D4C4350, KEY_MAGIC = 0x4D4C434B, HASH_MAGIC = 0x4D4C4348;
 
 struct Prov { DWORD magic; HCRYPTPROV sw; std::wstring name; std::wstring thumb; bool verify; };
-struct Key { DWORD magic; HCRYPTKEY sw; DWORD spec; };
+struct Key { DWORD magic; HCRYPTKEY sw; DWORD spec; bool user; };   // user: the logon key pair; else a session key
 struct Hash { DWORD magic; HCRYPTHASH sw; };
 
 static Prov* P(HCRYPTPROV h) { Prov* p = (Prov*)h; return p && p->magic == PROV_MAGIC ? p : nullptr; }
@@ -192,7 +192,7 @@ extern "C" BOOL WINAPI CPGetUserKey(HCRYPTPROV h, DWORD spec, HCRYPTKEY* phKey) 
     Prov* p = P(h);
     if (!p || !phKey) return Fail((DWORD)NTE_BAD_UID);
     if (p->verify) return Fail((DWORD)NTE_NO_KEY);
-    Key* k = new (std::nothrow) Key{ KEY_MAGIC, 0, AT_KEYEXCHANGE };
+    Key* k = new (std::nothrow) Key{ KEY_MAGIC, 0, AT_KEYEXCHANGE, true };
     if (!k) return Fail(ERROR_NOT_ENOUGH_MEMORY);
     // the container has one key, made as AT_KEYEXCHANGE (it signs too)
     if (!CryptGetUserKey(p->sw, AT_KEYEXCHANGE, &k->sw)) {
@@ -238,19 +238,71 @@ extern "C" BOOL WINAPI CPSetKeyParam(HCRYPTPROV, HCRYPTKEY hk, DWORD param, cons
     return r;
 }
 
-extern "C" BOOL WINAPI CPExportKey(HCRYPTPROV, HCRYPTKEY hk, HCRYPTKEY, DWORD type, DWORD flags, BYTE* out, DWORD* pcb) {
+static BOOL Wrap(HCRYPTKEY sw, HCRYPTKEY* ph) {
+    Key* k = new (std::nothrow) Key{ KEY_MAGIC, sw, 0, false };
+    if (!k) { CryptDestroyKey(sw); return Fail(ERROR_NOT_ENOUGH_MEMORY); }
+    *ph = (HCRYPTKEY)k;
+    return TRUE;
+}
+
+// The logon key pair never leaves (public blob only); session keys - the PKINIT reply key the KDC
+// wraps to the logon key - go in and out as Kerberos needs them.
+extern "C" BOOL WINAPI CPExportKey(HCRYPTPROV, HCRYPTKEY hk, HCRYPTKEY hPub, DWORD type, DWORD flags, BYTE* out, DWORD* pcb) {
     Key* k = K(hk);
     if (!k) return Fail((DWORD)NTE_BAD_KEY);
-    if (type != PUBLICKEYBLOB) { Log(L"csp: ExportKey type %lu -> refused", type); return Fail((DWORD)NTE_BAD_TYPE); }   // public only
-    BOOL r = CryptExportKey(k->sw, 0, PUBLICKEYBLOB, flags, out, pcb);
-    Log(L"csp: ExportKey public -> %s", r ? L"ok" : L"fail");
+    if (k->user && type != PUBLICKEYBLOB) { Log(L"csp: ExportKey type %lu of the logon key -> refused", type); return Fail((DWORD)NTE_BAD_TYPE); }
+    Key* pub = K(hPub);
+    BOOL r = CryptExportKey(k->sw, pub ? pub->sw : 0, type, flags, out, pcb);
+    Log(L"csp: ExportKey type %lu%s -> %s 0x%08lx", type, out ? L"" : L" (size)", r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
-extern "C" BOOL WINAPI CPGenKey(HCRYPTPROV, ALG_ID alg, DWORD, HCRYPTKEY*) { Log(L"csp: GenKey 0x%x -> refused", alg); return Fail((DWORD)NTE_PERM); }
-extern "C" BOOL WINAPI CPDeriveKey(HCRYPTPROV, ALG_ID, HCRYPTHASH, DWORD, HCRYPTKEY*) { return Fail((DWORD)NTE_PERM); }
-extern "C" BOOL WINAPI CPImportKey(HCRYPTPROV, const BYTE*, DWORD, HCRYPTKEY, DWORD, HCRYPTKEY*) { Log(L"csp: ImportKey -> refused"); return Fail((DWORD)NTE_PERM); }
-extern "C" BOOL WINAPI CPDuplicateKey(HCRYPTPROV, HCRYPTKEY, DWORD*, DWORD, HCRYPTKEY*) { return Fail((DWORD)NTE_PERM); }
+extern "C" BOOL WINAPI CPImportKey(HCRYPTPROV h, const BYTE* data, DWORD n, HCRYPTKEY hPub, DWORD flags, HCRYPTKEY* phKey) {
+    Prov* p = P(h);
+    if (!p || !data || n < sizeof(BLOBHEADER) || !phKey) return Fail((DWORD)NTE_BAD_DATA);
+    BYTE type = ((const BLOBHEADER*)data)->bType;
+    if (type == PRIVATEKEYBLOB) { Log(L"csp: ImportKey private key -> refused"); return Fail((DWORD)NTE_PERM); }   // never replaces the logon key
+    Key* pub = K(hPub);
+    HCRYPTKEY sw = 0;
+    BOOL r = CryptImportKey(p->sw, data, n, pub ? pub->sw : 0, flags, &sw);
+    Log(L"csp: ImportKey type %u alg 0x%x flags 0x%lx -> %s 0x%08lx", type, ((const BLOBHEADER*)data)->aiKeyAlg, flags,
+        r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    return r ? Wrap(sw, phKey) : FALSE;
+}
+
+extern "C" BOOL WINAPI CPGenKey(HCRYPTPROV h, ALG_ID alg, DWORD flags, HCRYPTKEY* phKey) {
+    Prov* p = P(h);
+    if (!p || !phKey) return Fail((DWORD)NTE_BAD_UID);
+    if (alg == AT_KEYEXCHANGE || alg == AT_SIGNATURE || GET_ALG_CLASS(alg) != ALG_CLASS_DATA_ENCRYPT) {
+        Log(L"csp: GenKey 0x%x -> refused", alg);
+        return Fail((DWORD)NTE_PERM);   // no key pairs here; session keys only
+    }
+    HCRYPTKEY sw = 0;
+    BOOL r = CryptGenKey(p->sw, alg, flags, &sw);
+    Log(L"csp: GenKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
+    return r ? Wrap(sw, phKey) : FALSE;
+}
+
+extern "C" BOOL WINAPI CPDeriveKey(HCRYPTPROV h, ALG_ID alg, HCRYPTHASH hh, DWORD flags, HCRYPTKEY* phKey) {
+    Prov* p = P(h);
+    Hash* x = H(hh);
+    if (!p || !x || !phKey) return Fail((DWORD)NTE_BAD_HASH);
+    HCRYPTKEY sw = 0;
+    BOOL r = CryptDeriveKey(p->sw, alg, x->sw, flags, &sw);
+    Log(L"csp: DeriveKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
+    return r ? Wrap(sw, phKey) : FALSE;
+}
+
+extern "C" BOOL WINAPI CPDuplicateKey(HCRYPTPROV, HCRYPTKEY hk, DWORD* reserved, DWORD flags, HCRYPTKEY* phKey) {
+    Key* k = K(hk);
+    if (!k || !phKey) return Fail((DWORD)NTE_BAD_KEY);
+    HCRYPTKEY sw = 0;
+    if (!CryptDuplicateKey(k->sw, reserved, flags, &sw)) return FALSE;
+    Key* d = new (std::nothrow) Key{ KEY_MAGIC, sw, k->spec, k->user };
+    if (!d) { CryptDestroyKey(sw); return Fail(ERROR_NOT_ENOUGH_MEMORY); }
+    *phKey = (HCRYPTKEY)d;
+    return TRUE;
+}
 
 extern "C" BOOL WINAPI CPEncrypt(HCRYPTPROV, HCRYPTKEY hk, HCRYPTHASH hh, BOOL fin, DWORD flags, BYTE* data, DWORD* pcb, DWORD cbBuf) {
     Key* k = K(hk);
