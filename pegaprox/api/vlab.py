@@ -146,6 +146,39 @@ def _bad(msg, code=400):
     return jsonify({'error': msg}), code
 
 
+# who is signed in on a desktop, from its guest agent (get-users); kept a few seconds so the portal's
+# 10-second refresh of a user's desktops costs one agent call per running desktop at most
+_SIGNED_IN_TTL = 8
+_signed_in_cache = {}
+
+
+def _signed_in(desk, vm):
+    """[{'user', 'domain', 'login_time'}] of the people signed in on a running desktop - the console
+    session and RDP alike - or None when it cannot be told (not running, LXC, no guest agent)."""
+    if not vm or vm.get('status') != 'running' or desk.get('vm_type', 'qemu') != 'qemu':
+        return None
+    key = (desk['cluster_id'], int(desk['vmid']))
+    hit = _signed_in_cache.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _SIGNED_IN_TTL:
+        return hit[1]
+    users = None
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if mgr is not None:
+        node = vm.get('node') or desk['node']
+        try:
+            resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(desk['vmid'])}/agent/get-users",
+                                timeout=3)
+            if getattr(resp, 'status_code', 0) == 200:
+                got = (resp.json().get('data') or {}).get('result') or []
+                users = [{'user': u.get('user'), 'domain': u.get('domain'), 'login_time': u.get('login-time')}
+                         for u in got if isinstance(u, dict) and u.get('user')]
+        except Exception as e:
+            logging.debug(f"[VLAB] signed-in users of {desk['vmid']}: {e}")
+    _signed_in_cache[key] = (now, users)
+    return users
+
+
 def _vm_states(cluster_id):
     """{vmid: guest status} from the cluster's cached resource list; {} when unknown."""
     mgr = cluster_managers.get(cluster_id)
@@ -328,8 +361,11 @@ def my_desktops():
     pools = {}
     out = []
     for d in rows:
-        v = _desktop_view(d, live.get(d['cluster_id'], {}))
+        vms = live.get(d['cluster_id'], {})
+        v = _desktop_view(d, vms)
         v['work'] = work.get(d['id'])
+        # 로그인됨: who is on it right now (the card shows this instead of a dark console picture)
+        v['signed_in'] = _signed_in(d, vms.get(int(d['vmid'])))
         v['pool_type'] = d.get('pool_type', '')
         v['last_connected'] = last.get(d['id'])
         pol = pool_policy.effective(_settings_of(d), d.get('pool_type'))
