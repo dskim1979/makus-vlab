@@ -91,6 +91,24 @@ try {
     Set-Service SCardSvr -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service SCardSvr -ErrorAction SilentlyContinue
 
+    # 4b. the VM's TPM virtual smart card: the logon key is made on it (Windows' smart card logon takes
+    # no software key). Needs a (v)TPM; without one the module stays on the software key.
+    $exe = Join-Path $dest 'moavi-logon.exe'
+    $tpm = $null
+    try { $tpm = Get-Tpm } catch {}
+    if ($tpm -and $tpm.TpmPresent -and $tpm.TpmReady) {
+        $vi = & $exe vsc-info 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $mk = & tpmvscmgr.exe create /name 'MOAVI Logon' /pin default /adminkey random /generate 2>&1
+            if ($LASTEXITCODE -ne 0) { "vsc=failed $($mk | Select-Object -Last 1)" }
+            Start-Sleep -Seconds 3
+            $vi = & $exe vsc-info 2>&1
+        }
+        $vi
+    } else {
+        'vsc=no-tpm'
+    }
+
     # 5. trust the MOAVI Desk Logon CA: Root (chain) and NTAuth (smart card logon)
     $ca = Join-Path $Setup 'moavi-logon-ca.cer'
     $r1 = certutil -f -addstore Root $ca 2>&1

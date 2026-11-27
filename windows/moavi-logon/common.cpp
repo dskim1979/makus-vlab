@@ -173,6 +173,30 @@ static void RemoveCertFrom(DWORD location, const std::string& thumb) {
     CertCloseStore(st, 0);
 }
 
+bool ReadVsc(KV& vsc) {
+    return ReadKV(DataDir() + L"\\vsc.txt", vsc) && !vsc[L"reader"].empty();
+}
+
+std::wstring VscContainer(const KV& vscc, const std::wstring& keyName) {
+    KV vsc = vscc;
+    return L"\\\\.\\" + vsc[L"reader"] + L"\\" + keyName;
+}
+
+static void RemoveVscKey(const std::wstring& keyName) {
+    KV vsc;
+    if (!ReadVsc(vsc)) return;
+    NCRYPT_PROV_HANDLE prov = 0;
+    if (NCryptOpenStorageProvider(&prov, MS_SMART_CARD_KEY_STORAGE_PROVIDER, 0) != ERROR_SUCCESS) return;
+    NCRYPT_KEY_HANDLE key = 0;
+    std::wstring full = VscContainer(vsc, keyName);
+    if (NCryptOpenKey(prov, &key, full.c_str(), AT_KEYEXCHANGE, NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
+        std::wstring pin = vsc[L"pin"];
+        NCryptSetProperty(key, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG);
+        if (NCryptDeleteKey(key, NCRYPT_SILENT_FLAG) != ERROR_SUCCESS) NCryptFreeObject(key);
+    }
+    NCryptFreeObject(prov);
+}
+
 void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex) {
     std::string thumb;
     if (!thumbHex.empty() && UnHex(thumbHex, thumb) && thumb.size() == 20) {
@@ -180,6 +204,7 @@ void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex)
         RemoveCertFrom(CERT_SYSTEM_STORE_CURRENT_USER, thumb);
     }
     if (keyName.empty() || keyName.compare(0, wcslen(MOAVI_KEY_PREFIX), MOAVI_KEY_PREFIX) != 0) return;
+    RemoveVscKey(keyName);
     for (DWORD scope : { (DWORD)0, (DWORD)CRYPT_MACHINE_KEYSET }) {
         HCRYPTPROV hp = 0;
         CryptAcquireContextW(&hp, keyName.c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_DELETEKEYSET | CRYPT_SILENT | scope);

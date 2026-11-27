@@ -53,7 +53,11 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
     std::vector<BYTE> csp;
     if (cspMode) {
         std::wstring container = st[L"key"];
+        bool vscKey = st[L"keyprov"] == L"vsc";
+        KV vsc;
+        if (vscKey) ReadVsc(vsc);
         std::wstring provider = !st[L"provider"].empty() ? st[L"provider"]
+                              : vscKey ? std::wstring(MS_SCARD_PROV_W)
                               : st[L"keyprov"] == L"ksp" ? std::wstring(MS_KEY_STORAGE_PROVIDER)
                               : st[L"keyprov"] == L"capi" ? std::wstring(MS_ENH_RSA_AES_PROV_W)
                               : std::wstring(MOAVI_KSP_NAME);
@@ -61,9 +65,11 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
         std::wstring payload;
         payload.assign(4, L'\0');                 // the first sizeof(DWORD) WCHARs of bBuffer stay unused
         ULONG cardOff = (ULONG)payload.size();
-        payload += L'\0';                         // card name ""
+        if (vscKey && st[L"nocard"] != L"on") payload += vsc[L"card"];
+        payload += L'\0';                         // card name ("" for a software key)
         ULONG readerOff = (ULONG)payload.size();
-        payload += L'\0';                         // reader name ""
+        if (vscKey) payload += vsc[L"reader"];
+        payload += L'\0';                         // reader name
         ULONG contOff = (ULONG)payload.size();
         payload += container; payload += L'\0';
         ULONG cspOff = (ULONG)payload.size();
@@ -98,6 +104,7 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
     // a PIN must be there (an empty one is STATUS_INVALID_PARAMETER); the software key has none, so
     // any value does - not a secret
     std::wstring domain = st[L"domain"], user = st[L"user"], pin = stc.count(L"pin") ? st[L"pin"] : L"0000";
+    if (st[L"keyprov"] == L"vsc" && !stc.count(L"pin")) { KV vsc; ReadVsc(vsc); pin = vsc[L"pin"]; }
     // names=upn (default when the engine sent one): UserName = the UPN, DomainName empty - LSA refuses
     // a certificate logon with a domain name (STATUS_INVALID_PARAMETER); on = DOMAIN + user; off = none
     std::wstring names = st[L"names"].empty() ? (st[L"upn"].empty() ? L"on" : L"upn") : st[L"names"];

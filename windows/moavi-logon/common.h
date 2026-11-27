@@ -10,7 +10,7 @@
 #include <string>
 #include <map>
 
-#define MOAVI_LOGON_VERSION L"1.1.0"
+#define MOAVI_LOGON_VERSION L"1.2.0"
 #define MOAVI_KEY_PREFIX L"MOAVI-Logon-"
 #define MOAVI_KSP_NAME L"MOAVI Logon Key Storage Provider"
 #define MOAVI_KSP_IMAGE L"moavi-logon-ksp.dll"
@@ -38,6 +38,12 @@ void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex)
 
 // The key's scope: "user" (default) = SYSTEM's own key, the one LSASS (SYSTEM) opens for a certificate
 // logon; "machine" = a machine key (LSA reports STATUS_SMARTCARD_NO_KEY_CONTAINER for it).
+// The VM's TPM virtual smart card (made by install.ps1 with tpmvscmgr, read by "moavi-logon.exe vsc-info"):
+// C:\ProgramData\MoaviLogon\vsc.txt reader=, card=, pin=. pin is the card's own PIN, a VM-local value
+// (tpmvscmgr's default for now), never a user's password.
+bool ReadVsc(KV& vsc);
+std::wstring VscContainer(const KV& vsc, const std::wstring& keyName);   // \\.\<reader>\<name>
+
 inline DWORD KeyScopeFlags(const std::wstring& scope) { return scope == L"machine" ? 0x20 /* NCRYPT_MACHINE_KEY_FLAG */ : 0; }
 
 }  // namespace moavi

@@ -25,10 +25,12 @@
 #include <wincrypt.h>
 #include <sddl.h>
 #include <stdio.h>
+#include <winscard.h>
 #include <vector>
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "secur32.lib")
+#pragma comment(lib, "winscard.lib")
 
 using namespace moavi;
 
@@ -83,8 +85,13 @@ static bool PublicKeyOf(const KV& stc, std::vector<BYTE>& out) {
         NCRYPT_PROV_HANDLE prov = 0;
         NCRYPT_KEY_HANDLE key = 0;
         bool ok = false;
-        if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) == ERROR_SUCCESS &&
-            NCryptOpenKey(prov, &key, st[L"key"].c_str(), 0, KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
+        bool vscKey = st[L"keyprov"] == L"vsc";
+        KV vsc;
+        if (vscKey) ReadVsc(vsc);
+        std::wstring name = vscKey ? VscContainer(vsc, st[L"key"]) : st[L"key"];
+        if (NCryptOpenStorageProvider(&prov, vscKey ? MS_SMART_CARD_KEY_STORAGE_PROVIDER : MS_KEY_STORAGE_PROVIDER, 0) == ERROR_SUCCESS &&
+            NCryptOpenKey(prov, &key, name.c_str(), vscKey ? AT_KEYEXCHANGE : 0,
+                          (vscKey ? 0 : KeyScopeFlags(st[L"keyscope"])) | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
             CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, nullptr, &len);
             out.resize(len);
             ok = CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)out.data(), &len) != FALSE;
@@ -113,7 +120,27 @@ static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope
     NCRYPT_KEY_HANDLE key = 0;
     HCRYPTPROV_OR_NCRYPT_KEY_HANDLE signer = 0;
     DWORD spec = AT_KEYEXCHANGE;
-    if (keyprov != L"capi") {
+    if (keyprov == L"vsc") {
+        // a key made on the VM's TPM virtual smart card itself (it never leaves the TPM)
+        KV vsc;
+        if (!ReadVsc(vsc)) { err = "no virtual smart card (vsc.txt)"; return false; }
+        std::wstring full = VscContainer(vsc, keyName), pin = vsc[L"pin"];
+        SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_SMART_CARD_KEY_STORAGE_PROVIDER, 0);
+        if (ss == ERROR_SUCCESS)
+            ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, full.c_str(), AT_KEYEXCHANGE, 0);
+        DWORD bits = 2048;
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG);
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0);
+        if (ss == ERROR_SUCCESS) ss = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG);
+        if (ss != ERROR_SUCCESS) {
+            sprintf_s(m, "card key 0x%08lx", (unsigned long)ss); err = m;
+            if (key) NCryptFreeObject(key);
+            if (prov) NCryptFreeObject(prov);
+            return false;
+        }
+        signer = key;
+        spec = CERT_NCRYPT_KEY_SPEC;
+    } else if (keyprov != L"capi") {
         SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
         if (ss == ERROR_SUCCESS)
             ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
@@ -192,7 +219,9 @@ static int Prepare() {
     // logon path opens a container with; ksp: Microsoft Software KSP (LSA does not find it there)
     // keyprov moavi (default): a Software KSP key that LSA reaches through the MOAVI Logon KSP (a smart
     // card provider to it); ksp / capi: the bare software key (LSA refuses both - kept as switches)
-    std::wstring keyprov = opt[L"keyprov"] == L"ksp" ? L"ksp" : opt[L"keyprov"] == L"capi" ? L"capi" : L"moavi";
+    KV vscInfo;
+    std::wstring keyprov = !opt[L"keyprov"].empty() ? opt[L"keyprov"] : ReadVsc(vscInfo) ? L"vsc" : L"moavi";
+    if (keyprov != L"ksp" && keyprov != L"capi" && keyprov != L"vsc") keyprov = L"moavi";
     std::vector<BYTE> csr;
     std::string err;
     if (!MakeKeyAndCsr(keyprov, scope, keyName, csr, err)) {
@@ -257,10 +286,30 @@ static int Arm() {
                                           &cert->pCertInfo->SubjectPublicKeyInfo) != FALSE;
     if (!match) { CertFreeCertificateContext(cert); Out("error=cert is not for this key\n"); return 2; }
 
+    if (st[L"keyprov"] == L"vsc") {
+        // the card holds its certificate next to the key, as a real smart card does
+        KV vsc;
+        ReadVsc(vsc);
+        NCRYPT_PROV_HANDLE p = 0;
+        NCRYPT_KEY_HANDLE k = 0;
+        std::wstring full = VscContainer(vsc, st[L"key"]), pin = vsc[L"pin"];
+        SECURITY_STATUS ss = NCryptOpenStorageProvider(&p, MS_SMART_CARD_KEY_STORAGE_PROVIDER, 0);
+        if (ss == ERROR_SUCCESS) ss = NCryptOpenKey(p, &k, full.c_str(), AT_KEYEXCHANGE, NCRYPT_SILENT_FLAG);
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(k, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG);
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(k, NCRYPT_CERTIFICATE_PROPERTY, der.data(), (DWORD)der.size(), NCRYPT_SILENT_FLAG);
+        if (k) NCryptFreeObject(k);
+        if (p) NCryptFreeObject(p);
+        if (ss != ERROR_SUCCESS) {
+            CertFreeCertificateContext(cert);
+            char m[64]; sprintf_s(m, "error=card certificate 0x%08lx\n", (unsigned long)ss); Out(m);
+            return 4;
+        }
+    }
     CRYPT_KEY_PROV_INFO kpi = {};
     kpi.pwszContainerName = (LPWSTR)st[L"key"].c_str();
     bool ksp = st[L"keyprov"] != L"capi";
-    kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"moavi" ? MOAVI_KSP_NAME : ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
+    kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"vsc" ? MS_SMART_CARD_KEY_STORAGE_PROVIDER :
+                                st[L"keyprov"] == L"moavi" ? MOAVI_KSP_NAME : ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
     kpi.dwProvType = ksp ? 0 : PROV_RSA_AES;  // 0 = CNG
     kpi.dwFlags = (ksp ? KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG
                        : (st[L"keyscope"] == L"machine" ? CRYPT_MACHINE_KEYSET : 0) | CRYPT_SILENT);
@@ -366,14 +415,16 @@ static int Selftest(bool all) {
         for (auto& o : opt) st[o.first] = o.second;
     // csp with a PIN is the form LSA takes (hash and an empty PIN: STATUS_INVALID_PARAMETER); what varies
     // is how the key is named to it and the outer structure
-    const wchar_t* providers[] = { MOAVI_KSP_NAME, MS_KEY_STORAGE_PROVIDER, MS_ENH_RSA_AES_PROV_W };
+    const wchar_t* softProviders[] = { MOAVI_KSP_NAME, MS_KEY_STORAGE_PROVIDER, MS_ENH_RSA_AES_PROV_W };
+    const wchar_t* cardProviders[] = { MS_SCARD_PROV_W, MS_SMART_CARD_KEY_STORAGE_PROVIDER, L"" };
+    const wchar_t** providers = st[L"keyprov"] == L"vsc" ? cardProviders : softProviders;
     const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
     int rc = 1;
-    for (auto pv : providers) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) {
+    for (int pi = 0; pi < 3; pi++) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) {
         KV t = st;
-        if (all) { t[L"mode"] = L"csp"; t[L"provider"] = pv; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; t[L"pin"] = L"0000"; }
+        if (all) { t[L"mode"] = L"csp"; t[L"provider"] = providers[pi]; if (!*providers[pi]) t[L"nocard"] = L"on"; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; t[L"pin"] = L"0000"; }
         bool unlock = t[L"struct"] == L"unlock";
         NTSTATUS sub = 0;
         NTSTATUS r = TryLogon(t, unlock, &sub);
@@ -433,12 +484,52 @@ static int RegisterKsp(bool on) {
     return ss == ERROR_SUCCESS ? 0 : 4;
 }
 
+static int VscInfo() {
+    SCARDCONTEXT ctx = 0;
+    if (SCardEstablishContext(SCARD_SCOPE_SYSTEM, nullptr, nullptr, &ctx) != SCARD_S_SUCCESS) { Out("error=scard context\n"); return 4; }
+    LPWSTR readers = nullptr;
+    DWORD len = SCARD_AUTOALLOCATE;
+    std::wstring reader;
+    if (SCardListReadersW(ctx, nullptr, (LPWSTR)&readers, &len) == SCARD_S_SUCCESS) {
+        for (LPWSTR r = readers; *r; r += wcslen(r) + 1)
+            if (wcsstr(r, L"Virtual Smart Card") || wcsstr(r, L"Virtual Smartcard")) { reader = r; break; }
+        SCardFreeMemory(ctx, readers);
+    }
+    if (reader.empty()) { SCardReleaseContext(ctx); Out("error=no virtual smart card reader\n"); return 3; }
+    std::wstring card;
+    SCARDHANDLE h = 0;
+    DWORD proto = 0;
+    if (SCardConnectW(ctx, reader.c_str(), SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &h, &proto) == SCARD_S_SUCCESS) {
+        BYTE atr[36];
+        DWORD atrLen = sizeof(atr), state = 0, rlen = 0;
+        if (SCardStatusW(h, nullptr, &rlen, &state, &proto, atr, &atrLen) == SCARD_S_SUCCESS) {
+            LPWSTR cards = nullptr;
+            DWORD clen = SCARD_AUTOALLOCATE;
+            if (SCardListCardsW(ctx, atr, nullptr, 0, (LPWSTR)&cards, &clen) == SCARD_S_SUCCESS) {
+                if (cards && *cards) card = cards;
+                SCardFreeMemory(ctx, cards);
+            }
+        }
+        SCardDisconnect(h, SCARD_LEAVE_CARD);
+    }
+    SCardReleaseContext(ctx);
+    KV vsc;
+    ReadKV(DataDir() + L"\\vsc.txt", vsc);
+    vsc[L"reader"] = reader;
+    vsc[L"card"] = card;
+    if (vsc[L"pin"].empty()) vsc[L"pin"] = L"12345678";   // tpmvscmgr /pin default (the card's PIN, VM-local)
+    if (!EnsureDataDir() || !WriteKV(DataDir() + L"\\vsc.txt", vsc)) { Out("error=vsc.txt\n"); return 4; }
+    OutW(L"vsc_reader=" + reader + L"\nvsc_card=" + card + L"\n");
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) { Out("usage: moavi-logon prepare|arm|status|clear\n"); return 2; }
     std::wstring cmd = argv[1];
     if (cmd == L"prepare") return Prepare();
     if (cmd == L"arm") return Arm();
     if (cmd == L"status") return Status();
+    if (cmd == L"vsc-info") return VscInfo();
     if (cmd == L"register-ksp") return RegisterKsp(true);
     if (cmd == L"unregister-ksp") return RegisterKsp(false);
     if (cmd == L"selftest") return Selftest(argc > 2 && std::wstring(argv[2]) == L"all");
