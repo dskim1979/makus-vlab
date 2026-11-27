@@ -118,10 +118,19 @@ def test_without_passthrough_the_fresh_ticket_is_the_right_one():
     assert 'Authorization' not in h
 
 
-def test_the_host_header_names_what_we_actually_dial():
+def test_the_auth_headers_carry_no_host():
+    """websocket-client writes its own Host line; one here went out twice and PVE 9.3
+    refused the upgrade with 400. The authority goes in create_connection(host=...)."""
     h = vms._pve_console_ws_auth(_TokenCluster(), '127.0.0.1:43111',
                                  fresh_ticket=None, reuse_manager_auth=True)
-    assert h['Host'] == '127.0.0.1:43111'
+    assert 'Host' not in h
+
+
+def test_every_vncwebsocket_dial_names_its_host_once():
+    src = inspect.getsource(vms)
+    assert '"Host":' not in src, 'a Host header next to websocket-client goes out twice'
+    dials = src.count('create_connection(\n') + src.count('create_connection,\n')
+    assert dials and src.count('host=f"') >= dials, 'a create_connection without host='
 
 
 def test_a_cluster_with_neither_token_nor_ticket_sends_no_credential():
