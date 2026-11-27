@@ -1866,6 +1866,8 @@ def set_pool_policy(pool_id):
         except Exception as e:
             logging.warning(f"[VLAB] Warpgate clipboard for pool '{pool['name']}': {str(e)[:200]}")
     pool = store.get_pool(pool['id']) or pool
+    from pegaprox.api.vlab_netiso import kick
+    kick(pool['id'])                        # 네트워크 격리 follows at the next minute
     if not joined_before and directory.auto_join_on(pool):
         directory.queue_pool(pool)          # the switch turned on: the desktops not joined yet
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),

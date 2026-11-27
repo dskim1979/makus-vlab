@@ -51,6 +51,15 @@ takes effect:
                                the VM's console: a Windows desktop used over RDP shows its lock screen there.
                                Off by default except in dedicated pools - where desktops pass from user to
                                user the picture could be someone else's screen (defaults_for)
+  net_isolation                네트워크 격리: the pool's desktops take inbound traffic only from the MOAVI
+                               gateway (its addresses per cluster, pegaprox/vlab/netiso.py) and what
+                               net_allow_in opens - not from users' PCs, not from other desktops. Proxmox
+                               firewall (a security group per pool, NIC firewall=1, the VM's inbound policy
+                               DROP), so nothing inside the desktop can take it back
+  net_peers                    with isolation on, the pool's own desktops may still reach each other
+  net_allow_in                 more sources let in: [{cidr, proto any|tcp|udp|icmp, port, note}]
+  net_egress, net_allow_out    outbound: 'any' (as before) or 'list' = only the gateway, the pool's own
+                               desktops when net_peers, and net_allow_out (DNS, AD, file servers ...)
   auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
                                (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
                                bundled directory is in use
@@ -67,6 +76,9 @@ RESET_TYPES = ('reset', 'classroom')
 # pools whose desktops pass from one user to the next: the screen picture is off unless set
 SHARED_SCREEN_TYPES = ('reset', 'shared', 'classroom', 'buildfarm')
 RDP_ROUTES = ('record', 'devices')
+NET_EGRESS = ('any', 'list')
+NET_PROTOS = ('any', 'tcp', 'udp', 'icmp')
+NET_RULES_MAX = 30
 USB_MODES = ('deny', 'allow')
 # the kinds 'USB 정책' lists: USB interface class codes (SPICE usbredir) and device setup classes (RDP)
 USB_CLASSES = ('storage', 'printer', 'smartcard', 'camera', 'audio', 'imaging', 'serial', 'wireless')
@@ -120,12 +132,18 @@ DEFAULTS = {
     'desktop_files_max_mb': 500,   # largest single file
     'desktop_files_day_mb': 0,     # per user per day, both ways; 0 = no limit
     'device_route_for': [],     # 장치 연결 허용 대상: these users / departments / groups take the devices route
+    'net_isolation': False,     # 네트워크 격리 (pegaprox/vlab/netiso.py)
+    'net_peers': False,
+    'net_allow_in': [],
+    'net_egress': 'any',
+    'net_allow_out': [],
 }
 SUBJECT_TYPES = ('user', 'department', 'group')
 MAX_DEVICE_ROUTE_FOR = 200
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
-          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail')
+          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail',
+          'net_isolation', 'net_peers')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080), 'desktop_files_max_mb': (1, 10240), 'desktop_files_day_mb': (0, 1048576)}
@@ -218,6 +236,47 @@ def usb_rdp_lines(pol):
     return lines
 
 
+def _port_ok(port):
+    """'' or ports '22', '80,443', '5000:5100' (at most 10 parts)."""
+    if port == '':
+        return True
+    parts = port.split(',')
+    if len(parts) > 10:
+        return False
+    for part in parts:
+        ends = part.split(':')
+        if len(ends) > 2 or not all(e.isdigit() and 1 <= int(e) <= 65535 for e in ends):
+            return False
+        if len(ends) == 2 and int(ends[0]) > int(ends[1]):
+            return False
+    return True
+
+
+def net_rules(v, key):
+    """([{'cidr', 'proto', 'port', 'note'}], None) or (None, error) for net_allow_in / net_allow_out."""
+    import ipaddress
+    if not isinstance(v, list) or len(v) > NET_RULES_MAX:
+        return None, f'{key}: a list of at most {NET_RULES_MAX}'
+    out = []
+    for r in v:
+        if not isinstance(r, dict):
+            return None, f'{key}: each entry is {{cidr, proto, port, note}}'
+        try:
+            cidr = str(ipaddress.ip_network(str(r.get('cidr', '')).strip(), strict=False))
+        except ValueError:
+            return None, f"{key}: '{r.get('cidr')}' is not an address or network (e.g. 10.0.0.5, 10.0.0.0/24)"
+        proto = r.get('proto') or 'any'
+        if proto not in NET_PROTOS:
+            return None, f"{key}: proto must be one of {', '.join(NET_PROTOS)}"
+        port = str(r.get('port') or '').replace(' ', '')
+        if port and proto not in ('tcp', 'udp'):
+            return None, f'{key}: a port needs proto tcp or udp'
+        if not _port_ok(port):
+            return None, f"{key}: port '{port}' - e.g. 22, 80,443 or 5000:5100"
+        out.append({'cidr': cidr, 'proto': proto, 'port': port, 'note': str(r.get('note') or '').strip()[:40]})
+    return out, None
+
+
 def validate(data, pool_type):
     """(policy, None) or (None, error text). Unknown keys are refused; missing ones keep
     their defaults."""
@@ -278,6 +337,15 @@ def validate(data, pool_type):
                 clean.append({'subject_type': x['subject_type'], 'subject_id': x['subject_id'].strip()[:200],
                               'include_children': bool(x.get('include_children'))})
             out[k] = clean
+        elif k in ('net_allow_in', 'net_allow_out'):
+            rules, err = net_rules(v, k)
+            if err:
+                return None, err
+            out[k] = rules
+        elif k == 'net_egress':
+            if v not in NET_EGRESS:
+                return None, f"net_egress must be one of {', '.join(NET_EGRESS)}"
+            out[k] = v
         elif k == 'desktop_files':
             if v not in DESKTOP_FILES:
                 return None, f"desktop_files must be one of {', '.join(DESKTOP_FILES)}"
