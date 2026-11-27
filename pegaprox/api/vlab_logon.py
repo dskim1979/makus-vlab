@@ -411,8 +411,11 @@ def install_round(limit=AUTO_PER_ROUND):
             if why:
                 prev = logon_ca.install_of(desk['id']) or {}
                 if prev.get('state') != 'installed':
+                    # a stopped desktop is looked at again in 5 minutes; the engine still connecting to its
+                    # cluster or a guest agent still starting, at the next round
+                    pause = 300 if why == 'NOT_RUNNING' else AUTO_EVERY
                     logon_ca.record_install(desk['id'], desk['vmid'], prev.get('version') or MODULE_VERSION, 'pending',
-                                            why, 'waiting for the desktop', int(prev.get('attempts') or 0), time.time() + 300)
+                                            why, 'waiting for the desktop', int(prev.get('attempts') or 0), time.time() + pause)
                 done['waiting'] += 1
                 continue
             left -= 1
