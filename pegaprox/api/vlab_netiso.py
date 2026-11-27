@@ -58,10 +58,14 @@ def _ok(r, what):
 def cluster_firewall(mgr):
     """{'enable': bool, 'policy_in': ...} of the datacenter firewall, None when unknown."""
     try:
-        d = _data(mgr._api_get(_fw(mgr, '/cluster/firewall/options'), timeout=8))
-    except Exception:
+        r = mgr._api_get(_fw(mgr, '/cluster/firewall/options'), timeout=8)
+    except Exception as e:
+        logging.info(f'[VLAB] netiso: datacenter firewall options unreadable: {str(e)[:200]}')
         return None
+    d = _data(r)
     if not isinstance(d, dict):
+        logging.info(f"[VLAB] netiso: datacenter firewall options: HTTP {getattr(r, 'status_code', None)} "
+                     f"{(getattr(r, 'text', '') or '')[:200]}")
         return None
     return {'enable': bool(int(d.get('enable') or 0)), 'policy_in': d.get('policy_in') or 'ACCEPT'}
 
@@ -330,7 +334,7 @@ def _gateway_hosts():
 @require_auth(perms=['vlab.pool.view'])
 def get_cluster_netiso(cluster_id):
     mgr = cluster_managers.get(cluster_id)
-    fw = cluster_firewall(mgr) if mgr and getattr(mgr, 'is_connected', False) else None
+    fw = cluster_firewall(mgr) if mgr else None   # no is_connected gate: an idle manager reads False until its next call
     return jsonify({'gateway_sources': netiso.gateway_sources(cluster_id),
                     'suggested': netiso.suggested_sources(_gateway_hosts()),
                     'cluster_firewall': fw})
