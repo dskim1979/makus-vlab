@@ -103,6 +103,7 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
         'gateways': ','.join(cfg['gateway_ips']),
         'user': username,
         'domain': directory.config()['domain'],
+        'upn': cert['upn'],
     }
     stdin = ''.join(f'{k}={v}\n' for k, v in lines.items())
     try:

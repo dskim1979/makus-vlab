@@ -233,6 +233,7 @@ def test_arm_signs_the_vms_own_key_and_audits(sso):
     assert ok, (code, info)
     kv, cert = g.armed
     assert kv['gateways'] == '192.168.0.55' and kv['user'] == 'alice' and kv['domain'] == 'MOAVI'
+    assert kv['upn'] == 'alice@moavi.lan'
     assert int(kv['not_after']) == int(logon_ca._na(cert).timestamp())
     assert 'PRIVATE' not in ''.join(str(d) for d in g.execs())        # no key goes to the VM or back
     rows = logon_ca.issued(desktop_id=desk['id'])

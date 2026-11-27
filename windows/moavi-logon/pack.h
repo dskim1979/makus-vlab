@@ -53,8 +53,11 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
         std::wstring container = st[L"key"], provider = MS_KEY_STORAGE_PROVIDER;
         // bBuffer: card "", reader "", container, csp name (offsets in WCHARs)
         std::wstring payload;
-        payload += L'\0';                         // card name at 0
-        payload += L'\0';                         // reader name at 1
+        payload.assign(4, L'\0');                 // the first sizeof(DWORD) WCHARs of bBuffer stay unused
+        ULONG cardOff = (ULONG)payload.size();
+        payload += L'\0';                         // card name ""
+        ULONG readerOff = (ULONG)payload.size();
+        payload += L'\0';                         // reader name ""
         ULONG contOff = (ULONG)payload.size();
         payload += container; payload += L'\0';
         ULONG cspOff = (ULONG)payload.size();
@@ -65,8 +68,8 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
         ci->dwCspInfoLen = (DWORD)len;
         ci->MessageType = 1;
         ci->KeySpec = AT_KEYEXCHANGE;
-        ci->nCardNameOffset = 0;
-        ci->nReaderNameOffset = 1;
+        ci->nCardNameOffset = cardOff;
+        ci->nReaderNameOffset = readerOff;
         ci->nContainerNameOffset = contOff;
         ci->nCSPNameOffset = cspOff;
         memcpy(csp.data() + offsetof(KERB_SMARTCARD_CSP_INFO_, bBuffer), payload.data(), payload.size() * sizeof(WCHAR));
@@ -87,7 +90,11 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
     }
 
     std::wstring domain = st[L"domain"], user = st[L"user"], pin = st[L"pin"];
-    if (st[L"names"] == L"off") { domain.clear(); user.clear(); }
+    // names=upn (default when the engine sent one): UserName = the UPN, DomainName empty - LSA refuses
+    // a certificate logon with a domain name (STATUS_INVALID_PARAMETER); on = DOMAIN + user; off = none
+    std::wstring names = st[L"names"].empty() ? (st[L"upn"].empty() ? L"on" : L"upn") : st[L"names"];
+    if (names == L"upn") { user = st[L"upn"]; domain.clear(); }
+    else if (names == L"off") { domain.clear(); user.clear(); }
     size_t head = unlock ? sizeof(KERB_CERTIFICATE_UNLOCK_LOGON) : sizeof(KERB_CERTIFICATE_LOGON);
     size_t dBytes = domain.size() * sizeof(WCHAR), uBytes = user.size() * sizeof(WCHAR), pBytes = pin.size() * sizeof(WCHAR);
     // the CSP data starts 8-byte aligned (LSA checks the structures it unpacks)

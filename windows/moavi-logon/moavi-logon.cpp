@@ -233,6 +233,8 @@ static int Arm() {
     st[L"gateways"] = gateways;
     st[L"user"] = in[L"user"];
     st[L"domain"] = in[L"domain"];
+    if (!in[L"upn"].empty() && SafeField(in[L"upn"], 200) && in[L"upn"].find(L'@') != std::wstring::npos)
+        st[L"upn"] = in[L"upn"];
     st[L"store"] = inMachine ? L"machine" : L"system";
     // switches for the logon serialization (defaults are the tested ones)
     if (!in[L"mode"].empty() && SafeField(in[L"mode"], 16)) st[L"mode"] = in[L"mode"];
@@ -316,7 +318,7 @@ static int Selftest(bool all) {
     if (ReadKV(DataDir() + L"\\cp-options.txt", opt))
         for (auto& o : opt) st[o.first] = o.second;
     const wchar_t* modes[] = { L"hash", L"csp" };
-    const wchar_t* names[] = { L"on", L"off" };
+    const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
     const wchar_t* pins[] = { L"", L"0000" };    // not a secret: the software key has no PIN
@@ -329,7 +331,7 @@ static int Selftest(bool all) {
         NTSTATUS r = TryLogon(t, unlock, &sub);
         wchar_t line[200];
         swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s pin=%s -> 0x%08lx / 0x%08lx\n",
-                   t[L"mode"].empty() ? L"hash" : t[L"mode"].c_str(), t[L"names"].empty() ? L"on" : t[L"names"].c_str(),
+                   t[L"mode"].empty() ? L"hash" : t[L"mode"].c_str(), t[L"names"].empty() ? L"default" : t[L"names"].c_str(),
                    unlock ? L"unlock" : L"plain", t[L"pkg"].empty() ? L"Negotiate" : t[L"pkg"].c_str(),
                    t[L"pin"].empty() ? L"empty" : L"set", (unsigned long)r, (unsigned long)sub);
         OutW(line);
