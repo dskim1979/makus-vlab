@@ -350,6 +350,8 @@ SYNC_TABLES = (
     'vlab_mcp_tokens',
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
+    # what an admin keeps out of the 자원 회수 report (pegaprox/vlab/reclaim.py)
+    'vlab_reclaim_exempt',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
     'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
     # the portal 파일 panel's transfers (per-day limit, audit) (pegaprox/api/vlab_desk_files.py)

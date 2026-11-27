@@ -112,10 +112,15 @@ def _side_ticks():
         from pegaprox.api.vlab_forecast import forecast_tick     # the growth forecast's daily numbers (hourly)
         forecast_tick()
 
+    def reclaim():
+        from pegaprox.api.vlab_reclaim import reclaim_tick         # the 자원 회수 weekly summary, when on
+        reclaim_tick()
+
     for name, on, fn in (('operations notices', True, ops),
                          ('LAB booking reminders', features.enabled('lab'), bookings),
                          ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
-                         ('growth forecast', True, forecast)):
+                         ('growth forecast', True, forecast),
+                         ('reclaim summary', True, reclaim)):
         if not on:
             continue
         try:
