@@ -77,8 +77,16 @@
 - LSA 보호(RunAsPPL) VM: CP가 자동 로그온을 내지 않고(평소 화면), 설치 기록 `unsupported`(LSA_PPL), 인증서 발급 안 함.
   실제로 쓰려면 CSP 코드 서명(EV/Microsoft 서명)이 필요 — 제품화 과제.
 - 장치 연결 방식(rdpgw): `desktop_sso` 풀이면 그 데스크톱 RDP의 NLA를 끄고(`moavi-logon.exe rdp-nla off`, 감사
-  `vlab.logon.nla`) .rdp에서 CredSSP·프롬프트를 뺀다 → 로그온 화면에서 인증서 로그온. **3389는 게이트웨이만 닿는다는
-  방화벽 전제**. 실장비 시험은 아직(TEST 풀은 Warpgate 경로).
+  `vlab.logon.nla`) .rdp에서 CredSSP·프롬프트를 뺀다 → 로그온 화면에서 인증서 로그온.
+  NLA를 끄기 **전에** 데스크톱의 "원격 데스크톱" 인바운드 규칙(그룹 `@FirewallAPI.dll,-28752`)을 logon 설정
+  `gateway_ips`로만 좁힌다(c7697f5). Windows 방화벽 프로필이 하나라도 꺼져 있거나 규칙이 없으면 좁히지 않고
+  NLA도 그대로 → .rdp는 예전처럼 비밀번호를 묻는다. 게이트웨이 목록이 바뀌면 다시 좁힌다.
+- rdpgw 실장비 확인 (2026-11-28 02:04 KST, TEST 풀 rdp_route=devices, VM 119, MOAVI\test): 규칙
+  RemoteDesktop-UserMode-In-TCP/UDP remote=192.168.0.55, UserAuthentication=0. logon.log: arm → `cp: certificate
+  logon ... pkg Negotiate` → CSP AcquireContext(lsass) ok → 결과 0x00000000; 4624 type 10(Negotiate/User32, 원본
+  192.168.0.55), 끊겨 있던 기존 세션에 재연결. 02:06 새 .rdp로 한 번 더 성공. 예전 .rdp 재사용은 `no automatic
+  logon: state done`으로 거절(4624 없음). 발급 기록은 다음 prepare 때 used로 바뀜(직전 것은 armed로 남아 있다가).
+  Warpgate 경로와 달리 CP의 "client says"(WTSClientAddress)는 빈 값 — 게이트웨이 판정은 TCP 피어라 영향 없음.
 - 시계: 내장 DC(vlab-directory)가 chrony로 NTP 123/udp 제공, samba `ntp_signd`로 서명(Windows NT5DS). VM 119:
   `w32tm /query /source` = dc1.moavi.lan, 오차 ~2 ms.
 - 쓰지 않는 KSP 배포 중단(설치기가 예전 것 등록 해제·삭제). VM 119 시험 흔적 정리: TPM 가상 스마트카드 삭제,
