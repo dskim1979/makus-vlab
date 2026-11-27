@@ -23,6 +23,11 @@ takes effect:
   rdp_route                    the .rdp file's way to the desktop: 'record' = 보안 게이트웨이 (Warpgate:
                                recorded, no device channels), 'devices' = its device route (rdpgw: drives,
                                printers, USB as the switches here say, not recorded; pegaprox/vlab/rdpgw.py)
+  device_route_for             who in this pool connects over the devices route anyway (drives, printers,
+                               USB as the switches say) while the pool's own route stays as it is: a list of
+                               {subject_type user|department|group, subject_id, include_children}. Nothing on
+                               the user's side says which route a connection took (api/vlab_next.py
+                               desktop_rdp_answer)
   client_drives                the .rdp file: the user's own PC drives in the desktop (off = files
                                cannot be carried in or out that way)
   client_printers              the .rdp file (the PC's printers) and browser RDP (print to PDF)
@@ -114,7 +119,10 @@ DEFAULTS = {
     'desktop_files': 'off',     # the portal's 파일 panel: off / up (to the desktop) / down / both (pegaprox/api/vlab_desk_files.py)
     'desktop_files_max_mb': 500,   # largest single file
     'desktop_files_day_mb': 0,     # per user per day, both ways; 0 = no limit
+    'device_route_for': [],     # 장치 연결 허용 대상: these users / departments / groups take the devices route
 }
+SUBJECT_TYPES = ('user', 'department', 'group')
+MAX_DEVICE_ROUTE_FOR = 200
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
           'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail')
@@ -259,6 +267,17 @@ def validate(data, pool_type):
             if err:
                 return None, err
             out[k] = devices
+        elif k == 'device_route_for':
+            if not isinstance(v, list) or len(v) > MAX_DEVICE_ROUTE_FOR:
+                return None, f'device_route_for: a list of at most {MAX_DEVICE_ROUTE_FOR} entries'
+            clean = []
+            for x in v:
+                if not isinstance(x, dict) or x.get('subject_type') not in SUBJECT_TYPES \
+                        or not isinstance(x.get('subject_id'), str) or not x['subject_id'].strip():
+                    return None, 'device_route_for: each entry needs subject_type (user, department, group) and subject_id'
+                clean.append({'subject_type': x['subject_type'], 'subject_id': x['subject_id'].strip()[:200],
+                              'include_children': bool(x.get('include_children'))})
+            out[k] = clean
         elif k == 'desktop_files':
             if v not in DESKTOP_FILES:
                 return None, f"desktop_files must be one of {', '.join(DESKTOP_FILES)}"

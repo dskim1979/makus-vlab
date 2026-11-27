@@ -2333,6 +2333,9 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         return None, (jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409)
     port = 3389
     pol = core.pool_policy.effective((pool or {}).get('settings'))
+    # 장치 연결 허용 대상: this user takes the devices route though the pool's own route is another one
+    if pol['rdp_route'] != 'devices' and pol.get('device_route_for') and granted(None, username, grants=pol['device_route_for']):
+        pol = dict(pol, rdp_route='devices')
     os_kind = _guest_os(mgr, node, vmid)
     if os_kind == 'windows':
         if pol['rdp_tune']:
