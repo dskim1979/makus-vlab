@@ -179,6 +179,36 @@ def _signed_in(desk, vm):
     return users
 
 
+# a desktop whose console went black: when it was last told to keep its display on
+_DISPLAY_ON_EVERY = 6 * 3600
+_display_on_sent = {}
+
+
+def _keep_display_on(mgr, desk, vm):
+    """A Windows desktop's console goes black once its display sleeps - and on the lock screen
+    Windows turns it off after a minute (VIDEOCONLOCK), which is where the console sits while the
+    desktop is used over RDP. Tell it, through the guest agent, never to turn the display off and
+    wake it with a Shift, so the portal card shows the lock screen with the signed-in chip instead
+    of nothing. Once per desktop every 6 h; fire and forget (no agent, Linux: nothing happens)."""
+    key = (desk['cluster_id'], int(desk['vmid']))
+    now = time.monotonic()
+    if now - _display_on_sent.get(key, -_DISPLAY_ON_EVERY) < _DISPLAY_ON_EVERY:
+        return
+    _display_on_sent[key] = now
+    from pegaprox.api.vlab_next import _agent_run
+    node = vm.get('node') or desk['node']
+    vmid = int(desk['vmid'])
+    _agent_run(mgr, node, vmid, ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                                 'powercfg /change monitor-timeout-ac 0; '
+                                 'powercfg /setacvalueindex scheme_current sub_video videoconlock 0; '
+                                 'powercfg /setactive scheme_current'], wait=0)
+    try:
+        mgr._api_put(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{vmid}/sendkey",
+                     data={'key': 'shift'}, timeout=5)
+    except Exception as e:
+        logging.debug(f"[VLAB] wake the display of {vmid}: {e}")
+
+
 def _vm_states(cluster_id):
     """{vmid: guest status} from the cluster's cached resource list; {} when unknown."""
     mgr = cluster_managers.get(cluster_id)
@@ -629,6 +659,8 @@ def desktop_screenshot(desktop_id):
     png, state = cached_vm_frame(mgr, desk['cluster_id'], vm.get('node') or desk['node'], 'qemu', int(desk['vmid']),
                                  **SHOT_OPTS)
     timing = f"grab;desc={state};dur={int((time.monotonic() - started) * 1000)}"
+    if png is None and state == 'off':
+        _keep_display_on(mgr, desk, vm)
     if png is None:
         # the display is there but black: the card says 화면 꺼짐 instead of drawing the OS
         return '', 204, ({'X-Screen': 'off', 'Server-Timing': timing} if state == 'off' else {'Server-Timing': timing})
