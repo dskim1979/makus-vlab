@@ -232,6 +232,34 @@ def test_nodes_show_load_guests_and_desktops(env):
     assert alice.get(f'/api/vlab/admin/clusters/{CID}/nodes').status_code == 403
 
 
+def test_nodes_carry_ip_and_what_guests_are_given(env):
+    api, admin, _, _, _ = env
+    mgr = api.make_fake_manager(CID, get_vm_resources=RES, get_node_status=NODES)
+    mgr.is_connected = True
+    mgr._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}, {'type': 'node', 'name': 'pve1', 'ip': '10.0.0.11'}]
+    api.set_manager(CID, mgr)
+    one, two = admin.get(f'/api/vlab/admin/clusters/{CID}/nodes').get_json()['nodes']
+    assert one['ip'] == '10.0.0.11' and two['ip'] == ''
+    assert one['vcpus_given'] == sum(int(v.get('maxcpu') or 0) for v in RES if v.get('node') == 'pve1' and not v.get('template'))
+
+
+def test_cluster_rrd_weights_nodes_and_checks_the_timeframe(env):
+    api, admin, alice, _, _ = env
+    nodes = dict(NODES, pve3=dict(NODES['pve1'], cpuinfo={'cpus': 96}, mem_total=192 * 1024 ** 3))
+    mgr = api.make_fake_manager(CID, get_vm_resources=RES, get_node_status=nodes)
+    mgr.is_connected = True
+    rrd = {'pve1': {'timestamps': [100, 160], 'metrics': {'cpu': [10, 20], 'memory': [50, 50]}},
+           'pve3': {'timestamps': [100, 160], 'metrics': {'cpu': [50, 60], 'memory': [10, 30]}}}
+    mgr.get_node_rrddata.side_effect = lambda node, tf: rrd[node]
+    api.set_manager(CID, mgr)
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/rrd?timeframe=decade').status_code == 400
+    assert alice.get(f'/api/vlab/admin/clusters/{CID}/rrd').status_code == 403
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/rrd?timeframe=day').get_json()
+    assert r['timeframe'] == 'day' and r['nodes_missing'] == []
+    assert r['points'][0] == {'t': 100, 'cpu': 40.0, 'mem': 20.0}      # (10*32+50*96)/128, (50*64+10*192)/256
+    assert mgr.get_node_rrddata.call_count == 2                          # pve2 is offline
+
+
 def test_storage_lists_shared_storage_once(env, monkeypatch):
     _, admin, alice, _, _ = env
     import pegaprox.api.clusters as core_clusters
