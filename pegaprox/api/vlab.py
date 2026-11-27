@@ -384,6 +384,11 @@ def _vv_file(data, pol=None):
         data = dict(data)
         data['enable-usbredir'] = 1 if pol['usb_redirect'] else 0
         data['enable-usb-autoshare'] = 1 if pol['usb_redirect'] and pol['usb_autoshare'] else 0
+        # USB 정책: which devices may go over (usbredir rules; remote-viewer's usb-filter)
+        from pegaprox.vlab.policy import usb_spice_filter
+        usb_filter = usb_spice_filter(pol) if pol['usb_redirect'] else None
+        if usb_filter:
+            data['usb-filter'] = usb_filter
         data['delete-this-file'] = 1
         if pol['spice_fullscreen']:
             data['fullscreen'] = 1
