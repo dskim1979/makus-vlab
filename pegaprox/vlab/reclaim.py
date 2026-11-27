@@ -15,7 +15,8 @@ the recommended action and the other actions, and whether an admin keeps it (exe
 exempt item stays in vlab_reclaim_exempt until the admin takes the exemption off; it is not
 listed (nor counted) unless asked for.
 
-Totals add up the non-exempt items, counting a VM once (the largest of its items for each
+Totals add up the non-exempt items whose step is known (an orphan to 확인 is left out),
+counting a VM once (the largest of its items for each
 resource), and say how many more desktops of the cluster's typical spec (the median of its
 desktops) the freed vCPU and memory hold.
 
@@ -428,8 +429,12 @@ def totals(items, spec):
     """What the non-exempt items give back, a VM counted once (its largest per resource)."""
     per_vm, other = {}, []
     snaps = 0
+    review = 0
     for it in items:
         if it.get('exempt'):
+            continue
+        if (it.get('action') or {}).get('id') == 'review':
+            review += 1            # a VM nobody has said what it is: not counted until an admin decides
             continue
         if it['kind'] == 'snapshot':
             snaps += 1
@@ -453,6 +458,7 @@ def totals(items, spec):
     out['more_desktops'] = int(math.floor(min(fits))) if fits else 0
     out['snapshots'] = snaps
     out['items'] = sum(1 for it in items if not it.get('exempt'))
+    out['review'] = review
     return out
 
 
