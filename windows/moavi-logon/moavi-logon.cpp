@@ -75,6 +75,108 @@ static void ForgetPending() {
     }
 }
 
+// The public key of the pending key (CAPI container or KSP key).
+static bool PublicKeyOf(const KV& stc, std::vector<BYTE>& out) {
+    KV st = stc;
+    DWORD len = 0;
+    if (st[L"keyprov"] == L"ksp") {
+        NCRYPT_PROV_HANDLE prov = 0;
+        NCRYPT_KEY_HANDLE key = 0;
+        bool ok = false;
+        if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) == ERROR_SUCCESS &&
+            NCryptOpenKey(prov, &key, st[L"key"].c_str(), 0, KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
+            CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, nullptr, &len);
+            out.resize(len);
+            ok = CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)out.data(), &len) != FALSE;
+        }
+        if (key) NCryptFreeObject(key);
+        if (prov) NCryptFreeObject(prov);
+        return ok;
+    }
+    HCRYPTPROV hp = 0;
+    if (!CryptAcquireContextW(&hp, st[L"key"].c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES,
+                              CRYPT_SILENT | (st[L"keyscope"] == L"machine" ? CRYPT_MACHINE_KEYSET : 0)))
+        return false;
+    CryptExportPublicKeyInfo(hp, AT_KEYEXCHANGE, X509_ASN_ENCODING, nullptr, &len);
+    out.resize(len);
+    bool ok = CryptExportPublicKeyInfo(hp, AT_KEYEXCHANGE, X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)out.data(), &len) != FALSE;
+    CryptReleaseContext(hp, 0);
+    return ok;
+}
+
+// A new RSA-2048 key (not exportable) and its PKCS#10 request.
+static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope, const std::wstring& keyName,
+                          std::vector<BYTE>& csr, std::string& err) {
+    char m[64];
+    HCRYPTPROV hp = 0;
+    NCRYPT_PROV_HANDLE prov = 0;
+    NCRYPT_KEY_HANDLE key = 0;
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE signer = 0;
+    DWORD spec = AT_KEYEXCHANGE;
+    if (keyprov == L"ksp") {
+        SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+        if (ss == ERROR_SUCCESS)
+            ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
+                                          KeyScopeFlags(scope) | NCRYPT_OVERWRITE_KEY_FLAG);
+        DWORD bits = 2048, usage = NCRYPT_ALLOW_ALL_USAGES, exportPolicy = 0;
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0);
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_KEY_USAGE_PROPERTY, (BYTE*)&usage, sizeof(usage), 0);
+        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE*)&exportPolicy, sizeof(exportPolicy), NCRYPT_PERSIST_FLAG);
+        if (ss == ERROR_SUCCESS) ss = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG);
+        if (ss != ERROR_SUCCESS) {
+            sprintf_s(m, "key 0x%08lx", (unsigned long)ss); err = m;
+            if (key) NCryptFreeObject(key);
+            if (prov) NCryptFreeObject(prov);
+            return false;
+        }
+        signer = key;
+        spec = CERT_NCRYPT_KEY_SPEC;
+    } else {
+        DWORD flags = CRYPT_NEWKEYSET | CRYPT_SILENT | (scope == L"machine" ? CRYPT_MACHINE_KEYSET : 0);
+        HCRYPTKEY hk = 0;
+        if (!CryptAcquireContextW(&hp, keyName.c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, flags) ||
+            !CryptGenKey(hp, AT_KEYEXCHANGE, (2048u << 16), &hk)) {     // no CRYPT_EXPORTABLE
+            sprintf_s(m, "key 0x%08lx", GetLastError()); err = m;
+            if (hp) CryptReleaseContext(hp, 0);
+            return false;
+        }
+        CryptDestroyKey(hk);
+        signer = hp;
+    }
+    DWORD pkLen = 0;
+    CryptExportPublicKeyInfo(signer, spec, X509_ASN_ENCODING, nullptr, &pkLen);
+    std::vector<BYTE> pkBuf(pkLen);
+    PCERT_PUBLIC_KEY_INFO pk = (PCERT_PUBLIC_KEY_INFO)pkBuf.data();
+    BYTE nameBuf[256];
+    DWORD nameLen = sizeof(nameBuf);
+    BOOL ok = CryptExportPublicKeyInfo(signer, spec, X509_ASN_ENCODING, pk, &pkLen) &&
+              CertStrToNameW(X509_ASN_ENCODING, L"CN=MOAVI Logon", CERT_X500_NAME_STR, nullptr, nameBuf, &nameLen, nullptr);
+    if (ok) {
+        // PKCS#10: the engine ignores the subject and writes its own (CN + UPN SAN)
+        CERT_REQUEST_INFO req = {};
+        req.dwVersion = CERT_REQUEST_V1;
+        req.Subject.cbData = nameLen;
+        req.Subject.pbData = nameBuf;
+        req.SubjectPublicKeyInfo = *pk;
+        CRYPT_ALGORITHM_IDENTIFIER alg = {};
+        alg.pszObjId = (LPSTR)szOID_RSA_SHA256RSA;
+        DWORD csrLen = 0;
+        ok = CryptSignAndEncodeCertificate(signer, spec, X509_ASN_ENCODING, X509_CERT_REQUEST_TO_BE_SIGNED,
+                                           &req, &alg, nullptr, nullptr, &csrLen);
+        if (ok) {
+            csr.resize(csrLen);
+            ok = CryptSignAndEncodeCertificate(signer, spec, X509_ASN_ENCODING, X509_CERT_REQUEST_TO_BE_SIGNED,
+                                               &req, &alg, nullptr, csr.data(), &csrLen);
+            csr.resize(csrLen);
+        }
+    }
+    if (!ok) { sprintf_s(m, "csr 0x%08lx", GetLastError()); err = m; }
+    if (key) NCryptFreeObject(key);
+    if (prov) NCryptFreeObject(prov);
+    if (hp) CryptReleaseContext(hp, 0);
+    return ok != FALSE;
+}
+
 static int Prepare() {
     if (!EnsureDataDir()) { Out("error=datadir\n"); return 4; }
     ForgetPending();
@@ -86,79 +188,26 @@ static int Prepare() {
     ReadKV(DataDir() + L"\\cp-options.txt", opt);
     std::wstring scope = opt[L"keyscope"] == L"machine" ? L"machine" : L"user";
 
-    NCRYPT_PROV_HANDLE prov = 0;
-    NCRYPT_KEY_HANDLE key = 0;
-    SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
-    if (ss == ERROR_SUCCESS)
-        ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
-                                      KeyScopeFlags(scope) | NCRYPT_OVERWRITE_KEY_FLAG);
-    DWORD bits = 2048, usage = NCRYPT_ALLOW_ALL_USAGES, exportPolicy = 0;
-    if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0);
-    if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_KEY_USAGE_PROPERTY, (BYTE*)&usage, sizeof(usage), 0);
-    if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_EXPORT_POLICY_PROPERTY, (BYTE*)&exportPolicy, sizeof(exportPolicy), NCRYPT_PERSIST_FLAG);
-    if (ss == ERROR_SUCCESS) {
-        // SYSTEM only on the key itself (machine keys default to SYSTEM + Administrators)
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        ULONG sdLen = 0;
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)", SDDL_REVISION_1, &sd, &sdLen)) {
-            NCryptSetProperty(key, NCRYPT_SECURITY_DESCR_PROPERTY, (BYTE*)sd, sdLen,
-                              DACL_SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG);
-            LocalFree(sd);
-        }
-        ss = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG);
-    }
-    if (ss != ERROR_SUCCESS) {
-        char m[64]; sprintf_s(m, "error=key 0x%08lx\n", (unsigned long)ss); Out(m);
-        if (key) NCryptDeleteKey(key, 0);
-        if (prov) NCryptFreeObject(prov);
-        return 4;
-    }
-
-    // PKCS#10: the engine ignores the subject and writes its own (CN + UPN SAN)
-    DWORD pkLen = 0;
-    CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, nullptr, &pkLen);
-    std::vector<BYTE> pkBuf(pkLen);
-    PCERT_PUBLIC_KEY_INFO pk = (PCERT_PUBLIC_KEY_INFO)pkBuf.data();
-    BYTE nameBuf[256];
-    DWORD nameLen = sizeof(nameBuf);
-    BOOL ok = CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, pk, &pkLen) &&
-              CertStrToNameW(X509_ASN_ENCODING, L"CN=MOAVI Logon", CERT_X500_NAME_STR, nullptr, nameBuf, &nameLen, nullptr);
+    // keyprov capi (default): Microsoft Enhanced RSA and AES CSP, the provider the Kerberos smart card
+    // logon path opens a container with; ksp: Microsoft Software KSP (LSA does not find it there)
+    std::wstring keyprov = opt[L"keyprov"] == L"ksp" ? L"ksp" : L"capi";
     std::vector<BYTE> csr;
-    if (ok) {
-        CERT_REQUEST_INFO req = {};
-        req.dwVersion = CERT_REQUEST_V1;
-        req.Subject.cbData = nameLen;
-        req.Subject.pbData = nameBuf;
-        req.SubjectPublicKeyInfo = *pk;
-        CRYPT_ALGORITHM_IDENTIFIER alg = {};
-        alg.pszObjId = (LPSTR)szOID_RSA_SHA256RSA;
-        DWORD csrLen = 0;
-        ok = CryptSignAndEncodeCertificate(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, X509_CERT_REQUEST_TO_BE_SIGNED,
-                                           &req, &alg, nullptr, nullptr, &csrLen);
-        if (ok) {
-            csr.resize(csrLen);
-            ok = CryptSignAndEncodeCertificate(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, X509_CERT_REQUEST_TO_BE_SIGNED,
-                                               &req, &alg, nullptr, csr.data(), &csrLen);
-            csr.resize(csrLen);
-        }
-    }
-    if (!ok) {
-        char m[64]; sprintf_s(m, "error=csr 0x%08lx\n", GetLastError()); Out(m);
-        NCryptDeleteKey(key, 0);
-        NCryptFreeObject(prov);
+    std::string err;
+    if (!MakeKeyAndCsr(keyprov, scope, keyName, csr, err)) {
+        Out("error=" + err + "\n");
+        RemoveKeyAndCert(keyName, L"");
         return 4;
     }
-    NCryptFreeObject(key);
-    NCryptFreeObject(prov);
 
     KV st;
     st[L"state"] = L"prepared";
     st[L"key"] = keyName;
     st[L"keyscope"] = scope;
+    st[L"keyprov"] = keyprov;
     st[L"nonce"] = nonce;
     st[L"prepared_at"] = std::to_wstring(UnixNow());
     if (!WriteKV(PendingPath(), st)) { RemoveKeyAndCert(keyName, L""); Out("error=state\n"); return 4; }
-    Log(L"prepare: key %s", keyName.c_str());
+    Log(L"prepare: key %s (%s, %s)", keyName.c_str(), keyprov.c_str(), scope.c_str());
     Out("csr=" + B64(csr.data(), (DWORD)csr.size()) + "\n");
     OutW(L"nonce=" + nonce + L"\nversion=" MOAVI_LOGON_VERSION L"\n");
     return 0;
@@ -200,27 +249,19 @@ static int Arm() {
     if (!cert) { Out("error=cert\n"); return 2; }
 
     // the certificate must be for the key prepare made
-    NCRYPT_PROV_HANDLE prov = 0;
-    NCRYPT_KEY_HANDLE key = 0;
-    bool match = false;
-    if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) == ERROR_SUCCESS &&
-        NCryptOpenKey(prov, &key, st[L"key"].c_str(), 0, KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
-        DWORD pkLen = 0;
-        CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, nullptr, &pkLen);
-        std::vector<BYTE> pkBuf(pkLen);
-        if (CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)pkBuf.data(), &pkLen))
-            match = CertComparePublicKeyInfo(X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)pkBuf.data(),
-                                             &cert->pCertInfo->SubjectPublicKeyInfo) != FALSE;
-    }
-    if (key) NCryptFreeObject(key);
-    if (prov) NCryptFreeObject(prov);
+    std::vector<BYTE> pkBuf;
+    bool match = PublicKeyOf(st, pkBuf) &&
+                 CertComparePublicKeyInfo(X509_ASN_ENCODING, (PCERT_PUBLIC_KEY_INFO)pkBuf.data(),
+                                          &cert->pCertInfo->SubjectPublicKeyInfo) != FALSE;
     if (!match) { CertFreeCertificateContext(cert); Out("error=cert is not for this key\n"); return 2; }
 
     CRYPT_KEY_PROV_INFO kpi = {};
     kpi.pwszContainerName = (LPWSTR)st[L"key"].c_str();
-    kpi.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
-    kpi.dwProvType = 0;                       // CNG
-    kpi.dwFlags = KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG;
+    bool ksp = st[L"keyprov"] == L"ksp";
+    kpi.pwszProvName = (LPWSTR)(ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
+    kpi.dwProvType = ksp ? 0 : PROV_RSA_AES;  // 0 = CNG
+    kpi.dwFlags = (ksp ? KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG
+                       : (st[L"keyscope"] == L"machine" ? CRYPT_MACHINE_KEYSET : 0) | CRYPT_SILENT);
     kpi.dwKeySpec = AT_KEYEXCHANGE;
     BYTE thumb[20];
     DWORD thumbLen = sizeof(thumb);
@@ -321,23 +362,24 @@ static int Selftest(bool all) {
     KV opt;
     if (ReadKV(DataDir() + L"\\cp-options.txt", opt))
         for (auto& o : opt) st[o.first] = o.second;
-    const wchar_t* modes[] = { L"csp", L"hash" };
+    // csp with a PIN is the form LSA takes (hash and an empty PIN: STATUS_INVALID_PARAMETER); what varies
+    // is how the key is named to it and the outer structure
+    const wchar_t* providers[] = { MS_ENH_RSA_AES_PROV_W, MS_ENHANCED_PROV_W, MS_STRONG_PROV_W, MS_KEY_STORAGE_PROVIDER };
     const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
-    const wchar_t* pins[] = { L"", L"0000" };    // not a secret: the software key has no PIN
     int rc = 1;
-    for (auto m : modes) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) for (auto pn : pins) {
+    for (auto pv : providers) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) {
         KV t = st;
-        if (all) { t[L"mode"] = m; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; t[L"pin"] = pn; }
+        if (all) { t[L"mode"] = L"csp"; t[L"provider"] = pv; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; t[L"pin"] = L"0000"; }
         bool unlock = t[L"struct"] == L"unlock";
         NTSTATUS sub = 0;
         NTSTATUS r = TryLogon(t, unlock, &sub);
-        wchar_t line[200];
-        swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s pin=%s -> 0x%08lx / 0x%08lx\n",
-                   t[L"mode"].empty() ? L"csp" : t[L"mode"].c_str(), t[L"names"].empty() ? L"default" : t[L"names"].c_str(),
+        wchar_t line[400];
+        swprintf_s(line, L"try provider=%s names=%s struct=%s pkg=%s -> 0x%08lx / 0x%08lx\n",
+                   t[L"provider"].empty() ? L"default" : t[L"provider"].c_str(), t[L"names"].empty() ? L"default" : t[L"names"].c_str(),
                    unlock ? L"unlock" : L"plain", t[L"pkg"].empty() ? L"Negotiate" : t[L"pkg"].c_str(),
-                   t[L"pin"].empty() ? L"empty" : L"set", (unsigned long)r, (unsigned long)sub);
+                   (unsigned long)r, (unsigned long)sub);
         OutW(line);
         Log(L"selftest: %s", line);
         if (r == 0) { rc = 0; if (all) goto done; }

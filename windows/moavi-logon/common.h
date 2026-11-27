@@ -10,7 +10,7 @@
 #include <string>
 #include <map>
 
-#define MOAVI_LOGON_VERSION L"1.0.5"
+#define MOAVI_LOGON_VERSION L"1.0.6"
 #define MOAVI_KEY_PREFIX L"MOAVI-Logon-"
 
 namespace moavi {

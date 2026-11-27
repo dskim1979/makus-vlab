@@ -180,6 +180,10 @@ void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex)
         RemoveCertFrom(CERT_SYSTEM_STORE_CURRENT_USER, thumb);
     }
     if (keyName.empty() || keyName.compare(0, wcslen(MOAVI_KEY_PREFIX), MOAVI_KEY_PREFIX) != 0) return;
+    for (DWORD scope : { (DWORD)0, (DWORD)CRYPT_MACHINE_KEYSET }) {
+        HCRYPTPROV hp = 0;
+        CryptAcquireContextW(&hp, keyName.c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_DELETEKEYSET | CRYPT_SILENT | scope);
+    }
     NCRYPT_PROV_HANDLE prov = 0;
     if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) != ERROR_SUCCESS) return;
     for (DWORD scope : { (DWORD)0, (DWORD)NCRYPT_MACHINE_KEY_FLAG }) {
