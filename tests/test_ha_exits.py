@@ -989,6 +989,8 @@ CONFIRM_SITES = [
     ('pegaprox/api/vlab_work.py', 'reclaim_tick', ['return_lease']),
     # the automatic domain join of a desktop (guest agent: Add-Computer / realm join)
     ('pegaprox/api/vlab_directory.py', 'autojoin_round', ['join_desktop']),
+    # a new desktop of a pool with 'HA 사용' goes under Proxmox HA once ready
+    ('pegaprox/api/vlab_hadrs.py', 'ha_tick', ['add_vm_to_proxmox_ha']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',

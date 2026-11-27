@@ -3158,6 +3158,11 @@ class PegaProxManager:
         for vm in candidates:
             vmid = vm.get('vmid')
             vm_type = vm.get('type')
+            # MOAVI Desk: a PCI (GPU, FPGA) or host USB device does not live-migrate
+            _pt = self._vm_passthrough(source_node, vmid) if vm_type == 'qemu' else None
+            if _pt:
+                self.logger.info(f"Skipping {vm.get('name', 'unnamed')} (VMID {vmid}) - {_pt} passthrough cannot live-migrate")
+                continue
             storage_type = self.check_vm_storage_type(source_node, vmid, vm_type)
             
             if storage_type == 'local':
@@ -6703,6 +6708,18 @@ class PegaProxManager:
         except Exception as e:
             self.logger.error(f"Error setting pool exclusion: {e}")
             return False
+
+    def _vm_passthrough(self, node, vmid):
+        """MOAVI Desk: 'pci' | 'usb' when the VM holds a host device, else None (also when its
+        config cannot be read: the migration itself then says why)."""
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config", timeout=10)
+            if r.status_code != 200:
+                return None
+            from pegaprox.vlab.hadrs import passthrough_of
+            return passthrough_of(r.json().get('data') or {})
+        except Exception:
+            return None
 
     def check_vm_storage_type(self, node: str, vmid: int, vm_type: str) -> str:
         # public wrapper for _ha_check_vm_storage; a guest without disks stays 'unknown'
