@@ -4310,6 +4310,15 @@ def node_maintenance_preview(cluster_id, node):
     guests = [{'vmid': int(v['vmid']), 'name': v.get('name') or '', 'type': v.get('type'), 'status': v.get('status') or ''}
               for v in live.values() if v.get('node') == node and v.get('type') in ('qemu', 'lxc')
               and not v.get('template') and str(v.get('vmid', '')).isdigit() and int(v['vmid']) not in desk_vmids]
+    # what live migration cannot carry off the node (PCI / USB passthrough, local disks): it stays
+    try:
+        from pegaprox.api.vlab_hadrs import stays_reasons
+        stays = stays_reasons(cluster_id, cluster_managers.get(cluster_id), [v for v in live.values() if v.get('node') == node])
+    except Exception as e:
+        logging.debug(f'[VLAB] maintenance preview movability: {e}')
+        stays = {}
+    for x in desks + guests:
+        x['stays'] = stays.get(x['vmid'])
     cap = core._core_body(core_vms.maintenance_capacity_preview_api(cluster_id, node))
     plan = core._core_body(core_vms.maintenance_evacuation_plan(cluster_id, node))
     summary = None

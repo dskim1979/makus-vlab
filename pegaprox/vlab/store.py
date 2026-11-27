@@ -235,6 +235,9 @@ def add_desktop(pool, node, vmid, name, vm_type='qemu', state='ready'):
     # a pool with auto_domain_join: the new desktop joins the bundled directory once it runs
     from pegaprox.vlab import directory
     directory.queue_new(out)
+    # a pool with 'HA 사용': the new desktop goes under Proxmox HA once it is ready
+    from pegaprox.vlab import hadrs
+    hadrs.queue_new(out)
     return out
 
 

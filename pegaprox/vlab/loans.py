@@ -112,10 +112,15 @@ def _side_ticks():
         from pegaprox.api.vlab_forecast import forecast_tick     # the growth forecast's daily numbers (hourly)
         forecast_tick()
 
+    def pool_ha():
+        from pegaprox.api.vlab_hadrs import ha_tick              # new desktops of 'HA 사용' pools go under HA
+        ha_tick()
+
     for name, on, fn in (('operations notices', True, ops),
                          ('LAB booking reminders', features.enabled('lab'), bookings),
                          ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
-                         ('growth forecast', True, forecast)):
+                         ('growth forecast', True, forecast),
+                         ('pool HA', True, pool_ha)):
         if not on:
             continue
         try:
