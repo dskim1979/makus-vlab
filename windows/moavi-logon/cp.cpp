@@ -250,8 +250,8 @@ public:
         *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
         Log(L"cp: certificate logon %s\\%s (%lu bytes, mode %s, names %s, struct %s, pin %s, pkg %s, client says %s)",
             st[L"domain"].c_str(), st[L"user"].c_str(), (unsigned long)buf.size(),
-            st[L"mode"].empty() ? L"hash" : st[L"mode"].c_str(), st[L"names"].empty() ? L"default" : st[L"names"].c_str(),
-            unlock ? L"unlock" : L"plain", st[L"pin"].empty() ? L"empty" : L"set",
+            st[L"mode"].empty() ? L"csp" : st[L"mode"].c_str(), st[L"names"].empty() ? L"default" : st[L"names"].c_str(),
+            unlock ? L"unlock" : L"plain", !st.count(L"pin") ? L"default" : st[L"pin"].empty() ? L"empty" : L"set",
             st[L"pkg"].empty() ? L"Negotiate" : st[L"pkg"].c_str(), SessionClientAddress().c_str());
         return S_OK;
     }

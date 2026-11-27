@@ -10,7 +10,7 @@
 #include <string>
 #include <map>
 
-#define MOAVI_LOGON_VERSION L"1.0.4"
+#define MOAVI_LOGON_VERSION L"1.0.5"
 #define MOAVI_KEY_PREFIX L"MOAVI-Logon-"
 
 namespace moavi {
@@ -33,5 +33,9 @@ bool UnHex(const std::wstring& h, std::string& out);
 // The pending logon's key and certificate are removed (key from the KSP, cert from LocalMachine\My
 // and SYSTEM's own My). Safe to call when nothing is there.
 void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex);
+
+// The key's scope: "user" (default) = SYSTEM's own key, the one LSASS (SYSTEM) opens for a certificate
+// logon; "machine" = a machine key (LSA reports STATUS_SMARTCARD_NO_KEY_CONTAINER for it).
+inline DWORD KeyScopeFlags(const std::wstring& scope) { return scope == L"machine" ? 0x20 /* NCRYPT_MACHINE_KEY_FLAG */ : 0; }
 
 }  // namespace moavi

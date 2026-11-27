@@ -47,7 +47,9 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
     KV st = stc;
     std::string thumb;
     if (!UnHex(st[L"thumb"], thumb) || thumb.size() != 20) return false;
-    bool cspMode = st[L"mode"] == L"csp";
+    // mode csp (default): KERB_SMARTCARD_CSP_INFO naming the KSP and the key; hash: the certificate
+    // by hash (LSA refuses that one with STATUS_INVALID_PARAMETER on Server 2022)
+    bool cspMode = st[L"mode"] != L"hash";
     std::vector<BYTE> csp;
     if (cspMode) {
         std::wstring container = st[L"key"], provider = MS_KEY_STORAGE_PROVIDER;
@@ -89,7 +91,9 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
         memcpy(p + storeBytes, thumb.data(), 20);
     }
 
-    std::wstring domain = st[L"domain"], user = st[L"user"], pin = st[L"pin"];
+    // a PIN must be there (an empty one is STATUS_INVALID_PARAMETER); the software key has none, so
+    // any value does - not a secret
+    std::wstring domain = st[L"domain"], user = st[L"user"], pin = stc.count(L"pin") ? st[L"pin"] : L"0000";
     // names=upn (default when the engine sent one): UserName = the UPN, DomainName empty - LSA refuses
     // a certificate logon with a domain name (STATUS_INVALID_PARAMETER); on = DOMAIN + user; off = none
     std::wstring names = st[L"names"].empty() ? (st[L"upn"].empty() ? L"on" : L"upn") : st[L"names"];

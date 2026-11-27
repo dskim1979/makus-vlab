@@ -182,9 +182,11 @@ void RemoveKeyAndCert(const std::wstring& keyName, const std::wstring& thumbHex)
     if (keyName.empty() || keyName.compare(0, wcslen(MOAVI_KEY_PREFIX), MOAVI_KEY_PREFIX) != 0) return;
     NCRYPT_PROV_HANDLE prov = 0;
     if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) != ERROR_SUCCESS) return;
-    NCRYPT_KEY_HANDLE key = 0;
-    if (NCryptOpenKey(prov, &key, keyName.c_str(), 0, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS)
-        NCryptDeleteKey(key, 0);   // frees key
+    for (DWORD scope : { (DWORD)0, (DWORD)NCRYPT_MACHINE_KEY_FLAG }) {
+        NCRYPT_KEY_HANDLE key = 0;
+        if (NCryptOpenKey(prov, &key, keyName.c_str(), 0, scope | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS)
+            NCryptDeleteKey(key, 0);   // frees key
+    }
     NCryptFreeObject(prov);
 }
 

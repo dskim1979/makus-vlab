@@ -82,13 +82,16 @@ static int Prepare() {
     if (BCryptGenRandom(nullptr, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) { Out("error=rng\n"); return 4; }
     std::wstring nonce = Hex(rnd, sizeof(rnd));
     std::wstring keyName = std::wstring(MOAVI_KEY_PREFIX) + nonce;
+    KV opt;
+    ReadKV(DataDir() + L"\\cp-options.txt", opt);
+    std::wstring scope = opt[L"keyscope"] == L"machine" ? L"machine" : L"user";
 
     NCRYPT_PROV_HANDLE prov = 0;
     NCRYPT_KEY_HANDLE key = 0;
     SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
     if (ss == ERROR_SUCCESS)
         ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
-                                      NCRYPT_MACHINE_KEY_FLAG | NCRYPT_OVERWRITE_KEY_FLAG);
+                                      KeyScopeFlags(scope) | NCRYPT_OVERWRITE_KEY_FLAG);
     DWORD bits = 2048, usage = NCRYPT_ALLOW_ALL_USAGES, exportPolicy = 0;
     if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0);
     if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_KEY_USAGE_PROPERTY, (BYTE*)&usage, sizeof(usage), 0);
@@ -151,6 +154,7 @@ static int Prepare() {
     KV st;
     st[L"state"] = L"prepared";
     st[L"key"] = keyName;
+    st[L"keyscope"] = scope;
     st[L"nonce"] = nonce;
     st[L"prepared_at"] = std::to_wstring(UnixNow());
     if (!WriteKV(PendingPath(), st)) { RemoveKeyAndCert(keyName, L""); Out("error=state\n"); return 4; }
@@ -200,7 +204,7 @@ static int Arm() {
     NCRYPT_KEY_HANDLE key = 0;
     bool match = false;
     if (NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0) == ERROR_SUCCESS &&
-        NCryptOpenKey(prov, &key, st[L"key"].c_str(), 0, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
+        NCryptOpenKey(prov, &key, st[L"key"].c_str(), 0, KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG) == ERROR_SUCCESS) {
         DWORD pkLen = 0;
         CryptExportPublicKeyInfo(key, CERT_NCRYPT_KEY_SPEC, X509_ASN_ENCODING, nullptr, &pkLen);
         std::vector<BYTE> pkBuf(pkLen);
@@ -216,7 +220,7 @@ static int Arm() {
     kpi.pwszContainerName = (LPWSTR)st[L"key"].c_str();
     kpi.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
     kpi.dwProvType = 0;                       // CNG
-    kpi.dwFlags = NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG;
+    kpi.dwFlags = KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG;
     kpi.dwKeySpec = AT_KEYEXCHANGE;
     BYTE thumb[20];
     DWORD thumbLen = sizeof(thumb);
@@ -317,7 +321,7 @@ static int Selftest(bool all) {
     KV opt;
     if (ReadKV(DataDir() + L"\\cp-options.txt", opt))
         for (auto& o : opt) st[o.first] = o.second;
-    const wchar_t* modes[] = { L"hash", L"csp" };
+    const wchar_t* modes[] = { L"csp", L"hash" };
     const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
@@ -331,7 +335,7 @@ static int Selftest(bool all) {
         NTSTATUS r = TryLogon(t, unlock, &sub);
         wchar_t line[200];
         swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s pin=%s -> 0x%08lx / 0x%08lx\n",
-                   t[L"mode"].empty() ? L"hash" : t[L"mode"].c_str(), t[L"names"].empty() ? L"default" : t[L"names"].c_str(),
+                   t[L"mode"].empty() ? L"csp" : t[L"mode"].c_str(), t[L"names"].empty() ? L"default" : t[L"names"].c_str(),
                    unlock ? L"unlock" : L"plain", t[L"pkg"].empty() ? L"Negotiate" : t[L"pkg"].c_str(),
                    t[L"pin"].empty() ? L"empty" : L"set", (unsigned long)r, (unsigned long)sub);
         OutW(line);
