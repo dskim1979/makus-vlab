@@ -204,6 +204,9 @@ def _desktop_view(d, live):
         _auto_base(d, vm)
     if state not in ('provisioning', 'resetting', 'error') and vm is not None:
         state = 'ready' if vm.get('status') == 'running' else 'stopped'
+    elif state != 'provisioning' and vm is None and live:
+        # the cluster answered and the guest is not on it: deleted outside the console
+        state = 'missing'
     settings = d.get('pool_settings')   # JSON text from the join, or the pool's parsed settings
     if isinstance(settings, str):
         try:
@@ -2561,6 +2564,28 @@ def remove_desktop(desktop_id):
     return jsonify({'success': True})
 
 
+@bp.route('/api/vlab/admin/pools/<pool_id>/desktops/prune', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def prune_desktops(pool_id):
+    """Drop the pool's desktops whose guest is gone from the cluster (deleted in Proxmox)."""
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    live = _vm_states(pool['cluster_id'])
+    if not live:
+        return _bad('Cluster not reachable - cannot tell which guests are gone', 503)
+    removed = []
+    for d in store.list_desktops(pool_id):
+        if d.get('state') == 'provisioning' or int(d['vmid']) in live:
+            continue
+        if d['assigned_user']:
+            _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False)   # the guest is gone: best effort
+        store.remove_desktop(d['id'])
+        removed.append(d['vmid'])
+        log_audit(_user(), 'vlab.desktop.remove', f"{d['vm_type']}/{d['vmid']} (gone from the cluster)", get_client_ip())
+    return jsonify({'removed': removed})
+
+
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/assign', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def assign_desktop(desktop_id):
@@ -3124,7 +3149,9 @@ def kiosk_start():
     mine = next((d for d in desks if d['assigned_user'] == username), None)
     if not mine:
         busy = store.open_session_desktops()
-        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
+        live = _vm_states(desks[0]['cluster_id']) if desks else {}   # a pool lives on one cluster
+        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')
+                and not (live and int(d['vmid']) not in live)]   # not one deleted in Proxmox
         if not free:
             return jsonify({'error': 'Every desktop of this session is taken', 'code': 'FULL', **view}), 409
         mine = free[0]
