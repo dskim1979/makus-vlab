@@ -2327,10 +2327,19 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     elif os_kind == 'linux' and not rdp_listening(ip, port):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)
+    portal_user = username
     # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
     username = directory.desktop_login(desk['id'], username)
     if protocol == 'rdp' and os_kind == 'windows':
         rdp_device_policy(desk, mgr, node, pol)
+        # 데스크톱 자동 로그인 (pool desktop_sso): the Warpgate RDP session signs this user in with a
+        # certificate of a few minutes, no password (pegaprox/api/vlab_logon.py). Not on the devices
+        # route: there mstsc asks for the password itself (NLA) before the desktop is reached.
+        from pegaprox.api.vlab_warpgate import warpgate_serves_rdp
+        from pegaprox.vlab import rdpgw
+        if warpgate_serves_rdp(protocol) and not (pol['rdp_route'] == 'devices' and rdpgw.is_enabled()):
+            from pegaprox.api.vlab_logon import arm_for_connect
+            arm_for_connect(desk, mgr, node, portal_user, pool)
     if protocol == 'rdp' and pol['rdp_route'] == 'devices':
         # the pool's devices route: the .rdp through the bundled RD Gateway (rdpgw) with a token for
         # this desktop only; drives, printers and USB as the policy says (pegaprox/api/vlab_warpgate.py)

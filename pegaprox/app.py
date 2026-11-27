@@ -1682,6 +1682,13 @@ def main(debug_mode=False):
     except Exception as e:
         print(f"Gateway catalog not retired: {e}")
 
+    # MOAVI Desk - desktop sign-in: the bundled DC's logon CA taken in once (pegaprox/vlab/logon_ca.py)
+    try:
+        from pegaprox.vlab.logon_ca import startup_import as logon_ca_import
+        logon_ca_import()
+    except Exception as e:
+        print(f"Desktop sign-in CA not imported: {e}")
+
     # MOAVI Desk - the bundled Warpgate connects itself at first start (VLAB_WARPGATE=1, nothing configured yet)
     try:
         from pegaprox.vlab.warpgate import start_auto_connect

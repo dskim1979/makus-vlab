@@ -503,6 +503,9 @@ def my_desktop_warpgate(desktop_id):
             if pol['rdp_tune']:
                 rdp_prepare(desk, mgr, node)
             prepare_windows_nla(desk, mgr, node)
+            # 데스크톱 자동 로그인 (pool desktop_sso): browser RDP signs the user in too (pegaprox/api/vlab_logon.py)
+            from pegaprox.api.vlab_logon import arm_for_connect
+            arm_for_connect(desk, mgr, node, username, pool)
         elif os_kind == 'linux' and not rdp_listening(ip, 3389):
             return jsonify({'error': 'This Linux desktop has no RDP server (xrdp)', 'code': 'NO_RDP'}), 409
     elif proto == 'ssh' and not rdp_listening(ip, 22):

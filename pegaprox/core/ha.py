@@ -352,6 +352,8 @@ SYNC_TABLES = (
     'vlab_capacity_daily',
     # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
     'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
+    # desktop sign-in: the logon CA (sealed key), its settings, the certificates it signed (pegaprox/vlab/logon_ca.py)
+    'vlab_logon_ca', 'vlab_logon_config', 'vlab_logon_issued',
     # the portal 파일 panel's transfers (per-day limit, audit) (pegaprox/api/vlab_desk_files.py)
     'vlab_desktop_file_log',
     # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
@@ -432,6 +434,7 @@ ENCRYPTED_COLUMNS = {
     'vlab_warpgate': ('admin_token_encrypted', 'rdp_nla_password_encrypted'),
     'vlab_wg_oidc': ('private_key_encrypted',),
     'vlab_warpgate_nla': ('password_encrypted',),
+    'vlab_logon_ca': ('key_encrypted',),
     'vlab_directory_secrets': ('secret_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')

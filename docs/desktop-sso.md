@@ -1,5 +1,32 @@
 # 데스크톱 SSO (비밀번호 없는 Windows 로그온) — Windows 모듈 개발 문서
 
+> **구현 상태 (2026-11-27, 브랜치 claude/moavi-logon)** — 아래 원래 규격(§1~§7)에서 바뀐 점:
+>
+> - **자체 KSP·상주 서비스 없음.** 키는 VM 안 **Microsoft Software KSP**의 머신 키(SYSTEM 전용 ACL,
+>   내보내기 불가)로 만들고, CP는 `KERB_CERTIFICATE_LOGON` + `KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO`
+>   (인증서 해시 → `MY` 저장소, SDK `NTSecAPI.h`에 문서화된 방식)로 제출한다. LSASS에는 Microsoft 자체
+>   KSP만 들어가므로 **LSA 보호(RunAsPPL)가 켜진 VM에서도** 된다. 비상용으로 `mode=csp`
+>   (`KERB_SMARTCARD_CSP_INFO`, CSP 이름 = Microsoft Software KSP, 컨테이너 = 키 이름)도 남겨 두었다.
+> - Windows 쪽은 둘: `moavi-logon.exe`(엔진이 guest-exec로 SYSTEM으로 부름: `prepare` / `arm` / `status` /
+>   `clear`)와 `moavi-logon-cp.dll`(LogonUI가 부르는 CP). 소스 `windows/moavi-logon/`, 빌드 `build.cmd`
+>   (MSVC 2022, x64, 정적 CRT) → 결과물을 `pegaprox/vlab/logon_agent/`에 복사, 엔진이 그대로 배포한다.
+> - 대기 로그온은 `C:\ProgramData\MoaviLogon\pending.txt`(폴더 ACL SYSTEM·Administrators만)에 키 이름,
+>   인증서 해시, 만료, 게이트웨이 주소만 적는다(비밀 없음). CP는 원격 세션 + 클라이언트 주소가 게이트웨이 +
+>   미사용 + 만료 전일 때만 타일을 내고, 넘기기 **전에** `used`로 바꿔 1회만 쓰이게 하고, 결과를 받으면 키와
+>   인증서를 지운다. 기록 `C:\ProgramData\MoaviLogon\logon.log`(비밀 없음).
+> - 엔진: `pegaprox/vlab/logon_ca.py`(CA 봉인 저장·서명·발급 기록), `pegaprox/api/vlab_logon.py`(API, 연결 훅,
+>   설치), 풀 정책 `desktop_sso`(기본 꺼짐). 인증서: UPN SAN, EKU 스마트카드 로그온 + clientAuth, 유효 5분
+>   (설정 1~30분, notBefore는 5분 앞당김), CDP `http://192.168.0.55:8089/moavi-logon.crl`(설정/`VLAB_LOGON_CRL_URL`).
+>   발급마다 `vlab_logon_issued`와 감사 로그 `vlab.logon.issue`(사용자·데스크톱·포털 세션 해시·일련번호·만료).
+> - 흐름: 풀에 `desktop_sso`가 켜져 있으면 포털 연결(.rdp via Warpgate, 브라우저 RDP)이 티켓을 내기 전에
+>   `prepare → 서명 → arm`을 한다. 실패하면 로그만 남기고 평소 로그온 화면(= 지금 상태)으로 간다.
+>   장치 연결 방식(rdpgw)은 mstsc가 NLA로 먼저 비밀번호를 묻기 때문에 아직 대상이 아니다.
+> - API: `GET/PUT /api/vlab/admin/logon-sso`(설정: `gateway_ips` = VM이 보는 RDP 클라이언트 주소, `ttl_min`,
+>   `crl_url`, `allow_admins`), `POST /api/vlab/admin/logon-sso/ca`(`{cert_pem,key_pem}` 또는 `{from_dir:true}` —
+>   엔진 시작 때 `VLAB_LOGON_CA_DIR` 또는 디렉터리 파일 폴더 `/pki`의 `ca.pem`+`ca.key`를 한 번 가져옴),
+>   `POST /api/vlab/admin/desktops/<id>/logon-sso/install`(모듈 + CA를 Root·NTAuth에, 게스트 에이전트로),
+>   `GET …/logon-sso/status`, `POST /api/vlab/me/desktops/<id>/logon-sso`(포털 사용자가 직접 준비).
+
 > 포털에 로그인한 사용자가 보안 게이트웨이(Warpgate)로 Windows 데스크톱을 열면, **비밀번호를
 > 저장하지도 묻지도 않고** 바탕 화면까지 들어가게 한다. Citrix FAS / VMware Horizon True SSO와
 > 같은 구조다. 이 문서는 **Windows VM 안에서 동작하는 모듈**(Credential Provider + KSP + 에이전트

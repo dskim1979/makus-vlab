@@ -4873,7 +4873,9 @@ class PegaProxDB:
                                 # MOAVI Desk: the token of a running web IDE (vlab-proxy adds it on the way to the VM)
                                 ('vlab_ide_sessions', ('token_encrypted',)),
                                 # MOAVI Desk: the bundled directory's service and join accounts
-                                ('vlab_directory_secrets', ('secret_encrypted',))):
+                                ('vlab_directory_secrets', ('secret_encrypted',)),
+                                # MOAVI Desk: the desktop sign-in CA's key (pegaprox/vlab/logon_ca.py)
+                                ('vlab_logon_ca', ('key_encrypted',))):
                 if not cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                                       (_tbl,)).fetchone():
                     continue    # a MOAVI Desk table is made on first use: nothing sealed in it yet
