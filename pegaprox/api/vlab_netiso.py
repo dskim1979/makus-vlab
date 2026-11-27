@@ -279,6 +279,30 @@ def netiso_tick():
                 netiso.forget(row['desktop_id'])
 
 
+def desktop_added(pool):
+    """A desktop was just registered: a pool with isolation on applies it now (the minute loop
+    retries what fails, e.g. a clone still locked)."""
+    try:
+        if policy.effective(pool.get('settings'), pool.get('type')).get('net_isolation'):
+            sync_pool(store.get_pool(pool['id']) or pool, force=True, confirm=False)
+    except Exception as e:
+        logging.warning(f"[VLAB] netiso: new desktop of pool {pool.get('name')}: {str(e)[:200]}")
+
+
+def release_desktop(desktop_id):
+    """A desktop left MOAVI (unregistered, pruned, replaced): its VM's firewall back as before.
+    A failure keeps the record, and the pool's next sync tries again."""
+    row = netiso.applied(desktop_id)
+    if not row:
+        return
+    mgr = cluster_managers.get(row['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return
+    _revert_desktop(mgr, row)
+    netiso.forget(desktop_id)
+    log_audit('system', 'vlab.netiso.release', f"VM {row['vmid']}: network isolation removed (no longer a desktop)", '')
+
+
 def kick(pool_id):
     """The pool's policy changed: the next tick syncs it at once."""
     if pool_id in _state:
