@@ -323,7 +323,7 @@ static int Arm() {
     kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"mcsp" ? MOAVI_CSP_NAME :
                                 st[L"keyprov"] == L"vsc" ? MS_SMART_CARD_KEY_STORAGE_PROVIDER :
                                 st[L"keyprov"] == L"moavi" ? MOAVI_KSP_NAME : ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
-    kpi.dwProvType = ksp ? 0 : PROV_RSA_AES;  // 0 = CNG
+    kpi.dwProvType = ksp ? 0 : st[L"keyprov"] == L"mcsp" ? PROV_RSA_FULL : PROV_RSA_AES;  // 0 = CNG; smart card logon opens CSPs as PROV_RSA_FULL
     kpi.dwFlags = (ksp ? KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG
                        : (st[L"keyscope"] == L"machine" ? CRYPT_MACHINE_KEYSET : 0) | CRYPT_SILENT);
     kpi.dwKeySpec = AT_KEYEXCHANGE;

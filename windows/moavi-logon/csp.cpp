@@ -140,7 +140,7 @@ extern "C" BOOL WINAPI CPGetProvParam(HCRYPTPROV h, DWORD param, BYTE* out, DWOR
     switch (param) {
     case PP_NAME: r = Put(CSP_NAME_A, (DWORD)strlen(CSP_NAME_A) + 1, out, pcb); break;
     case PP_CONTAINER: case PP_UNIQUE_CONTAINER: r = Put(name.c_str(), (DWORD)name.size() + 1, out, pcb); break;
-    case PP_PROVTYPE: { DWORD t = PROV_RSA_AES; r = Put(&t, sizeof(t), out, pcb); break; }
+    case PP_PROVTYPE: { DWORD t = PROV_RSA_FULL; r = Put(&t, sizeof(t), out, pcb); break; }
     case PP_IMPTYPE: { DWORD t = CRYPT_IMPL_HARDWARE | CRYPT_IMPL_REMOVABLE; r = Put(&t, sizeof(t), out, pcb); break; }
     case PP_VERSION: { DWORD v = 0x00000100; r = Put(&v, sizeof(v), out, pcb); break; }
     case PP_KEYSPEC: { DWORD v = AT_KEYEXCHANGE; r = Put(&v, sizeof(v), out, pcb); break; }
@@ -158,7 +158,7 @@ extern "C" BOOL WINAPI CPGetProvParam(HCRYPTPROV h, DWORD param, BYTE* out, DWOR
             CRYPT_KEY_PROV_INFO kpi = {};
             kpi.pwszContainerName = (LPWSTR)p->name.c_str();
             kpi.pwszProvName = (LPWSTR)CSP_NAME_W;
-            kpi.dwProvType = PROV_RSA_AES;
+            kpi.dwProvType = PROV_RSA_FULL;
             kpi.dwFlags = CRYPT_SILENT;
             kpi.dwKeySpec = AT_KEYEXCHANGE;
             CertSetCertificateContextProperty(c, CERT_KEY_PROV_INFO_PROP_ID, 0, &kpi);

@@ -82,7 +82,7 @@ try {
     $cspKey = 'HKLM:\SOFTWARE\Microsoft\Cryptography\Defaults\Provider\MOAVI Logon Cryptographic Provider'
     New-Item -Force $cspKey | Out-Null
     Set-ItemProperty -Path $cspKey -Name 'Image Path' -Value $csp -Type String
-    Set-ItemProperty -Path $cspKey -Name 'Type' -Value 24 -Type DWord
+    Set-ItemProperty -Path $cspKey -Name 'Type' -Value 1 -Type DWord   # PROV_RSA_FULL: the type smart card logon asks for (NTE_PROV_TYPE_NO_MATCH otherwise)
     Set-ItemProperty -Path $cspKey -Name 'SigInFile' -Value 0 -Type DWord
     'csp=registered'
 
