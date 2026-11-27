@@ -19,6 +19,8 @@ import base64
 import hashlib
 import logging
 import os
+import threading
+import time
 
 from flask import Blueprint, jsonify, request
 
@@ -83,6 +85,9 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
         if agent_exec_disabled(e):
             return False, 'AGENT_EXEC_DISABLED', e
         if 'cannot find' in (e or '').lower() or 'no such file' in (e or '').lower() or 'not found' in (e or '').lower():
+            r = logon_ca.install_of(desk['id'])
+            if r and r['state'] == 'installed':      # the module went missing: the next round puts it back
+                logon_ca.record_install(desk['id'], desk['vmid'], r['version'], 'pending', 'NOT_INSTALLED', 'module missing')
             return False, 'NOT_INSTALLED', e
         return False, 'PREPARE_FAILED', e or f"exit {rc}: {(got.get('error') or err or '').strip()[:200]}"
     try:
@@ -269,14 +274,9 @@ def install_desktop_logon(desktop_id):
     desk, mgr, node, err = _running_windows(desktop_id)
     if err:
         return err
-    try:
-        ok, got = install(desk, mgr, node)
-    except logon_ca.LogonCAError as e:
-        return jsonify({'error': str(e), 'code': e.code}), 409
-    except Exception as e:
-        ok, got = False, str(e)[:300]
-    log_audit(_user(), 'vlab.logon.install', f"desktop sign-in module on '{desk['name']}' (qemu/{desk['vmid']}): "
-              f"{'ok ' + str(got.get('version', '')) if ok else 'failed: ' + str(got)[:200]}", get_client_ip())
+    if not logon_ca.ca_info():
+        return jsonify({'error': 'no logon CA in the engine', 'code': 'CA_MISSING'}), 409
+    ok, got = install_and_record(desk, mgr, node, who=_user(), ip=get_client_ip())   # the console's "다시 설치" too
     if not ok:
         return jsonify({'error': str(got)[:400], 'code': 'INSTALL_FAILED'}), 502
     return jsonify({'installed': True, 'module': got})
@@ -317,3 +317,142 @@ def my_desktop_logon(desktop_id):
     if not ok:
         return jsonify({'error': '자동 로그인을 준비하지 못했습니다. 로그온 화면에서 로그인하세요.', 'code': code}), 409
     return jsonify({'armed': True, **info})
+
+
+# --- automatic install -------------------------------------------------------------------------
+# A Windows desktop of a pool with desktop_sso on gets the module (and the CA trust) by itself: a new
+# or newly added desktop once its guest agent answers, every Windows desktop of a pool when the switch
+# goes on, and again when the engine carries a newer module. The CSP is installed under its version's
+# file name, so an update never needs a restart and none is made. Failures are retried with a growing
+# pause; a desktop without the module just shows its normal sign-in screen.
+
+MODULE_VERSION = '1.3.3'      # windows/moavi-logon/common.h MOAVI_LOGON_VERSION (tests/test_vlab_logon.py checks)
+AUTO_EVERY = 60
+AUTO_PER_ROUND = 3
+RETRY_MAX = 3600
+_auto_thread = None
+
+
+def _windows_running(desk):
+    """(mgr, node, None) for a running Windows desktop, else (None, None, code)."""
+    from pegaprox.api.vlab_next import _guest_os
+    if desk.get('vm_type') != 'qemu':
+        return None, None, 'NOT_QEMU'
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return None, None, 'NO_CLUSTER'
+    live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
+    if live.get('status') != 'running':
+        return None, None, 'NOT_RUNNING'
+    node = live.get('node') or desk['node']
+    osk = _guest_os(mgr, node, int(desk['vmid']))
+    if osk is None:
+        return None, None, 'NO_AGENT'
+    if osk != 'windows':
+        return None, None, 'NOT_WINDOWS'
+    return mgr, node, None
+
+
+def install_and_record(desk, mgr, node, who='system', ip=''):
+    """Install now and write the outcome (state, version, next try). (ok, info)."""
+    prev = logon_ca.install_of(desk['id']) or {}
+    try:
+        ok, got = install(desk, mgr, node)
+    except logon_ca.LogonCAError as e:
+        ok, got = False, f'{e.code}: {e}'
+    except Exception as e:
+        ok, got = False, str(e)[:300]
+    if ok:
+        logon_ca.record_install(desk['id'], desk['vmid'], got.get('version') or MODULE_VERSION, 'installed', 'OK',
+                                f"cp={got.get('cp', '')} csp={got.get('csp', '')}")
+        log_audit(who, 'vlab.logon.install', f"desktop sign-in module {got.get('version', '')} on '{desk['name']}' "
+                  f"(qemu/{desk['vmid']})", ip)
+        return True, got
+    attempts = int(prev.get('attempts') or 0) + 1 if prev.get('state') == 'failed' else 1
+    code = 'AGENT_EXEC_DISABLED' if 'AGENT_EXEC_DISABLED' in str(got) else 'INSTALL_FAILED'
+    logon_ca.record_install(desk['id'], desk['vmid'], MODULE_VERSION, 'failed', code, str(got)[:300], attempts,
+                            time.time() + min(60 * 2 ** attempts, RETRY_MAX))
+    if prev.get('state') != 'failed' or who != 'system':      # once per failure streak, not every retry
+        log_audit(who, 'vlab.logon.install', f"desktop sign-in module on '{desk['name']}' (qemu/{desk['vmid']}) "
+                  f"failed: {str(got)[:200]}", ip)
+    return False, got
+
+
+def _install_due(desk):
+    r = logon_ca.install_of(desk['id'])
+    if not r or int(r['vmid']) != int(desk['vmid']):
+        return True                                    # new, or a recreated VM
+    if r['state'] == 'installed':
+        return r['version'] != MODULE_VERSION          # the engine carries a newer module
+    if r['state'] == 'skipped':
+        return False                                   # not Windows (a rebuilt VM has a new vmid)
+    return float(r['next_at'] or 0) <= time.time()
+
+
+def install_round(limit=AUTO_PER_ROUND):
+    """One pass (the thread below, and tests): {installed, failed, waiting, skipped}."""
+    done = {'installed': 0, 'failed': 0, 'waiting': 0, 'skipped': 0}
+    if not logon_ca.ca_info():
+        return done
+    left = limit
+    for pool in store.list_pools():
+        if not sso_on(pool):
+            continue
+        for desk in store.list_desktops(pool['id']):
+            if left <= 0:
+                return done
+            if not _install_due(desk):
+                continue
+            mgr, node, why = _windows_running(desk)
+            if why in ('NOT_WINDOWS', 'NOT_QEMU'):
+                logon_ca.record_install(desk['id'], desk['vmid'], MODULE_VERSION, 'skipped', why, 'not a Windows desktop')
+                done['skipped'] += 1
+                continue
+            if why:
+                prev = logon_ca.install_of(desk['id']) or {}
+                if prev.get('state') != 'installed':
+                    logon_ca.record_install(desk['id'], desk['vmid'], prev.get('version') or MODULE_VERSION, 'pending',
+                                            why, 'waiting for the desktop', int(prev.get('attempts') or 0), time.time() + 300)
+                done['waiting'] += 1
+                continue
+            left -= 1
+            ok, _ = install_and_record(desk, mgr, node)
+            done['installed' if ok else 'failed'] += 1
+    return done
+
+
+def _install_loop():
+    while True:
+        try:
+            from pegaprox.core import ha
+            if ha.is_active():
+                install_round()
+        except Exception as e:
+            logging.error(f'[VLAB] desktop sign-in automatic install: {e}')
+        time.sleep(AUTO_EVERY)
+
+
+def start_install_thread():
+    global _auto_thread
+    if _auto_thread is None or not _auto_thread.is_alive():
+        _auto_thread = threading.Thread(target=_install_loop, daemon=True, name='vlab-logon-install')
+        _auto_thread.start()
+
+
+@bp.route('/api/vlab/admin/pools/<pool_id>/logon-sso', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def pool_logon_installs(pool_id):
+    """The pool's switch and, per desktop, the module: installed (version) / pending / failed / skipped."""
+    pool = store.get_pool(pool_id)
+    if not pool:
+        return _bad('Pool not found', 404)
+    desks = store.list_desktops(pool_id)
+    rows = logon_ca.installs([d['id'] for d in desks])
+    out = []
+    for d in desks:
+        r = rows.get(d['id']) or {}
+        out.append({'desktop_id': d['id'], 'name': d['name'], 'state': r.get('state') or 'none',
+                    'version': r.get('version') or '', 'code': r.get('code') or '', 'detail': r.get('detail') or '',
+                    'at': r.get('at') or '', 'current': r.get('state') == 'installed' and r.get('version') == MODULE_VERSION})
+    return jsonify({'desktop_sso': sso_on(pool), 'module_version': MODULE_VERSION, 'ready': logon_ca.config()['ready'],
+                    'desktops': out})

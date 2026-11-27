@@ -1686,6 +1686,9 @@ def main(debug_mode=False):
     try:
         from pegaprox.vlab.logon_ca import startup_import as logon_ca_import
         logon_ca_import()
+        # Windows desktops of pools with desktop_sso get the module by themselves (pegaprox/api/vlab_logon.py)
+        from pegaprox.api.vlab_logon import start_install_thread as start_logon_install_thread
+        start_logon_install_thread()
     except Exception as e:
         print(f"Desktop sign-in CA not imported: {e}")
 

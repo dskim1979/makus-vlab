@@ -73,9 +73,23 @@ _SCHEMA = (
         state TEXT NOT NULL DEFAULT 'issued',
         detail TEXT NOT NULL DEFAULT ''
     )''',
+
+    # the Windows module on each desktop (pegaprox/api/vlab_logon.py install_round): which version,
+    # installed / failed / skipped, the next try
+    '''CREATE TABLE IF NOT EXISTS vlab_logon_installs (
+        desktop_id TEXT PRIMARY KEY,
+        vmid INTEGER NOT NULL DEFAULT 0,
+        version TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT '',
+        code TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_at REAL NOT NULL DEFAULT 0,
+        at TEXT NOT NULL DEFAULT ''
+    )''',
 )
 
-TABLES = ('vlab_logon_ca', 'vlab_logon_config', 'vlab_logon_issued')
+TABLES = ('vlab_logon_ca', 'vlab_logon_config', 'vlab_logon_issued', 'vlab_logon_installs')
 
 _lock = threading.Lock()
 
@@ -419,6 +433,27 @@ def issued(limit=100, username=None, desktop_id=None):
     q += ' ORDER BY issued_at DESC LIMIT ?'
     args.append(int(limit))
     return [dict(r) for r in db().query(q, tuple(args)) or []]
+
+
+def install_of(desktop_id):
+    r = db().query_one('SELECT * FROM vlab_logon_installs WHERE desktop_id = ?', (desktop_id,))
+    return dict(r) if r else None
+
+
+def installs(desktop_ids=None):
+    rows = {r['desktop_id']: dict(r) for r in db().query('SELECT * FROM vlab_logon_installs') or []}
+    return rows if desktop_ids is None else {d: rows[d] for d in desktop_ids if d in rows}
+
+
+def record_install(desktop_id, vmid, version, state, code='', detail='', attempts=0, next_at=0.0):
+    db().execute('INSERT OR REPLACE INTO vlab_logon_installs (desktop_id, vmid, version, state, code, detail, attempts, '
+                 'next_at, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 (desktop_id, int(vmid or 0), version or '', state, code or '', (detail or '')[:300], int(attempts),
+                  float(next_at), now()))
+
+
+def forget_install(desktop_id):
+    db().execute('DELETE FROM vlab_logon_installs WHERE desktop_id = ?', (desktop_id,))
 
 
 def startup_import():

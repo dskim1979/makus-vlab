@@ -57,6 +57,7 @@ class Guest:
         self.key, self.csr = _csr()
         self.nonce = 'ab' * 16
         self.installed = True
+        self.os_id = 'mswindows'
         self.runs, self.armed, self._pids, self.files = [], None, {}, {}
         mgr._api_get.side_effect = self.get
         mgr._api_post.side_effect = self.post
@@ -75,7 +76,7 @@ class Guest:
 
     def get(self, url, params=None):
         if url.endswith('/agent/get-osinfo'):
-            return _Resp({'result': {'id': 'mswindows'}})
+            return _Resp({'result': {'id': self.os_id}})
         if url.endswith('/agent/exec-status'):
             cmd, stdin = self._pids[params['pid']]
             return _Resp(dict(exited=1, **self._answer(cmd, stdin)))
@@ -98,7 +99,7 @@ class Guest:
         if cmd[0] == 'powershell.exe':
             script = cmd[-1]
             if 'install.ps1' in script:
-                return {'exitcode': 0, 'out-data': 'version=1.0.0\ncp=registered\nca=AB\ninstall=ok\n'}
+                return {'exitcode': 0, 'out-data': f'version={vlab_logon.MODULE_VERSION}\ncp=registered\nca=AB\ninstall=ok\n'}
             return {'exitcode': 0, 'out-data': 'dir=ok\n'}
         return {'exitcode': 1, 'out-data': ''}
 
@@ -344,3 +345,79 @@ def test_the_certificate_cannot_outlive_its_ttl_or_the_ca(sso):
     _k, csr = _csr()
     _c, _s, not_after = logon_ca.sign_request(csr, 'alice@moavi.lan', 'alice')
     assert not_after - dt.datetime.now(dt.timezone.utc) <= dt.timedelta(minutes=1, seconds=2)
+
+
+# --- automatic install -------------------------------------------------------------------------
+
+def _sso_on(sso):
+    r = sso['admin'].put(f"/api/vlab/admin/pools/{sso['desk']['pool_id']}/policy", json={'desktop_sso': True})
+    assert r.status_code == 200, r.get_json()
+
+
+def _installs(g):
+    return [d for d in g.execs() if d['command'][0] == 'powershell.exe' and 'install.ps1' in d['command'][-1]]
+
+
+def test_the_module_version_is_the_built_one():
+    import os
+    exe = open(os.path.join(vlab_logon.AGENT_DIR, 'moavi-logon.exe'), 'rb').read()
+    assert vlab_logon.MODULE_VERSION.encode('utf-16-le') in exe
+
+
+def test_a_pool_with_desktop_sso_installs_its_windows_desktops_once(sso):
+    g, desk = sso['g'], sso['desk']
+    with sso['api'].app.app_context():
+        assert vlab_logon.install_round() == {'installed': 0, 'failed': 0, 'waiting': 0, 'skipped': 0}   # switch off
+    _sso_on(sso)
+    with sso['api'].app.app_context():
+        assert vlab_logon.install_round()['installed'] == 1
+        r = logon_ca.install_of(desk['id'])
+        assert r['state'] == 'installed' and r['version'] == vlab_logon.MODULE_VERSION
+        assert vlab_logon.install_round()['installed'] == 0           # current: nothing again
+    assert len(_installs(g)) == 1
+    audit = sso['seed'].db.conn.execute("SELECT user, details FROM audit_log WHERE action = 'vlab.logon.install'").fetchall()
+    assert audit[-1][0] == 'system' and 'win-01' in audit[-1][1]
+    j = sso['admin'].get(f"/api/vlab/admin/pools/{desk['pool_id']}/logon-sso").get_json()
+    assert j['desktop_sso'] and j['desktops'][0]['state'] == 'installed' and j['desktops'][0]['current']
+
+
+def test_a_newer_engine_module_is_installed_again(sso, monkeypatch):
+    _sso_on(sso)
+    with sso['api'].app.app_context():
+        vlab_logon.install_round()
+        logon_ca.db().execute("UPDATE vlab_logon_installs SET version = '1.0.0'")
+        assert vlab_logon.install_round()['installed'] == 1
+    assert len(_installs(sso['g'])) == 2
+
+
+def test_a_failed_install_waits_and_tries_again(sso, monkeypatch):
+    _sso_on(sso)
+    monkeypatch.setattr(vlab_logon, 'install', lambda desk, mgr, node: (False, 'error=Root store: denied'))
+    with sso['api'].app.app_context():
+        assert vlab_logon.install_round()['failed'] == 1
+        r = logon_ca.install_of(sso['desk']['id'])
+        assert r['state'] == 'failed' and r['attempts'] == 1 and r['next_at'] > __import__('time').time()
+        assert vlab_logon.install_round()['failed'] == 0               # not due yet
+        logon_ca.db().execute('UPDATE vlab_logon_installs SET next_at = 0')
+        assert vlab_logon.install_round()['failed'] == 1
+        assert logon_ca.install_of(sso['desk']['id'])['attempts'] == 2
+    fails = sso['seed'].db.conn.execute("SELECT details FROM audit_log WHERE action = 'vlab.logon.install' AND details LIKE '%failed%'").fetchall()
+    assert len(fails) == 1                                             # once per failure streak
+    j = sso['admin'].get(f"/api/vlab/admin/pools/{sso['desk']['pool_id']}/logon-sso").get_json()
+    assert j['desktops'][0]['state'] == 'failed' and 'Root store' in j['desktops'][0]['detail']
+
+
+def test_reinstall_button_records_the_result(sso):
+    r = sso['admin'].post(f"/api/vlab/admin/desktops/{sso['desk']['id']}/logon-sso/install")
+    assert r.status_code == 200
+    assert logon_ca.install_of(sso['desk']['id'])['state'] == 'installed'
+
+
+def test_a_stopped_or_linux_desktop_is_not_installed(sso):
+    _sso_on(sso)
+    sso['g'].os_id = 'linux'
+    with sso['api'].app.app_context():
+        assert vlab_logon.install_round()['skipped'] == 1
+        assert logon_ca.install_of(sso['desk']['id'])['state'] == 'skipped'
+        assert vlab_logon.install_round() == {'installed': 0, 'failed': 0, 'waiting': 0, 'skipped': 0}
+    assert _installs(sso['g']) == []
