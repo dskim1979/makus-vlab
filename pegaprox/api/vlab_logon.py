@@ -39,7 +39,7 @@ _user = core._user
 
 EXE = r'C:\Program Files\MOAVI\Logon\moavi-logon.exe'
 AGENT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vlab', 'logon_agent')
-AGENT_FILES = ('moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-csp.dll', 'install.ps1')
+AGENT_FILES = ('moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-csp.dll', 'install.ps1')
 SETUP_DIR = r'C:\Windows\Temp\moavi-logon-setup'
 PIECE = 46080                  # bytes per guest agent file-write (Proxmox takes 61440 base64 characters)
 PREPARE_WAIT = 20
@@ -75,12 +75,17 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
     ok, code = logon_ca.eligible(username, desk['id'])
     if not ok:
         return False, code, ''
+    inst = logon_ca.install_of(desk['id']) or {}
+    if inst.get('state') == 'unsupported':
+        return False, inst.get('code') or 'UNSUPPORTED', inst.get('detail') or ''
     vmid = int(desk['vmid'])
     try:
         rc, out, err, e = _agent_run(mgr, node, vmid, [EXE, 'prepare'], wait=PREPARE_WAIT)
     except Exception as ex:
         rc, out, err, e = None, '', '', str(ex)[:200]
     got = _kv(out)
+    if got.get('prev_thumb'):
+        logon_ca.mark_reported(desk['id'], got['prev_thumb'], got.get('prev_state', ''), got.get('prev_result', ''))
     if rc != 0 or not got.get('csr') or not got.get('nonce'):
         if agent_exec_disabled(e):
             return False, 'AGENT_EXEC_DISABLED', e
@@ -121,6 +126,30 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
         return False, 'ARM_FAILED', detail
     logon_ca.mark(cert['serial'], 'armed')
     return True, '', {'serial': cert['serial'], 'not_after': logon_ca._iso(cert['not_after']), 'upn': cert['upn']}
+
+
+_nla_off = {}     # desktop id -> vmid: NLA already off for the devices route
+
+
+def rdp_nla_off(desk, mgr, node):
+    """The devices route (RD Gateway): mstsc talks to the desktop itself and with NLA it asks for a
+    password before the desktop is reached. A desktop_sso desktop on that route takes RDP without NLA
+    (only the gateways reach its port 3389; the logon screen then signs the user in). True when off."""
+    from pegaprox.api.vlab_next import _agent_run
+    if _nla_off.get(desk['id']) == desk['vmid']:
+        return True
+    try:
+        rc, out, _err, e = _agent_run(mgr, node, int(desk['vmid']), [EXE, 'rdp-nla', 'off'], wait=15)
+    except Exception as ex:
+        rc, out, e = None, '', str(ex)[:200]
+    if rc == 0 and 'rdp_nla=off' in (out or ''):
+        _nla_off[desk['id']] = desk['vmid']
+        if 'changed=1' in out:
+            log_audit('system', 'vlab.logon.nla', f"'{desk['name']}' (qemu/{desk['vmid']}): RDP without NLA for desktop "
+                      "sign-in on the devices route", '')
+        return True
+    logging.info(f"[VLAB] desktop sign-in: NLA on {desk.get('name')} not turned off: {e or out}")
+    return False
 
 
 def sso_on(pool):
@@ -326,7 +355,7 @@ def my_desktop_logon(desktop_id):
 # file name, so an update never needs a restart and none is made. Failures are retried with a growing
 # pause; a desktop without the module just shows its normal sign-in screen.
 
-MODULE_VERSION = '1.3.3'      # windows/moavi-logon/common.h MOAVI_LOGON_VERSION (tests/test_vlab_logon.py checks)
+MODULE_VERSION = '1.3.4'      # windows/moavi-logon/common.h MOAVI_LOGON_VERSION (tests/test_vlab_logon.py checks)
 AUTO_EVERY = 60
 AUTO_PER_ROUND = 3
 RETRY_MAX = 3600
@@ -362,6 +391,13 @@ def install_and_record(desk, mgr, node, who='system', ip=''):
         ok, got = False, f'{e.code}: {e}'
     except Exception as e:
         ok, got = False, str(e)[:300]
+    if ok and got.get('lsa_ppl') == 'on':
+        # LSA protection (RunAsPPL): LSASS loads no unsigned CSP - the CP stays quiet, the desktop keeps its sign-in screen
+        logon_ca.record_install(desk['id'], desk['vmid'], got.get('version') or MODULE_VERSION, 'unsupported', 'LSA_PPL',
+                                'LSA protection (RunAsPPL) is on: the logon module needs a signed CSP')
+        log_audit(who, 'vlab.logon.install', f"desktop sign-in on '{desk['name']}' (qemu/{desk['vmid']}): not supported, "
+                  "LSA protection is on", ip)
+        return True, got
     if ok:
         logon_ca.record_install(desk['id'], desk['vmid'], got.get('version') or MODULE_VERSION, 'installed', 'OK',
                                 f"cp={got.get('cp', '')} csp={got.get('csp', '')}")
@@ -382,7 +418,7 @@ def _install_due(desk):
     r = logon_ca.install_of(desk['id'])
     if not r or int(r['vmid']) != int(desk['vmid']):
         return True                                    # new, or a recreated VM
-    if r['state'] == 'installed':
+    if r['state'] in ('installed', 'unsupported'):
         return r['version'] != MODULE_VERSION          # the engine carries a newer module
     if r['state'] == 'skipped':
         return False                                   # not Windows (a rebuilt VM has a new vmid)

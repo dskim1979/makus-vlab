@@ -45,7 +45,7 @@ try {
             if ($got -ne $sha.ToLower()) { Fail "checksum $name" }
         }
     }
-    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-csp.dll', 'moavi-logon-ca.cer') {
+    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-csp.dll', 'moavi-logon-ca.cer') {
         if (-not (Test-Path (Join-Path $Setup $n))) { Fail "missing $n" }
     }
 
@@ -63,14 +63,11 @@ try {
     }
     Get-ChildItem $dest -Filter '*.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
 
-    # 2b. the key storage provider: in System32 (CNG loads registered images from there), then registered
-    $ksp = Join-Path $env:SystemRoot 'System32\moavi-logon-ksp.dll'
-    if (Test-Path $ksp) {
-        $old = "$ksp.old-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
-        try { Remove-Item -Force $ksp } catch { Move-Item -Force $ksp $old }   # LSASS may have it loaded
-    }
-    Copy-Item -Force (Join-Path $Setup 'moavi-logon-ksp.dll') $ksp
-    Get-ChildItem (Split-Path $ksp) -Filter 'moavi-logon-ksp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+    # 2b. the key storage provider of 1.1 - 1.3.3 is not used (LSA's smart card logon opens a CAPI CSP):
+    # unregistered and removed
+    if (Test-Path (Join-Path $dest 'moavi-logon.exe')) { & (Join-Path $dest 'moavi-logon.exe') unregister-ksp | Out-Null }
+    Get-ChildItem (Join-Path $env:SystemRoot 'System32') -Filter 'moavi-logon-ksp.dll*' -ErrorAction SilentlyContinue |
+        ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
 
     # 2c. the cryptographic provider (CAPI CSP) the smart card logon opens - it never calls WinSCard.
     # One file per version (moavi-logon-csp-<version>.dll): LSASS keeps a loaded CSP until it restarts,
@@ -104,9 +101,6 @@ try {
     New-Item -Force $cpKey | Out-Null
     Set-ItemProperty $cpKey '(default)' 'MOAVI Desk Logon'
 
-    $reg = & (Join-Path $dest 'moavi-logon.exe') register-ksp
-    if ($LASTEXITCODE -ne 0) { Fail "ksp: $reg" }
-    $reg
 
     # 4b. only for keyprov=vsc in cp-options.txt (console logons; an RDP session cannot reach the VM's
     # own card - Windows sends a session's smart card calls to the RDP client): a TPM virtual smart card

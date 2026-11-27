@@ -212,6 +212,15 @@ static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope
 
 static int Prepare() {
     if (!EnsureDataDir()) { Out("error=datadir\n"); return 4; }
+    {
+        // what became of the previous logon (the engine marks its certificate used / failed / expired)
+        KV old;
+        if (ReadKV(PendingPath(), old) && !old[L"thumb"].empty()) {
+            std::wstring state = old[L"state"];
+            if (state == L"armed" && _wtoi64(old[L"not_after"].c_str()) <= UnixNow()) state = L"expired";
+            OutW(L"prev_thumb=" + old[L"thumb"] + L"\nprev_state=" + state + L"\nprev_result=" + old[L"result"] + L"\n");
+        }
+    }
     ForgetPending();
     BYTE rnd[16];
     if (BCryptGenRandom(nullptr, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) { Out("error=rng\n"); return 4; }
@@ -537,6 +546,23 @@ static int VscInfo() {
     return 0;
 }
 
+// The RDP listener's NLA requirement. The devices route (RD Gateway) has mstsc talk to the desktop
+// itself: with NLA it asks for a password before the desktop is reached, so desktop sign-in turns NLA
+// off (only gateways reach port 3389; the logon screen then signs the user in).
+static int RdpNla(bool on) {
+    const wchar_t* k = L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp";
+    HKEY h;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, k, 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &h) != ERROR_SUCCESS) { Out("error=rdp-tcp key\n"); return 4; }
+    DWORD want = on ? 1 : 0, cur = 2, sz = sizeof(cur);
+    RegQueryValueExW(h, L"UserAuthentication", nullptr, nullptr, (BYTE*)&cur, &sz);
+    LSTATUS r = cur == want ? ERROR_SUCCESS : RegSetValueExW(h, L"UserAuthentication", 0, REG_DWORD, (const BYTE*)&want, sizeof(want));
+    RegCloseKey(h);
+    if (r != ERROR_SUCCESS) { Out("error=set UserAuthentication\n"); return 4; }
+    if (cur != want) Log(L"rdp-nla: UserAuthentication %lu -> %lu", cur, want);
+    OutW(std::wstring(L"rdp_nla=") + (on ? L"on" : L"off") + (cur != want ? L" changed=1\n" : L" changed=0\n"));
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) { Out("usage: moavi-logon prepare|arm|status|clear\n"); return 2; }
     std::wstring cmd = argv[1];
@@ -544,6 +570,7 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"arm") return Arm();
     if (cmd == L"status") return Status();
     if (cmd == L"vsc-info") return VscInfo();
+    if (cmd == L"rdp-nla") return RdpNla(!(argc > 2 && std::wstring(argv[2]) == L"off"));
     if (cmd == L"register-ksp") return RegisterKsp(true);
     if (cmd == L"unregister-ksp") return RegisterKsp(false);
     if (cmd == L"selftest") return Selftest(argc > 2 && std::wstring(argv[2]) == L"all");

@@ -10,7 +10,7 @@
 #include <string>
 #include <map>
 
-#define MOAVI_LOGON_VERSION L"1.3.3"
+#define MOAVI_LOGON_VERSION L"1.3.4"
 #define MOAVI_KEY_PREFIX L"MOAVI-Logon-"
 #define MOAVI_KSP_NAME L"MOAVI Logon Key Storage Provider"
 #define MOAVI_KSP_IMAGE L"moavi-logon-ksp.dll"

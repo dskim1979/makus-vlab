@@ -107,6 +107,10 @@ def db():
             if not getattr(d, '_vlab_logon_ca', False):
                 for stmt in _SCHEMA:
                     d.execute(stmt)
+                try:    # the certificate's SHA-1, how the VM names it when it reports the logon back
+                    d.execute("ALTER TABLE vlab_logon_issued ADD COLUMN thumb TEXT NOT NULL DEFAULT ''")
+                except Exception:
+                    pass
                 d._vlab_logon_ca = True
     return d
 
@@ -404,15 +408,31 @@ def issue(username, desktop, csr, portal_session='', client_ip=''):
     upn = upn_for(username)
     cert, serial, not_after = sign_request(csr, upn, username)
     sref = session_ref(portal_session)
+    thumb = cert.fingerprint(__import__('cryptography.hazmat.primitives.hashes', fromlist=['SHA1']).SHA1()).hex()
     db().execute('INSERT INTO vlab_logon_issued (serial, username, upn, desktop_id, vmid, portal_session, client_ip, '
-                 'issued_at, not_after, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 'issued_at, not_after, state, thumb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                  (serial, username, upn, desktop['id'], int(desktop.get('vmid') or 0), sref, (client_ip or '')[:64],
-                  now(), _iso(not_after), 'issued'))
+                  now(), _iso(not_after), 'issued', thumb))
     log_audit(username, 'vlab.logon.issue',
               f"desktop sign-in certificate for '{desktop.get('name')}' (qemu/{desktop.get('vmid')}): {upn}, "
               f"serial {serial}, valid until {_iso(not_after)}, portal session {sref or '-'}", client_ip or '')
     return {'cert_der': cert.public_bytes(serialization.Encoding.DER), 'serial': serial,
             'not_after': not_after, 'upn': upn}
+
+
+VM_STATES = {'done': 'used', 'used': 'used', 'failed': 'failed', 'expired': 'expired', 'armed': 'expired'}
+
+
+def mark_reported(desktop_id, thumb, vm_state, result=''):
+    """The VM's word on an earlier certificate of this desktop (moavi-logon.exe prepare reports the
+    previous logon): used / failed (with Windows' status) / expired unused."""
+    state = VM_STATES.get(vm_state)
+    if not state or not thumb:
+        return False
+    r = db().execute('UPDATE vlab_logon_issued SET state = ?, detail = ? WHERE desktop_id = ? AND thumb = ? '
+                     "AND state IN ('issued', 'armed')", (state, (f'logon {result}' if result else '')[:300],
+                                                          desktop_id, thumb.lower()))
+    return bool(getattr(r, 'rowcount', 1))
 
 
 def mark(serial, state, detail=''):

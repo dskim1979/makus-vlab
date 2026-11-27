@@ -17,7 +17,6 @@ set AGENT=..\..\pegaprox\vlab\logon_agent
 if not exist %AGENT% mkdir %AGENT%
 copy /y out\moavi-logon.exe %AGENT%\ >nul
 copy /y out\moavi-logon-cp.dll %AGENT%\ >nul
-copy /y out\moavi-logon-ksp.dll %AGENT%\ >nul
 copy /y out\moavi-logon-csp.dll %AGENT%\ >nul
 copy /y install.ps1 %AGENT%\ >nul
 echo built: out\moavi-logon.exe out\moavi-logon-cp.dll out\moavi-logon-ksp.dll out\moavi-logon-csp.dll

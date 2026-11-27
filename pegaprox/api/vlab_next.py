@@ -2328,23 +2328,28 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)
     portal_user = username
+    sso_rdp = False
     # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
     username = directory.desktop_login(desk['id'], username)
     if protocol == 'rdp' and os_kind == 'windows':
         rdp_device_policy(desk, mgr, node, pol)
-        # 데스크톱 자동 로그인 (pool desktop_sso): the Warpgate RDP session signs this user in with a
-        # certificate of a few minutes, no password (pegaprox/api/vlab_logon.py). Not on the devices
-        # route: there mstsc asks for the password itself (NLA) before the desktop is reached.
+        # 데스크톱 자동 로그인 (pool desktop_sso): the RDP session signs this user in with a certificate
+        # of a few minutes, no password (pegaprox/api/vlab_logon.py). Through Warpgate as it is; on the
+        # devices route (RD Gateway) the desktop takes RDP without NLA and the .rdp asks for nothing
         from pegaprox.api.vlab_warpgate import warpgate_serves_rdp
         from pegaprox.vlab import rdpgw
-        if warpgate_serves_rdp(protocol) and not (pol['rdp_route'] == 'devices' and rdpgw.is_enabled()):
-            from pegaprox.api.vlab_logon import arm_for_connect
+        from pegaprox.api.vlab_logon import arm_for_connect, rdp_nla_off, sso_on
+        devices = pol['rdp_route'] == 'devices' and rdpgw.is_enabled()
+        if devices and sso_on(pool):
+            sso_rdp = rdp_nla_off(desk, mgr, node)
+            arm_for_connect(desk, mgr, node, portal_user, pool)
+        elif warpgate_serves_rdp(protocol) and not devices:
             arm_for_connect(desk, mgr, node, portal_user, pool)
     if protocol == 'rdp' and pol['rdp_route'] == 'devices':
         # the pool's devices route: the .rdp through the bundled RD Gateway (rdpgw) with a token for
         # this desktop only; drives, printers and USB as the policy says (pegaprox/api/vlab_warpgate.py)
         from pegaprox.api.vlab_warpgate import rdp_answer_via_rdpgw
-        answer, err = rdp_answer_via_rdpgw(desk, username, ip, port, pol)
+        answer, err = rdp_answer_via_rdpgw(desk, username, ip, port, pol, sso=sso_rdp)
         if err:
             return None, err
         if answer:

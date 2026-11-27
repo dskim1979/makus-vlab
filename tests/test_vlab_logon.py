@@ -58,6 +58,8 @@ class Guest:
         self.nonce = 'ab' * 16
         self.installed = True
         self.os_id = 'mswindows'
+        self.prev = ''
+        self.ppl = 'off'
         self.runs, self.armed, self._pids, self.files = [], None, {}, {}
         mgr._api_get.side_effect = self.get
         mgr._api_post.side_effect = self.post
@@ -84,7 +86,7 @@ class Guest:
 
     def _answer(self, cmd, stdin):
         if cmd[-1] == 'prepare':
-            return {'exitcode': 0, 'out-data': f"csr={base64.b64encode(self.csr).decode()}\nnonce={self.nonce}\nversion=1.0.0\n"}
+            return {'exitcode': 0, 'out-data': self.prev + f"csr={base64.b64encode(self.csr).decode()}\nnonce={self.nonce}\nversion=1.0.0\n"}
         if cmd[-1] == 'arm':
             kv = dict(line.split('=', 1) for line in stdin.splitlines() if '=' in line)
             cert = x509.load_der_x509_certificate(base64.b64decode(kv['cert']))
@@ -99,7 +101,7 @@ class Guest:
         if cmd[0] == 'powershell.exe':
             script = cmd[-1]
             if 'install.ps1' in script:
-                return {'exitcode': 0, 'out-data': f'version={vlab_logon.MODULE_VERSION}\ncp=registered\nca=AB\ninstall=ok\n'}
+                return {'exitcode': 0, 'out-data': f'version={vlab_logon.MODULE_VERSION}\ncp=registered\nlsa_ppl={self.ppl}\nca=AB\ninstall=ok\n'}
             return {'exitcode': 0, 'out-data': 'dir=ok\n'}
         return {'exitcode': 1, 'out-data': ''}
 
@@ -280,7 +282,7 @@ def test_install_pushes_checked_files_and_the_ca(sso):
     r = admin.post(f"/api/vlab/admin/desktops/{desk['id']}/logon-sso/install")
     assert r.status_code == 200, r.get_json()
     names = {f.rsplit('\\', 1)[1].rsplit('.part', 1)[0] for f in g.files}
-    assert names == {'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-csp.dll', 'install.ps1', 'moavi-logon-ca.cer'}
+    assert names == {'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-csp.dll', 'install.ps1', 'moavi-logon-ca.cer'}
     ca = b''.join(v for k, v in sorted(g.files.items()) if 'moavi-logon-ca.cer' in k)
     assert x509.load_der_x509_certificate(ca).subject == sso['ca'].subject
     manifest = g.execs()[-1]['input-data']
@@ -421,3 +423,55 @@ def test_a_stopped_or_linux_desktop_is_not_installed(sso):
         assert logon_ca.install_of(sso['desk']['id'])['state'] == 'skipped'
         assert vlab_logon.install_round() == {'installed': 0, 'failed': 0, 'waiting': 0, 'skipped': 0}
     assert _installs(sso['g']) == []
+
+
+# --- the VM reports back; LSA protection; the devices route ---------------------------------------
+
+def test_the_next_prepare_reports_what_became_of_the_last_certificate(sso):
+    g, desk = sso['g'], sso['desk']
+    ok, _c, first = vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')
+    assert ok
+    thumb = g.armed[1].fingerprint(hashes.SHA1()).hex()
+    g.prev = f'prev_thumb={thumb.upper()}\nprev_state=done\nprev_result=0x00000000/0x00000000\n'
+    g.key, g.csr = _csr()
+    assert vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')[0]
+    rows = {r['serial']: r for r in logon_ca.issued(desktop_id=desk['id'])}
+    assert rows[first['serial']]['state'] == 'used' and '0x00000000' in rows[first['serial']]['detail']
+    g.prev = f'prev_thumb={thumb}\nprev_state=failed\nprev_result=0xc000006d\n'
+    g.key, g.csr = _csr()
+    vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')
+    assert {r['serial']: r for r in logon_ca.issued(desktop_id=desk['id'])}[first['serial']]['state'] == 'used'   # final once reported
+
+
+def test_lsa_protection_makes_the_desktop_unsupported(sso):
+    _sso_on(sso)
+    sso['g'].ppl = 'on'
+    with sso['api'].app.app_context():
+        vlab_logon.install_round()
+    r = logon_ca.install_of(sso['desk']['id'])
+    assert r['state'] == 'unsupported' and r['code'] == 'LSA_PPL'
+    ok, code, _ = vlab_logon.arm(sso['desk'], sso['mgr'], 'pve1', 'alice')
+    assert not ok and code == 'LSA_PPL' and logon_ca.issued() == []                 # no certificate for it
+    with sso['api'].app.app_context():
+        assert vlab_logon.install_round()['installed'] == 0                         # not tried again for this version
+
+
+def test_the_devices_route_rdp_asks_for_nothing_with_desktop_sign_in():
+    from pegaprox.vlab import rdpgw
+    cfg = {'host': 'gw.example:443'}
+    plain = rdpgw.rdp_file_text(cfg, 'tok', '10.0.0.5', 3389, 'MOAVI\\alice')
+    sso = rdpgw.rdp_file_text(cfg, 'tok', '10.0.0.5', 3389, 'MOAVI\\alice', sso=True)
+    assert 'prompt for credentials:i:1' in plain and 'enablecredsspsupport' not in plain
+    assert 'prompt for credentials:i:0' in sso and 'enablecredsspsupport:i:0' in sso and 'gatewayaccesstoken:s:tok' in sso
+
+
+def test_nla_goes_off_once_for_the_devices_route(sso):
+    g, desk = sso['g'], sso['desk']
+    vlab_logon._nla_off.clear()
+    orig = g._answer
+    g._answer = lambda cmd, stdin: ({'exitcode': 0, 'out-data': 'rdp_nla=off changed=1\n'} if cmd[1:] == ['rdp-nla', 'off']
+                                    else orig(cmd, stdin))
+    assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is True
+    assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is True
+    assert sum(1 for d in g.execs() if d['command'][1:] == ['rdp-nla', 'off']) == 1
+    assert sso['seed'].db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'vlab.logon.nla'").fetchone()[0] == 1

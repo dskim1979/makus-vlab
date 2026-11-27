@@ -160,6 +160,12 @@ static bool PendingForSession(KV& st, std::wstring& why) {
 }
 
 
+static bool LsaProtected() {
+    DWORD v = 0, sz = sizeof(v);
+    return RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Lsa", L"RunAsPPL",
+                        RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS && v != 0;
+}
+
 // --- credential --------------------------------------------------------------------------------
 
 class Credential : public ICredentialProviderCredential {
@@ -311,6 +317,12 @@ public:
         _cpus = cpus;
         KV st;
         std::wstring why;
+        if (LsaProtected()) {
+            // RunAsPPL: LSASS loads no unsigned CSP, the logon would only fail - the normal screen instead
+            _has = false;
+            Log(L"cp: LSA protection (RunAsPPL) is on: no automatic logon");
+            return S_OK;
+        }
         _has = PendingForSession(st, why);
         if (_has) Log(L"cp: pending logon for %s\\%s in this session", st[L"domain"].c_str(), st[L"user"].c_str());
         else if (why != L"console session" && why != L"nothing armed") Log(L"cp: no automatic logon: %s", why.c_str());
