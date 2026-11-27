@@ -58,12 +58,17 @@ class FakeSDN:
         self.zones, self.vnets, self.subnets, self.ips = {}, {}, {}, []
         self.vms = vms           # vmid -> {'config', 'ips'}
         self.applied, self.reboots, self.writes = 0, [], []
+        self.node_status = 'available'      # what each node says of an applied zone
 
     def _path(self, url):
         return unquote(url.split('/api2/json', 1)[1]).split('?')[0]
 
     def get(self, url, **k):
         p = self._path(url)
+        if p == '/nodes':
+            return Resp([{'node': 'pve1', 'status': 'online'}])
+        if p == '/nodes/pve1/sdn/zones':
+            return Resp([{'zone': z, 'status': self.node_status} for z, o in self.zones.items() if not o.get('state')])
         if p == '/cluster/sdn/zones':
             return Resp(list(self.zones.values()))
         if p == '/cluster/sdn/vnets':
@@ -105,6 +110,8 @@ class FakeSDN:
                 o.pop('state', None)
             for name in [n for n, o in self.vnets.items() if o.get('deleted')]:
                 self.vnets.pop(name)
+            for name in [n for n, o in self.zones.items() if o.get('deleted')]:
+                self.zones.pop(name)
         elif re.match(r'/cluster/sdn/vnets/[^/]+$', p):
             self.vnets[p.split('/')[4]].update(data, state='changed')
         elif re.match(r'/cluster/sdn/vnets/[^/]+/subnets/[^/]+$', p):
@@ -121,6 +128,8 @@ class FakeSDN:
             self.subnets.get(m.group(1), {}).pop(m.group(2), None)
         elif re.match(r'/cluster/sdn/vnets/[^/]+$', p):
             self.vnets[p.split('/')[4]].update(state='deleted', deleted=True)
+        elif re.match(r'/cluster/sdn/zones/[^/]+$', p):
+            self.zones[p.split('/')[4]].update(state='deleted', deleted=True)
         return Resp(None)
 
 
@@ -264,3 +273,35 @@ def test_snat_only_in_a_simple_zone():
     ok = {'name': 'a', 'tag': 110, 'subnet': '10.20.1.0/24', 'gateway': '10.20.1.1', 'snat': True}
     assert netseg.clean_segment(ok, 'none', 'vlan')[0]['snat'] is False
     assert netseg.clean_segment(dict(ok, tag=0), 'none', 'simple')[0]['snat'] is True
+
+
+def test_a_node_that_did_not_build_the_zone_holds_the_move(seg, monkeypatch):
+    from pegaprox.api import vlab_netseg
+    monkeypatch.setattr(vlab_netseg, 'APPLY_WAIT', 0)
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    sdn.node_status = 'error'               # e.g. no 'source /etc/network/interfaces.d/sdn' on the node
+    r = admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn').get_json()
+    assert r['applied'] and r['nodes'] == {'pve1': 'error'} and 'interfaces.d/sdn' in r['node_problem']
+    v = admin.get(f'/api/vlab/admin/clusters/{CID}/netseg').get_json()
+    assert v['sdn']['nodes'] == {'pve1': 'error'} and v['sdn']['node_problem']
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'net_segment': s['id']})
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply", json={'restart': True}).get_json()
+    assert all(d['state'] == 'waiting_sdn' for d in st['desktops']) and 'pve1' in st['problem']
+    assert sdn.vms[400]['config']['net0'].endswith('bridge=vmbr0,tag=5') and not sdn.reboots   # nothing moved
+    sdn.node_status = 'available'
+    vlab_netseg.netseg_tick()
+    assert sdn.vms[400]['config']['net0'].endswith(f"bridge={s['vnet']}")
+
+
+def test_the_zone_can_be_deleted_once_empty(seg):
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    assert admin.delete(f'/api/vlab/admin/clusters/{CID}/netseg/zone').status_code == 409     # has a segment
+    admin.delete(f"/api/vlab/admin/clusters/{CID}/netseg/segments/{s['id']}")
+    assert admin.delete(f'/api/vlab/admin/clusters/{CID}/netseg/zone').status_code == 409     # its VNet still in Proxmox
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    r = admin.delete(f'/api/vlab/admin/clusters/{CID}/netseg/zone')
+    assert r.status_code == 200 and r.get_json()['removed_from_sdn'] is True
+    assert 'moavi' not in sdn.zones and netseg.zone(CID) is None

@@ -169,7 +169,42 @@ def push_sdn(mgr, cluster_id, by=''):
         return {'changed': [], 'applied': False, 'problem': ''}
     _ok(mgr._api_put(_fw(mgr, '/cluster/sdn'), data={}, timeout=60), 'SDN apply')
     log_audit(by or 'system', 'vlab.netseg.sdn', f"cluster {cluster_id}: {', '.join(changed) or 'pending changes'} applied", '')
-    return {'changed': changed, 'applied': True, 'problem': ''}
+    nodes = node_zone_status(mgr, z['zone'], wait=APPLY_WAIT)
+    return {'changed': changed, 'applied': True, 'problem': '', 'nodes': nodes, 'node_problem': node_problem(nodes)}
+
+
+APPLY_WAIT = 30             # seconds the nodes get to build the zone after an SDN apply
+
+
+def node_zone_status(mgr, zone_name, wait=0):
+    """{node: 'available' | 'error' | 'pending' | 'missing' | 'unknown'} of the zone on each node
+    (GET /nodes/<n>/sdn/zones). The cluster config can be applied while a node never built the
+    zone - e.g. its /etc/network/interfaces lacks 'source /etc/network/interfaces.d/sdn' - and a
+    VM put on that VNet would not start there."""
+    try:
+        nodes = [n.get('node') for n in _list(mgr, '/nodes') if n.get('node')]
+    except Exception:
+        return {}
+    out, until = {}, time.time() + wait
+    while True:
+        for n in nodes:
+            try:
+                zs = _list(mgr, f'/nodes/{n}/sdn/zones')
+                z = next((x for x in zs if x.get('zone') == zone_name), None)
+                out[n] = (z.get('status') or 'unknown') if z else 'missing'
+            except Exception:
+                out[n] = 'unknown'
+        if not any(v in ('pending', 'missing') for v in out.values()) or time.time() >= until:
+            return out
+        time.sleep(3)
+
+
+def node_problem(nodes):
+    bad = sorted(n for n, v in nodes.items() if v != 'available')
+    if not bad:
+        return ''
+    return (f"the zone is not built on node(s) {', '.join(bad)} - check that each node's /etc/network/interfaces "
+            "ends with 'source /etc/network/interfaces.d/sdn' (and has dnsmasq for a simple zone), then SDN apply again")
 
 
 def _vnet_live(st, vnet):
@@ -249,8 +284,13 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
     rows_by = {r['desktop_id']: r for r in rows}
     sdn = sdn_state(mgr, pool['cluster_id']) if seg else None
     live = bool(seg) and sdn['available'] and _vnet_live(sdn, seg['vnet'])
+    node_ok = {}
     if seg and not live:
         problem = 'the segment is not applied in Proxmox SDN yet (네트워크 분리 > SDN 적용)'
+    elif seg:
+        z = netseg.zone(pool['cluster_id'])
+        node_ok = node_zone_status(mgr, z['zone'] if z else '')
+        problem = node_problem(node_ok)
     for d in desks:
         vm = vms.get(int(d['vmid'])) or {}
         node = vm.get('node') or d['node']
@@ -266,8 +306,8 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
             elif seg:
                 if kv.get('bridge') == seg['vnet']:
                     info['state'] = 'on'          # (put there by hand: no record, so nothing to put back later)
-                elif not live:
-                    info['state'] = 'waiting_sdn'
+                elif not live or (node_ok and node_ok.get(node) != 'available'):
+                    info['state'] = 'waiting_sdn'      # the VNet's bridge is not on that node: the VM would not start
                 elif running and not restart:
                     info['state'] = 'waiting'
                 else:
@@ -475,8 +515,49 @@ def get_cluster_netseg(cluster_id):
         segs.append(dict(s, pools=uses.get(s['id'], {}).get('pools', []), desktops=uses.get(s['id'], {}).get('desktops', 0),
                          usable=netseg.usable(s['subnet']),
                          sdn='missing' if not o else (o.get('state') or 'applied')))
-    return jsonify({'zone': netseg.zone(cluster_id), 'segments': segs,
-                    'sdn': {k: st[k] for k in ('available', 'problem', 'zones', 'pending_ours', 'pending_other')}})
+    z = netseg.zone(cluster_id)
+    nodes = (node_zone_status(mgr, z['zone']) if mgr and z and st['available'] and any(o['zone'] == z['zone'] for o in st['zones'])
+             else {})
+    return jsonify({'zone': z, 'segments': segs,
+                    'sdn': dict({k: st[k] for k in ('available', 'problem', 'zones', 'pending_ours', 'pending_other')},
+                                nodes=nodes, node_problem=node_problem(nodes))})
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/netseg/zone', methods=['DELETE'])
+@require_auth(perms=['vlab.pool.manage'])
+def delete_zone(cluster_id):
+    """Forget the zone; one MOAVI made is taken out of Proxmox SDN too (and applied). Only
+    without segments."""
+    err = _cluster(cluster_id)
+    if err:
+        return err
+    z = netseg.zone(cluster_id)
+    if not z:
+        return jsonify({'error': 'no zone set'}), 404
+    if netseg.segments(cluster_id):
+        return jsonify({'error': 'delete the segments first'}), 409
+    removed = False
+    if not z['existing']:
+        mgr = _mgr(cluster_id)
+        if not mgr:
+            return jsonify({'error': 'cluster not connected'}), 409
+        st = sdn_state(mgr, cluster_id)
+        if st['pending_other']:
+            return jsonify({'error': "Proxmox has SDN changes that are not MOAVI's waiting to be applied - apply or revert "
+                                     f"them in Proxmox first: {', '.join(st['pending_other'])[:300]}"}), 409
+        if any(o['zone'] == z['zone'] for o in st['zones']):
+            if any(v.get('zone') == z['zone'] and v.get('state') != 'deleted' for v in st['vnets'].values()):
+                return jsonify({'error': f"zone {z['zone']} still has VNets in Proxmox - SDN apply first"}), 409
+            try:
+                _ok(mgr._api_delete(_fw(mgr, f"/cluster/sdn/zones/{z['zone']}"), timeout=15), f"zone {z['zone']}")
+                _ok(mgr._api_put(_fw(mgr, '/cluster/sdn'), data={}, timeout=60), 'SDN apply')
+            except Exception as e:
+                return jsonify({'error': str(e)[:300]}), 502
+            removed = True
+    netseg.delete_zone(cluster_id)
+    log_audit(_user(), 'vlab.netseg.zone_delete',
+              f"cluster {cluster_id}: zone {z['zone']}{' removed from Proxmox SDN' if removed else ''}", get_client_ip())
+    return jsonify({'deleted': z['zone'], 'removed_from_sdn': removed})
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/netseg/zone', methods=['PUT'])
@@ -561,6 +642,8 @@ def apply_sdn(cluster_id):
         return jsonify({'error': str(e)[:300]}), 502
     if res['problem']:
         return jsonify({'error': res['problem']}), 409
+    if res.get('node_problem'):
+        log_audit(_user(), 'vlab.netseg.sdn_nodes', f"cluster {cluster_id}: {res['node_problem']}", get_client_ip())
     for p in store.list_pools():           # pools waiting for their VNet move on the next tick
         if p.get('cluster_id') == cluster_id:
             kick(p['id'])

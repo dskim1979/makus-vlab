@@ -146,6 +146,10 @@ def set_zone(cluster_id, z, by=''):
                  (cluster_id, z['zone'], z['type'], z['bridge'], z['peers'], int(z['mtu']), 1 if z['existing'] else 0, now(), by))
 
 
+def delete_zone(cluster_id):
+    db().execute('DELETE FROM vlab_netseg_zone WHERE cluster_id = ?', (cluster_id,))
+
+
 def zone_body(z):
     """What POST /cluster/sdn/zones takes for a zone MOAVI makes."""
     body = {'zone': z['zone'], 'type': z['type'], 'ipam': 'pve'}
