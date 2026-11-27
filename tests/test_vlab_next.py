@@ -966,6 +966,12 @@ def test_desktop_vm_settings_and_changes(env):
     r = admin.put(f'{base}/vm/hardware', json={'cores': 8, 'memory_mb': 16384})
     assert r.status_code == 200 and r.get_json()['needs_restart'] is True        # 300 is running
     assert mgr.update_vm_config.call_args[0][3] == {'cores': 8, 'memory': 16384}
+    assert admin.put(f'{base}/vm/hardware', json={'name': 'bad name!'}).status_code == 400
+    r = admin.put(f'{base}/vm/hardware', json={'name': 'lab-win11-renamed'})
+    assert r.status_code == 200 and r.get_json()['needs_restart'] is False
+    assert mgr.update_vm_config.call_args[0][3] == {'name': 'lab-win11-renamed'}
+    assert store.get_desktop(desk['id'])['name'] == 'lab-win11-renamed'
+    assert admin.get(f'{base}/vm').get_json()['vm']['ips'] == []
 
     assert admin.post(f'{base}/vm/disks/efi0/resize', json={'grow_gb': 10}).status_code == 400
     assert admin.post(f'{base}/vm/disks/scsi0/resize', json={'grow_gb': 10}).status_code == 200
@@ -989,6 +995,7 @@ def test_desktop_snapshots(env):
     got = admin.get(base).get_json()
     assert [s['name'] for s in got['snapshots']] == ['gold-20261001-090000', 'vlab-base']
     assert [s['base'] for s in got['snapshots']] == [False, True] and got['running'] is True
+    assert got['current'] == ''     # SNAPS' 'current' has no parent
     assert viewer.post(base, json={'name': 'before-update'}).status_code == 403
     assert admin.post(base, json={'name': '../x'}).status_code == 400
     assert admin.post(base, json={'name': 'vlab-base'}).status_code == 400

@@ -3674,8 +3674,15 @@ def desktop_vm(desktop_id):
                                 'maintenance': bool(s.get('maintenance_mode'))})
     except Exception as e:
         logging.debug(f'[VLAB] nodes of {desk["cluster_id"]}: {e}')
+    ips = []
+    if desk['vm_type'] == 'qemu' and vm.get('status') == 'running':
+        try:   # the guest agent's addresses (IPv4 first); none without an agent
+            got = mgr._fetch_qemu_ips(node, int(desk['vmid']))
+            ips = [str(x) for x in got][:8] if isinstance(got, list) else []
+        except Exception as e:
+            logging.debug(f'[VLAB] ips of {desk["vmid"]}: {e}')
     view.update({'desktop_id': desk['id'], 'pool_id': desk['pool_id'], 'base_snap': desk.get('base_snap') or '',
-                 'bridges': bridges, 'storages': storages, 'targets': targets})
+                 'bridges': bridges, 'storages': storages, 'targets': targets, 'ips': ips})
     return jsonify({'vm': view})
 
 
@@ -3685,15 +3692,23 @@ def _vm_change(desk, vm, what):
     return jsonify({'success': True, 'needs_restart': vm.get('status') == 'running'})
 
 
+_VM_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$')
+
+
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/hardware', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def desktop_vm_hardware(desktop_id):
-    """{cores?, sockets?, memory_mb?} - vCPUs and memory."""
+    """{cores?, sockets?, memory_mb?, name?} - vCPUs, memory, and the VM's name (the desktop takes it too)."""
     desk, mgr, vm, node, err = _desk_vm(desktop_id)
     if err:
         return err
     data = _body()
     upd = {}
+    name = str(data.get('name') or '').strip()
+    if name:
+        if not _VM_NAME.match(name):
+            return _bad('name: letters, digits, - and . only (at most 63, starting with a letter or digit)')
+        upd['name' if desk['vm_type'] == 'qemu' else 'hostname'] = name
     try:
         if data.get('cores') not in (None, ''):
             upd['cores'] = _int(data, 'cores', 1, 256)
@@ -3708,6 +3723,11 @@ def desktop_vm_hardware(desktop_id):
     e = _failed(mgr.update_vm_config(node, int(desk['vmid']), desk['vm_type'], upd), 'config update')
     if e:
         return e
+    if name:
+        store.set_name(desk['id'], name)
+        if len(upd) == 1:   # a new name needs no restart
+            log_audit(_user(), 'vlab.desktop.vm', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': name={name}", get_client_ip())
+            return jsonify({'success': True, 'needs_restart': False})
     return _vm_change(desk, vm, ', '.join(f'{k}={v}' for k, v in upd.items()))
 
 
@@ -3805,15 +3825,17 @@ def desktop_snapshots(desktop_id):
     desk, mgr, vm, node, err = _desk_vm(desktop_id)
     if err:
         return err
-    out = []
+    out, current = [], ''
     for s in mgr.get_snapshots(node, int(desk['vmid']), desk['vm_type']) or []:
+        if isinstance(s, dict) and s.get('name') == 'current':
+            current = str(s.get('parent') or '')   # the snapshot the VM runs on from (현재 위치)
         if not isinstance(s, dict) or s.get('name') in (None, 'current'):
             continue
         out.append({'name': s['name'], 'description': str(s.get('description') or ''), 'time': s.get('snaptime'),
                     'vmstate': bool(s.get('vmstate')), 'parent': s.get('parent') or '',
                     'base': s['name'] == (desk.get('base_snap') or '')})
     out.sort(key=lambda s: s['time'] or 0, reverse=True)
-    return jsonify({'snapshots': out, 'running': vm.get('status') == 'running'})
+    return jsonify({'snapshots': out, 'running': vm.get('status') == 'running', 'current': current})
 
 
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots', methods=['POST'])
