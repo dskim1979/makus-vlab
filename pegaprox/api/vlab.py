@@ -1890,8 +1890,9 @@ def set_pool_policy(pool_id):
             resync_ssh_file_transfer(store.list_desktops(pool['id']), now_on)
         except Exception as e:
             logging.warning(f"[VLAB] Warpgate SSH file panel for pool '{pool['name']}': {str(e)[:200]}")
-    if old.get('clipboard') != pol.get('clipboard'):
-        # existing Warpgate RDP / VNC targets follow the clipboard policy
+    from pegaprox.vlab.warpgate import web_devices
+    if old.get('clipboard') != pol.get('clipboard') or web_devices(old) != web_devices(pol):
+        # existing Warpgate RDP / VNC targets follow the clipboard and device policy
         try:
             from pegaprox.api.vlab_warpgate import resync_clipboard
             resync_clipboard(store.list_desktops(pool['id']), pol)

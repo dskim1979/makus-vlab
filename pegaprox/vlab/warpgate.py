@@ -255,7 +255,21 @@ def ssh_target_options(host, port, username, web_file_transfer=None):
 # in = user PC -> desktop, out = desktop -> user PC; enforced for web RDP / VNC and mstsc through Warpgate
 WEB_CLIPBOARD = {'both': 'both', 'to_desktop': 'in', 'from_desktop': 'out', 'off': 'off'}
 # options only the MOAVI Desk build knows; an older Warpgate refusing them gets the target without
-OPTIONAL_OPTIONS = ('web_file_transfer', 'web_clipboard')
+OPTIONAL_OPTIONS = ('web_file_transfer', 'web_clipboard', 'web_drive', 'web_printer')
+
+
+def web_devices(pol):
+    """The pool's device policy for web RDP (MOAVI Desk Warpgate build, fork moavi13): (web_drive,
+    web_printer). web_drive: the user shares a folder of their own PC and the desktop sees it as a
+    drive ('both' = read and save, 'off' = no folder) - client_drives, unless the USB 정책 keeps
+    storage on the PC; web_printer: the desktop prints to the browser as PDF - client_printers,
+    unless the USB 정책 keeps printers on the PC. (None, None) without a policy."""
+    if pol is None:
+        return None, None
+    from pegaprox.vlab.policy import usb_blocked
+    drive = 'both' if pol.get('client_drives') and not usb_blocked(pol, 'storage') else 'off'
+    printer = bool(pol.get('client_printers')) and not usb_blocked(pol, 'printer')
+    return drive, printer
 
 
 def web_clipboard(pool_clipboard):
@@ -263,7 +277,8 @@ def web_clipboard(pool_clipboard):
     return WEB_CLIPBOARD.get(pool_clipboard)
 
 
-def rdp_target_options(host, port, username, nla_password, domain='', interactive_logon=True, clipboard=None):
+def rdp_target_options(host, port, username, nla_password, domain='', interactive_logon=True, clipboard=None,
+                       drive=None, printer=None):
     """RDP 대상: interactive_logon=True → 자동 로그인하지 않고 대상의 Windows 로그온 화면을 띄운다.
     nla_password는 네트워크 수준 인증(CredSSP)용 **서비스 계정** 비밀번호이지 사용자 비번이 아니며,
     아무도 로그인시키지 않는다. 사용자는 자기 디렉터리 계정으로 로그온 화면에서 직접 로그인한다."""
@@ -275,6 +290,11 @@ def rdp_target_options(host, port, username, nla_password, domain='', interactiv
         opts['domain'] = domain
     if clipboard:
         opts['web_clipboard'] = clipboard
+    # the web viewer's devices (web_devices): the shared folder and the PDF printer
+    if drive:
+        opts['web_drive'] = drive
+    if printer is not None:
+        opts['web_printer'] = bool(printer)
     return opts
 
 

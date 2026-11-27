@@ -1561,8 +1561,80 @@ def test_changing_the_clipboard_policy_resyncs_rdp_and_vnc_targets(env, fake_wg,
     puts = [b for (m, p, b) in fake_wg.calls[n:] if m == 'PUT' and p == f'/targets/{uid}']
     assert puts and puts[-1]['options']['web_clipboard'] == 'off' and puts[-1]['options']['host'] == '10.0.0.31'
     n = len(fake_wg.calls)
-    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'clipboard': 'off', 'client_drives': True})
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'clipboard': 'off', 'idle_shutdown_min': 45})
     assert not [c for c in fake_wg.calls[n:] if c[1].startswith('/targets/')]       # clipboard unchanged: nothing sent
+
+
+# --- the pool's device policy -> Warpgate's web_drive / web_printer (fork moavi13: web RDP devices) ------
+
+@pytest.mark.parametrize('policy,drive,printer', [
+    ({}, 'off', True),                                                   # defaults: no folder, PDF printer on
+    ({'client_drives': True}, 'both', True),
+    ({'client_drives': True, 'client_printers': False}, 'both', False),
+    ({'client_drives': True, 'usb_mode': 'deny', 'usb_classes': ['storage', 'printer']}, 'off', False),
+    ({'client_drives': True, 'usb_redirect': False}, 'off', False),      # no USB at all: nothing leaves the PC
+])
+def test_rdp_target_carries_the_pool_device_policy(env, fake_wg, monkeypatch, policy, drive, printer):
+    import pegaprox.api.vlab_next as nxt
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    if policy:
+        assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json=policy).status_code == 200
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
+    opts = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][0]['options']
+    assert opts['web_drive'] == drive and opts['web_printer'] is printer
+
+
+def test_devices_stay_out_of_vnc_and_external_pcs(env, fake_wg):
+    from pegaprox.api import vlab_warpgate as api_wg
+    _, _, admin, _, _ = env
+    _configure(admin)
+    cfg = wg.config(secret=True)
+    pol = {'clipboard': 'both', 'client_drives': True, 'client_printers': True, 'usb_redirect': True}
+    assert 'web_drive' not in api_wg._desktop_target_options(cfg, 'vnc', '10.0.0.3', None, pol)
+    assert 'web_drive' not in api_wg._desktop_target_options(cfg, 'rdp', '10.0.0.3')        # no policy known
+    assert 'web_drive' not in api_wg._external_rdp_options(cfg, {'address': '10.0.0.4', 'port': 3389})
+
+
+def test_changing_the_device_policy_resyncs_the_rdp_target(env, fake_wg, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    real = wg.resync_targets
+    monkeypatch.setattr(wg, 'resync_targets', lambda cfg, jobs, what, background=True: real(cfg, jobs, what, background=False))
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'})
+    uid = wg.get_mapping(d['id'])['target_uuid']
+    n = len(fake_wg.calls)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'client_drives': True})
+    puts = [b for (m, p, b) in fake_wg.calls[n:] if m == 'PUT' and p == f'/targets/{uid}']
+    assert puts and puts[-1]['options']['web_drive'] == 'both'
+
+
+def test_an_image_without_web_devices_still_gets_the_target(env, fake_wg, monkeypatch):
+    import pegaprox.api.vlab_next as nxt
+    real = fake_wg.__call__
+
+    class Strict:
+        def __call__(self, method, path, token, base_url, verify_tls, body=None, timeout=15):
+            if path.startswith('/targets') and isinstance(body, dict) and 'web_drive' in body.get('options', {}):
+                return 400, 'unknown field web_drive'
+            return real(method, path, token, base_url, verify_tls, body, timeout)
+    monkeypatch.setattr(wg, '_api', Strict())
+    _, _, admin, alice, _ = env
+    _configure(admin)
+    pool, d = _assign()
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'client_drives': True})
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_prepare', lambda *a, **k: 0)
+    assert alice.post(f"/api/vlab/me/desktops/{d['id']}/warpgate", json={'protocol': 'rdp'}).status_code == 200
+    tgt = [b for (m, p, b) in fake_wg.calls if m == 'POST' and p == '/targets'][-1]
+    assert 'web_drive' not in tgt['options'] and 'web_printer' not in tgt['options']
 
 
 def test_an_image_without_web_clipboard_still_gets_the_target(env, fake_wg, monkeypatch):

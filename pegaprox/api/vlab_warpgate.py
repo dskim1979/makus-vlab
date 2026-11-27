@@ -247,7 +247,9 @@ def _desktop_target_options(cfg, proto, ip, desk=None, pol=None, ssh_user=None):
         own = wg.nla_applied_credentials(desk['id'], desk['vmid'])
         if own:
             user, pw = own
-    return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True, clipboard=clip)
+    drive, printer = wg.web_devices(pol)
+    return wg.rdp_target_options(ip, 3389, user or wg.NLA_USER, pw, interactive_logon=True, clipboard=clip,
+                                 drive=drive, printer=printer)
 
 
 def _pool_policy_of(desk):
@@ -255,8 +257,8 @@ def _pool_policy_of(desk):
 
 
 def resync_clipboard(desks, pol, background=True):
-    """A pool's clipboard policy changed: its desktops' existing RDP / VNC targets follow (built from
-    the stored mapping, no guest call)."""
+    """A pool's clipboard or device policy changed: its desktops' existing RDP / VNC targets follow
+    (built from the stored mapping, no guest call)."""
     if not wg.is_enabled():
         return
     cfg = wg.config(secret=True)
