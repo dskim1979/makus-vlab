@@ -995,6 +995,19 @@ def _versions(img):
     return sorted(out, key=lambda v: v['time'] or 0, reverse=True)
 
 
+def _golden_ostype(img, live):
+    """The image VM's OS type (win11, l26 ...) for the template list; '' when it cannot be read."""
+    mgr = cluster_managers.get(img['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return ''
+    try:
+        r = mgr.get_vm_config(live.get('node') or img['node'], int(img['vmid']), img['vm_type'])
+        raw = r.get('config', {}).get('raw') if isinstance(r, dict) and r.get('success') else None
+        return str(raw.get('ostype') or '') if isinstance(raw, dict) else ''
+    except Exception:
+        return ''
+
+
 def _golden_or_error(gid):
     img = catalog.get_golden(gid)
     if not img or not core._can_reach(img['cluster_id']):
@@ -1024,7 +1037,7 @@ def list_golden():
                     outdated[p['id']]['total'] += 1
                     outdated[p['id']]['outdated'] += 1 if have.get(d['id']) != img['current_version'] else 0
         out.append(dict(img, versions=_versions(img), status=live.get('status') or 'unknown', pools=used.get(img['id'], []),
-                        rollout=[dict(v, pool_id=k) for k, v in outdated.items()]))
+                        rollout=[dict(v, pool_id=k) for k, v in outdated.items()], ostype=_golden_ostype(img, live)))
     return jsonify({'images': out})
 
 

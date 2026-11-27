@@ -271,6 +271,7 @@ def test_golden_image_versions_and_deploy(env):
 
     listed = admin.get('/api/vlab/admin/golden-images').get_json()['images']
     assert [v['name'] for v in listed[0]['versions']] == ['gold-20261001-090000']     # only gold-* snapshots
+    assert listed[0]['ostype'] in ('', 'win11', 'l26')     # from the VM config when it can be read
 
     pool = admin.post('/api/vlab/admin/pools', json={'name': '실습 B', 'type': 'reset', 'cluster_id': CID}).get_json()['pool']
     body = {'pool_id': pool['id'], 'count': 2, 'name_prefix': 'lab-b'}
