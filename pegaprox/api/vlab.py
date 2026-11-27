@@ -944,14 +944,24 @@ def cluster_nodes(cluster_id):
         return jsonify({'error': 'Could not read the nodes'}), 502
     if not isinstance(status, dict):
         status = {}
-    guests, running, desks = {}, {}, {}
+    guests, running, desks, vcpus, vmem = {}, {}, {}, {}, {}
     for vm in _vm_states(cluster_id).values():
         if vm.get('template') or vm.get('type') not in ('qemu', 'lxc'):
             continue
         n = vm.get('node', '')
         guests[n] = guests.get(n, 0) + 1
+        vcpus[n] = vcpus.get(n, 0) + int(_num(vm.get('maxcpu')))      # what the guests are given (할당률)
+        vmem[n] = vmem.get(n, 0) + int(_num(vm.get('maxmem')))
         if vm.get('status') == 'running':
             running[n] = running.get(n, 0) + 1
+    ips = {}
+    try:   # node addresses from /cluster/status (best effort; a single node has none)
+        entries = mgr._ha_cluster_status(timeout=4)
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict) and e.get('type') == 'node' and e.get('name') and e.get('ip'):
+                ips[str(e['name'])] = str(e['ip'])
+    except Exception as e:
+        logging.debug(f'[VLAB] cluster status of {cluster_id}: {e}')
     for d in store.list_desktops():
         if d['cluster_id'] == cluster_id:
             desks[d['node']] = desks.get(d['node'], 0) + 1
@@ -969,8 +979,52 @@ def cluster_nodes(cluster_id):
             'uptime': _num(s.get('uptime')), 'loadavg': [str(x) for x in load[:3]],
             'version': s.get('pveversion') or '', 'maintenance': bool(s.get('maintenance_mode')),
             'guests': guests.get(name, 0), 'running': running.get(name, 0), 'desktops': desks.get(name, 0),
+            'ip': ips.get(name, ''), 'vcpus_given': vcpus.get(name, 0), 'mem_given': vmem.get(name, 0),
         })
     return jsonify({'nodes': out, 'connected': bool(getattr(mgr, 'is_connected', False))})
+
+
+RRD_TIMEFRAMES = ('hour', 'day', 'week', 'month', 'year')
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/rrd', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def cluster_rrd(cluster_id):
+    """클러스터 > 개요 history: CPU and memory use of the whole cluster over ?timeframe=hour|day|week|month|year,
+    from each online node's Proxmox rrddata - CPU weighted by the node's cores, memory by its size.
+    {timeframe, points: [{t, cpu, mem}]} in percent; a node that does not answer is left out (nodes_missing)."""
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    tf = request.args.get('timeframe', 'hour')
+    if tf not in RRD_TIMEFRAMES:
+        return _bad(f"timeframe must be one of {', '.join(RRD_TIMEFRAMES)}")
+    try:
+        status = mgr.get_node_status() or {}
+    except Exception:
+        status = {}
+    acc, missing = {}, []
+    for name, s in sorted(status.items() if isinstance(status, dict) else []):
+        if not isinstance(s, dict) or s.get('offline') or s.get('status') != 'online':
+            continue
+        cores = _num((s.get('cpuinfo') or {}).get('cpus') if isinstance(s.get('cpuinfo'), dict) else 0) or 1
+        memtotal = _num(s.get('mem_total')) or 1
+        try:
+            r = mgr.get_node_rrddata(name, tf)
+        except Exception:
+            r = None
+        if not isinstance(r, dict) or not isinstance(r.get('timestamps'), list) or not isinstance(r.get('metrics'), dict):
+            missing.append(name)
+            continue
+        cpu, mem = r['metrics'].get('cpu') or [], r['metrics'].get('memory') or []
+        for i, t in enumerate(r['timestamps']):
+            if i >= len(cpu) or i >= len(mem):
+                break
+            a = acc.setdefault(int(t), [0.0, 0.0, 0.0, 0.0])
+            a[0] += _num(cpu[i]) * cores; a[1] += cores
+            a[2] += _num(mem[i]) * memtotal; a[3] += memtotal
+    points = [{'t': t, 'cpu': round(a[0] / a[1], 2), 'mem': round(a[2] / a[3], 2)} for t, a in sorted(acc.items()) if a[1] and a[3]]
+    return jsonify({'timeframe': tf, 'points': points, 'nodes_missing': missing})
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/storage', methods=['GET'])
