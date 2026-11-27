@@ -11,10 +11,15 @@
 //                             provider then signs that one RDP session in, once.
 //   moavi-logon.exe status    version, credential provider registration, pending state.
 //   moavi-logon.exe clear     forget the pending logon (key and certificate removed).
+//   moavi-logon.exe selftest [all]
+//                             LsaLogonUser with the armed certificate, as the credential provider
+//                             would hand it to LogonUI (not consumed; the token is closed at once).
+//                             "all" tries every serialization variant and prints each NTSTATUS.
 //
 // The private key never leaves the VM and is never printed. Exit 0 = done, 2 = bad input,
 // 3 = state mismatch (no prepare for this nonce), 4 = crypto failure.
 #include "common.h"
+#include "pack.h"
 #include <ncrypt.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
@@ -23,6 +28,7 @@
 #include <vector>
 
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "secur32.lib")
 
 using namespace moavi;
 
@@ -259,12 +265,79 @@ static int Status() {
     return 0;
 }
 
+static NTSTATUS TryLogon(const KV& st, bool unlock, NTSTATUS* sub) {
+    std::vector<BYTE> buf;
+    *sub = 0;
+    if (!PackCertLogon(st, unlock, buf)) return (NTSTATUS)0xC000000DL;
+    HANDLE lsa = nullptr;
+    LSA_STRING name;
+    char proc[] = "MoaviLogonSelftest";
+    name.Buffer = proc; name.Length = (USHORT)strlen(proc); name.MaximumLength = name.Length + 1;
+    LSA_OPERATIONAL_MODE mode = 0;
+    NTSTATUS r = LsaRegisterLogonProcess(&name, &lsa, &mode);
+    if (r != 0) return r;
+    ULONG pkg = 0;
+    std::string pn = WToUtf8(KV(st)[L"pkg"].empty() ? L"Negotiate" : KV(st)[L"pkg"]);
+    LSA_STRING ps;
+    ps.Buffer = (PCHAR)pn.c_str(); ps.Length = (USHORT)pn.size(); ps.MaximumLength = ps.Length + 1;
+    r = LsaLookupAuthenticationPackage(lsa, &ps, &pkg);
+    if (r == 0) {
+        TOKEN_SOURCE src = {};
+        memcpy(src.SourceName, "MOAVI\0\0\0", 8);
+        AllocateLocallyUniqueId(&src.SourceIdentifier);
+        PVOID profile = nullptr;
+        ULONG profileLen = 0;
+        LUID luid = {};
+        HANDLE token = nullptr;
+        QUOTA_LIMITS q = {};
+        r = LsaLogonUser(lsa, &name, Interactive, pkg, buf.data(), (ULONG)buf.size(), nullptr, &src,
+                         &profile, &profileLen, &luid, &token, &q, sub);
+        if (profile) LsaFreeReturnBuffer(profile);
+        if (token) CloseHandle(token);
+    }
+    LsaDeregisterLogonProcess(lsa);
+    return r;
+}
+
+static int Selftest(bool all) {
+    KV st;
+    if (!ReadKV(PendingPath(), st) || st[L"state"] != L"armed") { Out("error=nothing armed\n"); return 3; }
+    if (_wtoi64(st[L"not_after"].c_str()) <= UnixNow()) { Out("error=expired\n"); return 3; }
+    KV opt;
+    if (ReadKV(DataDir() + L"\\cp-options.txt", opt))
+        for (auto& o : opt) st[o.first] = o.second;
+    const wchar_t* modes[] = { L"hash", L"csp" };
+    const wchar_t* names[] = { L"on", L"off" };
+    const wchar_t* structs[] = { L"plain", L"unlock" };
+    const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
+    int rc = 1;
+    for (auto m : modes) for (auto n : names) for (auto sct : structs) for (auto pk : pkgs) {
+        KV t = st;
+        if (all) { t[L"mode"] = m; t[L"names"] = n; t[L"struct"] = sct; t[L"pkg"] = pk; }
+        bool unlock = t[L"struct"] == L"unlock";
+        NTSTATUS sub = 0;
+        NTSTATUS r = TryLogon(t, unlock, &sub);
+        wchar_t line[200];
+        swprintf_s(line, L"try mode=%s names=%s struct=%s pkg=%s -> 0x%08lx / 0x%08lx\n",
+                   t[L"mode"].empty() ? L"hash" : t[L"mode"].c_str(), t[L"names"].empty() ? L"on" : t[L"names"].c_str(),
+                   unlock ? L"unlock" : L"plain", t[L"pkg"].empty() ? L"Negotiate" : t[L"pkg"].c_str(),
+                   (unsigned long)r, (unsigned long)sub);
+        OutW(line);
+        Log(L"selftest: %s", line);
+        if (r == 0) { rc = 0; if (all) goto done; }
+        if (!all) goto done;
+    }
+done:
+    return rc;
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) { Out("usage: moavi-logon prepare|arm|status|clear\n"); return 2; }
     std::wstring cmd = argv[1];
     if (cmd == L"prepare") return Prepare();
     if (cmd == L"arm") return Arm();
     if (cmd == L"status") return Status();
+    if (cmd == L"selftest") return Selftest(argc > 2 && std::wstring(argv[2]) == L"all");
     if (cmd == L"clear") { ForgetPending(); Log(L"clear"); Out("cleared=ok\n"); return 0; }
     Out("usage: moavi-logon prepare|arm|status|clear\n");
     return 2;
