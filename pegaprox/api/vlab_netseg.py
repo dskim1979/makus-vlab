@@ -54,8 +54,9 @@ def _user():
 
 
 def _mgr(cluster_id):
-    mgr = cluster_managers.get(cluster_id)
-    return mgr if mgr and getattr(mgr, 'is_connected', False) else None
+    # no is_connected gate: an idle manager reads False until its next call (a call that fails
+    # raises and is reported where it is made)
+    return cluster_managers.get(cluster_id)
 
 
 # --- Proxmox SDN -----------------------------------------------------------------------------------

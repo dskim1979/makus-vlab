@@ -235,8 +235,10 @@ def clean_segment(v, cluster_id, zone_type, segment_id=None):
             return None, f"tag {tag} is already segment '{other['name']}'"
         if ipaddress.ip_network(other['subnet']).overlaps(net):
             return None, f"{net} overlaps segment '{other['name']}' ({other['subnet']})"
+    # SNAT is done by the nodes only in simple (and EVPN) zones; a VLAN / VXLAN subnet goes out
+    # through the router that holds its gateway address
     return {'name': name, 'department': dept, 'tag': tag, 'subnet': str(net), 'gateway': gw,
-            'dhcp_start': start, 'dhcp_end': end, 'snat': bool(v.get('snat'))}, None
+            'dhcp_start': start, 'dhcp_end': end, 'snat': bool(v.get('snat')) and zone_type == 'simple'}, None
 
 
 def add_segment(cluster_id, f, by=''):

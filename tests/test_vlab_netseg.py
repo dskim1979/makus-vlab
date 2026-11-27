@@ -258,3 +258,9 @@ def test_ipam_view_and_reservations(seg):
     r = admin.post(f"/api/vlab/admin/clusters/{CID}/netseg/segments/{s['id']}/ips", json={'ip': '10.20.1.50', 'mac': 'bc:24:11:00:00:02'})
     assert r.status_code == 200 and sdn.ips[-1]['ip'] == '10.20.1.50' and sdn.ips[-1]['mac'] == 'BC:24:11:00:00:02'
     assert admin.post(f"/api/vlab/admin/clusters/{CID}/netseg/segments/{s['id']}/ips", json={'ip': '10.99.0.5'}).status_code == 400
+
+
+def test_snat_only_in_a_simple_zone():
+    ok = {'name': 'a', 'tag': 110, 'subnet': '10.20.1.0/24', 'gateway': '10.20.1.1', 'snat': True}
+    assert netseg.clean_segment(ok, 'none', 'vlan')[0]['snat'] is False
+    assert netseg.clean_segment(dict(ok, tag=0), 'none', 'simple')[0]['snat'] is True
