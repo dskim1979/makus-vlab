@@ -65818,6 +65818,428 @@
         ]
       }
     },
+    "/api/vlab/admin/clusters/{cluster_id}/ha/extra": {
+      "get": {
+        "operationId": "vlab_hadrs.ha_extra_get",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What the HA page needs beside the resource list: nodes online, quorum, the disk storage of every HA guest (a guest on node-local disks cannot start elsewhere), the keep-apart rules and each pool with its 'HA 사용' switch and how many of its desktops are under HA.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view",
+          "ha.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/ha/pool": {
+      "post": {
+        "operationId": "vlab_hadrs.ha_pool_post",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{pool_id, action: add|remove} - every desktop of the pool goes under HA (keeping its power state: a running one 'started', the rest 'stopped') or comes out of it.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "ha.config"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/ha/separate": {
+      "post": {
+        "operationId": "vlab_hadrs.ha_separate_add_post",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{name, vmids: [..2+]} - keep these guests on different nodes: a negative resource-affinity rule of Proxmox HA (placement after a node fails; PVE 9 and the guests must be under HA) and an enforced 'separate' rule of the balancer (its moves and recommendations).",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "ha.config"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/ha/separate/{name}": {
+      "delete": {
+        "operationId": "vlab_hadrs.ha_separate_remove_delete",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "ha.config"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/balance": {
+      "get": {
+        "operationId": "vlab_hadrs.balance_get_get",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view",
+          "cluster.view"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_hadrs.balance_put_put",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{mode?: off|recommend|auto, check_interval?, migration_threshold?, balance_*_weight?, balance_local_disks?, balance_containers?}. 'auto' turns the core's auto_migrate on; the other two keep it off.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "cluster.config"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/balance/apply": {
+      "post": {
+        "operationId": "vlab_hadrs.balance_apply_post",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{vmid, to} - live-migrates one guest (normally a recommendation). The answer carries the Proxmox task; the move shows in the history either way.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "cluster.config"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/balance/run": {
+      "post": {
+        "operationId": "vlab_hadrs.balance_run_post",
+        "tags": [
+          "vlab_hadrs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "지금 분산: the core's balance check now, moving what it finds whatever the mode.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage",
+          "cluster.config"
+        ]
+      }
+    },
     "/api/vlab/admin/warpgate": {
       "get": {
         "operationId": "vlab_warpgate.get_warpgate_get",
