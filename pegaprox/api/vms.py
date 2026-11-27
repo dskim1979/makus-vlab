@@ -4691,7 +4691,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
         pve_ws = ws_client.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
-            header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
+            header={"Cookie": f"PVEAuthCookie={pve_ticket}"}, host=f"{host}:{port}",
             timeout=timeout,
         )
         img = vnc_grab.grab_frame(pve_ws, vnc_ticket, timeout=timeout)
@@ -5016,6 +5016,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                 sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
                 header=_pve_console_ws_auth(mgr, f"{host}:{port}", pve_ticket,
                                             reuse_manager_auth=_reuse_manager_auth),
+                host=f"{host}:{port}",
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
             _apply_vnc_socket_options(pve_ws.sock)
@@ -8304,8 +8305,12 @@ def _pve_console_ws_auth(manager, netloc, fresh_ticket=None, reuse_manager_auth=
 
     Without passthrough we issued the vncproxy call ourselves with fresh_ticket,
     so that is the right cookie to send. MK Sep 2026
+
+    No Host here: websocket-client always writes its own Host line, so a Host in
+    these headers went out twice and PVE 9.3 refuses the upgrade with 400. Callers
+    pass the authority as create_connection(host=...) instead. Nov 2026
     """
-    headers = {"Host": netloc}
+    headers = {}
     if reuse_manager_auth:
         if getattr(manager, '_using_api_token', False) and getattr(manager, '_api_token', None):
             headers['Authorization'] = f"PVEAPIToken={manager._api_token}"
@@ -10398,6 +10403,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
+            host=f"{host}:{port}",
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
         # MK Apr 2026 — TCP_NODELAY + keepalive: survives idle conntrack drops
@@ -10876,6 +10882,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 pve_ws_url,
                 sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
                 header=ws_auth_header,
+                host=f"{tunnel_target_host}:{tunnel_target_port}",
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
             _connect_ms = int((_t_connect.monotonic() - _connect_started) * 1000)
@@ -11445,6 +11452,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
+            host=f"{host}:{port}",
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
         # MK Apr 2026 — TCP_NODELAY + keepalive (consolidated helper)
