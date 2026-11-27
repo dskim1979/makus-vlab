@@ -81,7 +81,7 @@ static void ForgetPending() {
 static bool PublicKeyOf(const KV& stc, std::vector<BYTE>& out) {
     KV st = stc;
     DWORD len = 0;
-    if (st[L"keyprov"] != L"capi") {
+    if (st[L"keyprov"] != L"capi" && st[L"keyprov"] != L"mcsp") {
         NCRYPT_PROV_HANDLE prov = 0;
         NCRYPT_KEY_HANDLE key = 0;
         bool ok = false;
@@ -146,7 +146,7 @@ static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope
         }
         signer = key;
         spec = CERT_NCRYPT_KEY_SPEC;
-    } else if (keyprov != L"capi") {
+    } else if (keyprov != L"capi" && keyprov != L"mcsp") {
         SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
         if (ss == ERROR_SUCCESS)
             ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
@@ -227,8 +227,12 @@ static int Prepare() {
     // keyprov moavi (default): a Software KSP key that LSA reaches through the MOAVI Logon KSP (a smart
     // card provider to it); ksp / capi: the bare software key (LSA refuses both - kept as switches)
     KV vscInfo;
-    std::wstring keyprov = !opt[L"keyprov"].empty() ? opt[L"keyprov"] : ReadVsc(vscInfo) ? L"vsc" : L"moavi";
-    if (keyprov != L"ksp" && keyprov != L"capi" && keyprov != L"vsc") keyprov = L"moavi";
+    // mcsp (default): a CAPI container that LSA reaches through the MOAVI Logon CSP, which never calls
+    // WinSCard (an RDP session's smart card calls go to the client); vsc: the VM's TPM virtual smart
+    // card (console logons only); moavi / ksp / capi: kept as switches
+    std::wstring keyprov = !opt[L"keyprov"].empty() ? opt[L"keyprov"] : L"mcsp";
+    if (keyprov != L"ksp" && keyprov != L"capi" && keyprov != L"vsc" && keyprov != L"moavi") keyprov = L"mcsp";
+    (void)vscInfo;
     std::vector<BYTE> csr;
     std::string err;
     if (!MakeKeyAndCsr(keyprov, scope, keyName, csr, err)) {
@@ -315,8 +319,9 @@ static int Arm() {
     }
     CRYPT_KEY_PROV_INFO kpi = {};
     kpi.pwszContainerName = (LPWSTR)st[L"key"].c_str();
-    bool ksp = st[L"keyprov"] != L"capi";
-    kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"vsc" ? MS_SMART_CARD_KEY_STORAGE_PROVIDER :
+    bool ksp = st[L"keyprov"] != L"capi" && st[L"keyprov"] != L"mcsp";
+    kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"mcsp" ? MOAVI_CSP_NAME :
+                                st[L"keyprov"] == L"vsc" ? MS_SMART_CARD_KEY_STORAGE_PROVIDER :
                                 st[L"keyprov"] == L"moavi" ? MOAVI_KSP_NAME : ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
     kpi.dwProvType = ksp ? 0 : PROV_RSA_AES;  // 0 = CNG
     kpi.dwFlags = (ksp ? KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG
@@ -425,7 +430,8 @@ static int Selftest(bool all) {
     // is how the key is named to it and the outer structure
     const wchar_t* softProviders[] = { MOAVI_KSP_NAME, MS_KEY_STORAGE_PROVIDER, MS_ENH_RSA_AES_PROV_W };
     const wchar_t* cardProviders[] = { MS_SCARD_PROV_W, MS_SMART_CARD_KEY_STORAGE_PROVIDER, L"" };
-    const wchar_t** providers = st[L"keyprov"] == L"vsc" ? cardProviders : softProviders;
+    const wchar_t* ourCsp[] = { MOAVI_CSP_NAME, MS_ENH_RSA_AES_PROV_W, MOAVI_CSP_NAME };
+    const wchar_t** providers = st[L"keyprov"] == L"vsc" ? cardProviders : st[L"keyprov"] == L"mcsp" ? ourCsp : softProviders;
     const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };

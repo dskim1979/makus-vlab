@@ -24,6 +24,7 @@ if ($Uninstall) {
     if (Test-Path (Join-Path $dest 'moavi-logon.exe')) {
         & (Join-Path $dest 'moavi-logon.exe') clear | Out-Null
         & (Join-Path $dest 'moavi-logon.exe') unregister-ksp | Out-Null
+        Remove-Item -Recurse -Force 'HKLM:\SOFTWARE\Microsoft\Cryptography\Defaults\Provider\MOAVI Logon Cryptographic Provider' -ErrorAction SilentlyContinue
     }
     'uninstall=ok'
     exit 0
@@ -43,7 +44,7 @@ try {
             if ($got -ne $sha.ToLower()) { Fail "checksum $name" }
         }
     }
-    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-ca.cer') {
+    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-csp.dll', 'moavi-logon-ca.cer') {
         if (-not (Test-Path (Join-Path $Setup $n))) { Fail "missing $n" }
     }
 
@@ -69,6 +70,21 @@ try {
     }
     Copy-Item -Force (Join-Path $Setup 'moavi-logon-ksp.dll') $ksp
     Get-ChildItem (Split-Path $ksp) -Filter 'moavi-logon-ksp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+
+    # 2c. the cryptographic provider (CAPI CSP) the smart card logon opens - it never calls WinSCard
+    $csp = Join-Path $env:SystemRoot 'System32\moavi-logon-csp.dll'
+    if (Test-Path $csp) {
+        $old = "$csp.old-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+        try { Remove-Item -Force $csp } catch { Move-Item -Force $csp $old }   # LSASS may have it loaded
+    }
+    Copy-Item -Force (Join-Path $Setup 'moavi-logon-csp.dll') $csp
+    Get-ChildItem (Split-Path $csp) -Filter 'moavi-logon-csp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+    $cspKey = 'HKLM:\SOFTWARE\Microsoft\Cryptography\Defaults\Provider\MOAVI Logon Cryptographic Provider'
+    New-Item -Force $cspKey | Out-Null
+    Set-ItemProperty -Path $cspKey -Name 'Image Path' -Value $csp -Type String
+    Set-ItemProperty -Path $cspKey -Name 'Type' -Value 24 -Type DWord
+    Set-ItemProperty -Path $cspKey -Name 'SigInFile' -Value 0 -Type DWord
+    'csp=registered'
 
     # 3. the data folder (pending logon, log): SYSTEM / Administrators only
     New-Item -ItemType Directory -Force $data | Out-Null

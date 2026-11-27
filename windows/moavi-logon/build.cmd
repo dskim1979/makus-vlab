@@ -10,6 +10,7 @@ set CFLAGS=/nologo /O2 /MT /W4 /EHsc /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AN
 cl %CFLAGS% moavi-logon.cpp common.cpp /Feout\moavi-logon.exe /link /DYNAMICBASE /NXCOMPAT /guard:cf || exit /b 1
 cl %CFLAGS% /LD cp.cpp common.cpp /Feout\moavi-logon-cp.dll /link /DEF:cp.def /DYNAMICBASE /NXCOMPAT /guard:cf || exit /b 1
 cl %CFLAGS% /LD ksp.cpp common.cpp /Feout\moavi-logon-ksp.dll /link /DEF:ksp.def /DYNAMICBASE /NXCOMPAT /guard:cf || exit /b 1
+cl %CFLAGS% /LD csp.cpp common.cpp /Feout\moavi-logon-csp.dll /link /DEF:csp.def /DYNAMICBASE /NXCOMPAT /guard:cf || exit /b 1
 del out\*.obj out\*.exp out\*.lib 2>nul
 rem the engine pushes these to the desktops (pegaprox/api/vlab_logon.py)
 set AGENT=..\..\pegaprox\vlab\logon_agent
@@ -17,5 +18,6 @@ if not exist %AGENT% mkdir %AGENT%
 copy /y out\moavi-logon.exe %AGENT%\ >nul
 copy /y out\moavi-logon-cp.dll %AGENT%\ >nul
 copy /y out\moavi-logon-ksp.dll %AGENT%\ >nul
+copy /y out\moavi-logon-csp.dll %AGENT%\ >nul
 copy /y install.ps1 %AGENT%\ >nul
-echo built: out\moavi-logon.exe out\moavi-logon-cp.dll out\moavi-logon-ksp.dll
+echo built: out\moavi-logon.exe out\moavi-logon-cp.dll out\moavi-logon-ksp.dll out\moavi-logon-csp.dll
