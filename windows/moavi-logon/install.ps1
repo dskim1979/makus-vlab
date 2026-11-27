@@ -25,6 +25,7 @@ if ($Uninstall) {
         & (Join-Path $dest 'moavi-logon.exe') clear | Out-Null
         & (Join-Path $dest 'moavi-logon.exe') unregister-ksp | Out-Null
         Remove-Item -Recurse -Force 'HKLM:\SOFTWARE\Microsoft\Cryptography\Defaults\Provider\MOAVI Logon Cryptographic Provider' -ErrorAction SilentlyContinue
+        Get-ChildItem (Join-Path $env:SystemRoot 'System32') -Filter 'moavi-logon-csp*.dll*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
     }
     'uninstall=ok'
     exit 0
@@ -71,20 +72,23 @@ try {
     Copy-Item -Force (Join-Path $Setup 'moavi-logon-ksp.dll') $ksp
     Get-ChildItem (Split-Path $ksp) -Filter 'moavi-logon-ksp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
 
-    # 2c. the cryptographic provider (CAPI CSP) the smart card logon opens - it never calls WinSCard
-    $csp = Join-Path $env:SystemRoot 'System32\moavi-logon-csp.dll'
-    if (Test-Path $csp) {
-        $old = "$csp.old-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
-        try { Remove-Item -Force $csp } catch { Move-Item -Force $csp $old }   # LSASS may have it loaded
-    }
-    Copy-Item -Force (Join-Path $Setup 'moavi-logon-csp.dll') $csp
-    Get-ChildItem (Split-Path $csp) -Filter 'moavi-logon-csp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+    # 2c. the cryptographic provider (CAPI CSP) the smart card logon opens - it never calls WinSCard.
+    # One file per version (moavi-logon-csp-<version>.dll): LSASS keeps a loaded CSP until it restarts,
+    # so an update registers the new file and takes effect at the next logon, no reboot. Older files go
+    # when nothing has them loaded any more.
+    $ver = ((& (Join-Path $dest 'moavi-logon.exe') status) -match '^version=' | Select-Object -First 1) -replace '^version=', ''
+    if (-not $ver) { Fail 'module version unknown' }
+    $sys = Join-Path $env:SystemRoot 'System32'
+    $csp = Join-Path $sys "moavi-logon-csp-$ver.dll"
+    if (-not (Test-Path $csp)) { Copy-Item -Force (Join-Path $Setup 'moavi-logon-csp.dll') $csp }
     $cspKey = 'HKLM:\SOFTWARE\Microsoft\Cryptography\Defaults\Provider\MOAVI Logon Cryptographic Provider'
     New-Item -Force $cspKey | Out-Null
     Set-ItemProperty -Path $cspKey -Name 'Image Path' -Value $csp -Type String
     Set-ItemProperty -Path $cspKey -Name 'Type' -Value 1 -Type DWord   # PROV_RSA_FULL: the type smart card logon asks for (NTE_PROV_TYPE_NO_MATCH otherwise)
     Set-ItemProperty -Path $cspKey -Name 'SigInFile' -Value 0 -Type DWord
-    'csp=registered'
+    Get-ChildItem $sys -Filter 'moavi-logon-csp*.dll*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $csp } | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+    "csp=registered $csp"
 
     # 3. the data folder (pending logon, log): SYSTEM / Administrators only
     New-Item -ItemType Directory -Force $data | Out-Null
@@ -103,36 +107,27 @@ try {
     $reg = & (Join-Path $dest 'moavi-logon.exe') register-ksp
     if ($LASTEXITCODE -ne 0) { Fail "ksp: $reg" }
     $reg
-    # the smart card logon path wants the Smart Card service
-    Set-Service SCardSvr -StartupType Automatic -ErrorAction SilentlyContinue
-    Start-Service SCardSvr -ErrorAction SilentlyContinue
 
-    # 4b. the VM's TPM virtual smart card: the logon key is made on it (Windows' smart card logon takes
-    # no software key). Needs a (v)TPM; without one the module stays on the software key.
-    $exe = Join-Path $dest 'moavi-logon.exe'
-    $tpm = $null
-    try { $tpm = Get-Tpm } catch {}
-    if ($tpm -and $tpm.TpmPresent -and $tpm.TpmReady) {
-        $vi = & $exe vsc-info 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $mk = & tpmvscmgr.exe create /name 'MOAVI Logon' /pin default /adminkey random /generate 2>&1
-            if ($LASTEXITCODE -ne 0) { "vsc=failed $($mk | Select-Object -Last 1)" }
-            Start-Sleep -Seconds 3
+    # 4b. only for keyprov=vsc in cp-options.txt (console logons; an RDP session cannot reach the VM's
+    # own card - Windows sends a session's smart card calls to the RDP client): a TPM virtual smart card
+    $opt = Join-Path $data 'cp-options.txt'
+    if ((Test-Path $opt) -and ((Get-Content $opt) -match '^keyprov=vsc$')) {
+        $exe = Join-Path $dest 'moavi-logon.exe'
+        $tpm = $null
+        try { $tpm = Get-Tpm } catch {}
+        if ($tpm -and $tpm.TpmPresent -and $tpm.TpmReady) {
             $vi = & $exe vsc-info 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $mk = & tpmvscmgr.exe create /name 'MOAVI Logon' /pin default /adminkey random /generate 2>&1
+                if ($LASTEXITCODE -ne 0) { "vsc=failed $($mk | Select-Object -Last 1)" }
+                Start-Sleep -Seconds 3
+                $vi = & $exe vsc-info 2>&1
+            }
+            $vi
+        } else {
+            'vsc=no-tpm'
         }
-        $vi
-    } else {
-        'vsc=no-tpm'
     }
-
-    # 4c. RDP sessions use the VM's own card readers: with smart card redirection on, Windows sends a
-    # session's smart card calls to the RDP client (Warpgate has no readers) and the logon never sees
-    # the VM's virtual smart card (Smart Card Logon event 5, STATUS_SMARTCARD_SUBSYSTEM_FAILURE).
-    # Policy "Do not allow smart card device redirection".
-    $ts = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
-    if (-not (Test-Path $ts)) { New-Item -Force $ts | Out-Null }
-    Set-ItemProperty -Path $ts -Name 'fEnableSmartCard' -Value 0 -Type DWord
-    'scard_redirect=off'
 
     # 5. trust the MOAVI Desk Logon CA: Root (chain) and NTAuth (smart card logon)
     $ca = Join-Path $Setup 'moavi-logon-ca.cer'

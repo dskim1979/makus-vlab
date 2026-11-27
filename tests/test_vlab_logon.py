@@ -310,3 +310,37 @@ def test_cli_imports_the_ca_from_stdin_and_switches_a_pool(sso, monkeypatch, cap
     assert logon_ca.main(['pool-sso', pool_id, 'on']) == 0
     from pegaprox.vlab import policy
     assert policy.effective(store.get_pool(pool_id)['settings'])['desktop_sso'] is True
+
+
+def test_portal_admins_get_no_logon_certificate_unless_allowed(sso):
+    from pegaprox.models.permissions import ROLE_ADMIN
+    from pegaprox.utils.auth import load_users, save_users
+    users = load_users()
+    users['alice'] = dict(users['alice'], role=ROLE_ADMIN)
+    save_users(users)
+    assert logon_ca.eligible('alice', sso['desk']['id'])[1] == 'ADMIN_REFUSED'
+    ok, code, _ = vlab_logon.arm(sso['desk'], sso['mgr'], 'pve1', 'alice')
+    assert not ok and code == 'ADMIN_REFUSED' and logon_ca.issued() == []
+    logon_ca.save_config(allow_admins=True)
+    assert logon_ca.eligible('alice', sso['desk']['id']) == (True, '')
+
+
+def test_a_failed_arm_never_blocks_the_connect(sso, monkeypatch):
+    """The connect route goes on to the sign-in screen when arming fails, and says so in the audit."""
+    pool = store.get_pool(sso['desk']['pool_id'])
+    sso['admin'].put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'desktop_sso': True})
+    pool = store.get_pool(pool['id'])
+    sso['g'].installed = False
+    with sso['api'].app.test_request_context('/'):
+        assert vlab_logon.arm_for_connect(sso['desk'], sso['mgr'], 'pve1', 'alice', pool) is False
+    rows = sso['seed'].db.conn.execute("SELECT details FROM audit_log WHERE action = 'vlab.logon.fail'").fetchall()
+    assert rows and 'NOT_INSTALLED' in rows[-1][0]
+    with sso['api'].app.test_request_context('/'):
+        assert vlab_logon.arm_for_connect(sso['desk'], sso['mgr'], 'pve1', 'alice', None) is None   # switch off: nothing
+
+
+def test_the_certificate_cannot_outlive_its_ttl_or_the_ca(sso):
+    logon_ca.save_config(ttl_min=1)
+    _k, csr = _csr()
+    _c, _s, not_after = logon_ca.sign_request(csr, 'alice@moavi.lan', 'alice')
+    assert not_after - dt.datetime.now(dt.timezone.utc) <= dt.timedelta(minutes=1, seconds=2)

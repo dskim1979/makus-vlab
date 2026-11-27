@@ -22,6 +22,11 @@
 
 using namespace moavi;
 
+// Per-call logging only with debug=on in cp-options.txt (read at each AcquireContext); the logon
+// itself (AcquireContext) and every refusal are always logged
+static volatile bool g_debug = false;
+#define DLOG(...) do { if (g_debug) Log(__VA_ARGS__); } while (0)
+
 // cspdk.h (Cryptographic Service Provider Developer's Kit)
 struct VTableProvStruc {
     DWORD Version;
@@ -88,6 +93,7 @@ extern "C" BOOL WINAPI CPAcquireContext(HCRYPTPROV* ph, LPCSTR container, DWORD 
 
 extern "C" BOOL WINAPI CPAcquireContextW(HCRYPTPROV* ph, LPCWSTR container, DWORD flags, VTableProvStruc*) {
     if (!ph) return Fail(ERROR_INVALID_PARAMETER);
+    { KV opt; g_debug = ReadKV(DataDir() + L"\\cp-options.txt", opt) && opt[L"debug"] == L"on"; }
     Log(L"csp: AcquireContext %s flags 0x%lx (pid %lu)", container ? container : L"(null)", flags, GetCurrentProcessId());
     if (flags & (CRYPT_NEWKEYSET | CRYPT_DELETEKEYSET)) return Fail((DWORD)NTE_BAD_FLAGS);   // not a key maker
     Prov* p = new (std::nothrow) Prov();
@@ -174,7 +180,7 @@ extern "C" BOOL WINAPI CPGetProvParam(HCRYPTPROV h, DWORD param, BYTE* out, DWOR
     default:
         r = p->sw ? CryptGetProvParam(p->sw, param, out, pcb, flags) : Fail((DWORD)NTE_BAD_TYPE);
     }
-    Log(L"csp: GetProvParam %lu flags 0x%lx -> %s 0x%08lx", param, flags, r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    DLOG(L"csp: GetProvParam %lu flags 0x%lx -> %s 0x%08lx", param, flags, r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
@@ -182,7 +188,7 @@ extern "C" BOOL WINAPI CPSetProvParam(HCRYPTPROV h, DWORD param, const BYTE*, DW
     Prov* p = P(h);
     if (!p) return Fail((DWORD)NTE_BAD_UID);
     // a PIN (there is none), a window handle, a context: taken, never logged by value
-    Log(L"csp: SetProvParam %lu flags 0x%lx -> ok", param, flags);
+    DLOG(L"csp: SetProvParam %lu flags 0x%lx -> ok", param, flags);
     return TRUE;
 }
 
@@ -197,11 +203,11 @@ extern "C" BOOL WINAPI CPGetUserKey(HCRYPTPROV h, DWORD spec, HCRYPTKEY* phKey) 
     // the container has one key, made as AT_KEYEXCHANGE (it signs too)
     if (!CryptGetUserKey(p->sw, AT_KEYEXCHANGE, &k->sw)) {
         DWORD e = GetLastError(); delete k;
-        Log(L"csp: GetUserKey %lu -> 0x%08lx", spec, e);
+        DLOG(L"csp: GetUserKey %lu -> 0x%08lx", spec, e);
         return Fail(e);
     }
     *phKey = (HCRYPTKEY)k;
-    Log(L"csp: GetUserKey %lu -> ok", spec);
+    DLOG(L"csp: GetUserKey %lu -> ok", spec);
     return TRUE;
 }
 
@@ -225,7 +231,7 @@ extern "C" BOOL WINAPI CPGetKeyParam(HCRYPTPROV h, HCRYPTKEY hk, DWORD param, BY
     } else {
         r = CryptGetKeyParam(k->sw, param, out, pcb, flags);
     }
-    Log(L"csp: GetKeyParam %lu -> %s 0x%08lx", param, r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    DLOG(L"csp: GetKeyParam %lu -> %s 0x%08lx", param, r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
@@ -234,7 +240,7 @@ extern "C" BOOL WINAPI CPSetKeyParam(HCRYPTPROV, HCRYPTKEY hk, DWORD param, cons
     if (!k) return Fail((DWORD)NTE_BAD_KEY);
     if (param == KP_CERTIFICATE) return Fail((DWORD)NTE_PERM);
     BOOL r = CryptSetKeyParam(k->sw, param, data, flags);
-    Log(L"csp: SetKeyParam %lu -> %s", param, r ? L"ok" : L"fail");
+    DLOG(L"csp: SetKeyParam %lu -> %s", param, r ? L"ok" : L"fail");
     return r;
 }
 
@@ -253,7 +259,7 @@ extern "C" BOOL WINAPI CPExportKey(HCRYPTPROV, HCRYPTKEY hk, HCRYPTKEY hPub, DWO
     if (k->user && type != PUBLICKEYBLOB) { Log(L"csp: ExportKey type %lu of the logon key -> refused", type); return Fail((DWORD)NTE_BAD_TYPE); }
     Key* pub = K(hPub);
     BOOL r = CryptExportKey(k->sw, pub ? pub->sw : 0, type, flags, out, pcb);
-    Log(L"csp: ExportKey type %lu%s -> %s 0x%08lx", type, out ? L"" : L" (size)", r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    DLOG(L"csp: ExportKey type %lu%s -> %s 0x%08lx", type, out ? L"" : L" (size)", r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
@@ -265,7 +271,7 @@ extern "C" BOOL WINAPI CPImportKey(HCRYPTPROV h, const BYTE* data, DWORD n, HCRY
     Key* pub = K(hPub);
     HCRYPTKEY sw = 0;
     BOOL r = CryptImportKey(p->sw, data, n, pub ? pub->sw : 0, flags, &sw);
-    Log(L"csp: ImportKey type %u alg 0x%x flags 0x%lx -> %s 0x%08lx", type, ((const BLOBHEADER*)data)->aiKeyAlg, flags,
+    DLOG(L"csp: ImportKey type %u alg 0x%x flags 0x%lx -> %s 0x%08lx", type, ((const BLOBHEADER*)data)->aiKeyAlg, flags,
         r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r ? Wrap(sw, phKey) : FALSE;
 }
@@ -279,7 +285,7 @@ extern "C" BOOL WINAPI CPGenKey(HCRYPTPROV h, ALG_ID alg, DWORD flags, HCRYPTKEY
     }
     HCRYPTKEY sw = 0;
     BOOL r = CryptGenKey(p->sw, alg, flags, &sw);
-    Log(L"csp: GenKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
+    DLOG(L"csp: GenKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
     return r ? Wrap(sw, phKey) : FALSE;
 }
 
@@ -289,7 +295,7 @@ extern "C" BOOL WINAPI CPDeriveKey(HCRYPTPROV h, ALG_ID alg, HCRYPTHASH hh, DWOR
     if (!p || !x || !phKey) return Fail((DWORD)NTE_BAD_HASH);
     HCRYPTKEY sw = 0;
     BOOL r = CryptDeriveKey(p->sw, alg, x->sw, flags, &sw);
-    Log(L"csp: DeriveKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
+    DLOG(L"csp: DeriveKey 0x%x -> %s", alg, r ? L"ok" : L"fail");
     return r ? Wrap(sw, phKey) : FALSE;
 }
 
@@ -316,7 +322,7 @@ extern "C" BOOL WINAPI CPDecrypt(HCRYPTPROV, HCRYPTKEY hk, HCRYPTHASH hh, BOOL f
     if (!k) return Fail((DWORD)NTE_BAD_KEY);
     Hash* x = H(hh);
     BOOL r = CryptDecrypt(k->sw, x ? x->sw : 0, fin, flags, data, pcb);
-    Log(L"csp: Decrypt -> %s 0x%08lx", r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    DLOG(L"csp: Decrypt -> %s 0x%08lx", r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
@@ -330,7 +336,7 @@ extern "C" BOOL WINAPI CPCreateHash(HCRYPTPROV h, ALG_ID alg, HCRYPTKEY hk, DWOR
     Key* k = K(hk);
     if (!CryptCreateHash(p->sw, alg, k ? k->sw : 0, flags, &x->sw)) {
         DWORD e = GetLastError(); delete x;
-        Log(L"csp: CreateHash 0x%x -> 0x%08lx", alg, e);
+        DLOG(L"csp: CreateHash 0x%x -> 0x%08lx", alg, e);
         return Fail(e);
     }
     *phHash = (HCRYPTHASH)x;
@@ -387,7 +393,7 @@ extern "C" BOOL WINAPI CPSignHash(HCRYPTPROV h, HCRYPTHASH hh, DWORD spec, LPCWS
     if (!p || !x) return Fail((DWORD)NTE_BAD_HASH);
     // the one key signs, whatever spec is asked for
     BOOL r = CryptSignHashW(x->sw, AT_KEYEXCHANGE, nullptr, flags, sig, pcb);
-    Log(L"csp: SignHash spec %lu flags 0x%lx%s -> %s 0x%08lx", spec, flags, sig ? L"" : L" (size)", r ? L"ok" : L"fail", r ? 0 : GetLastError());
+    DLOG(L"csp: SignHash spec %lu flags 0x%lx%s -> %s 0x%08lx", spec, flags, sig ? L"" : L" (size)", r ? L"ok" : L"fail", r ? 0 : GetLastError());
     return r;
 }
 
