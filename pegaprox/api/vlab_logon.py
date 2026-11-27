@@ -128,25 +128,62 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
     return True, '', {'serial': cert['serial'], 'not_after': logon_ca._iso(cert['not_after']), 'upn': cert['upn']}
 
 
-_nla_off = {}     # desktop id -> vmid: NLA already off for the devices route
+_nla_off = {}     # desktop id -> (vmid, gateway ips): RDP scoped to the gateways and NLA off
+
+# The desktop's own "Remote Desktop" inbound rules (the group, by its resource name, so any Windows
+# language) take RDP only from the gateways. Fails - and NLA stays on - when the Windows firewall is
+# off in a profile (a scope would filter nothing) or no rule is found.
+_RDP_SCOPE_PS = r"""$ErrorActionPreference = 'Stop'
+$ips = @(%s)
+$off = @(Get-NetFirewallProfile | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
+if ($off.Count) { "rdp_fw=error firewall_off=" + ($off -join ','); exit 3 }
+$rules = @(Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752' -Direction Inbound -ErrorAction SilentlyContinue)
+if (-not $rules.Count) { 'rdp_fw=error no_rules'; exit 4 }
+$rules | Set-NetFirewallRule -RemoteAddress $ips
+$now = @($rules | Get-NetFirewallAddressFilter | ForEach-Object { $_.RemoteAddress } | Sort-Object -Unique)
+"rdp_fw=scoped rules=$($rules.Count) remote=" + ($now -join ',')
+"""
+
+
+def rdp_scope(desk, mgr, node, ips):
+    """The desktop's RDP firewall rules take only the gateways' addresses. True when scoped."""
+    from pegaprox.api.vlab_next import _agent_run
+    script = _RDP_SCOPE_PS % ','.join("'%s'" % ip for ip in ips)        # ips: validated addresses
+    try:
+        rc, out, _err, e = _agent_run(mgr, node, int(desk['vmid']), ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                      '-ExecutionPolicy', 'Bypass', '-Command', script], wait=30)
+    except Exception as ex:
+        rc, out, e = None, '', str(ex)[:200]
+    if rc == 0 and 'rdp_fw=scoped' in (out or ''):
+        return True
+    why = (e or (out or '').strip())[:120]
+    logging.info(f"[VLAB] desktop sign-in: RDP on {desk.get('name')} not scoped to the gateways: {why}")
+    log_audit('system', 'vlab.logon.nla', f"'{desk['name']}' (qemu/{desk['vmid']}): RDP not limited to the gateways "
+              f"({why}); NLA stays on", '')
+    return False
 
 
 def rdp_nla_off(desk, mgr, node):
     """The devices route (RD Gateway): mstsc talks to the desktop itself and with NLA it asks for a
-    password before the desktop is reached. A desktop_sso desktop on that route takes RDP without NLA
-    (only the gateways reach its port 3389; the logon screen then signs the user in). True when off."""
+    password before the desktop is reached. A desktop_sso desktop on that route takes RDP without NLA -
+    only after its RDP firewall rules take nothing but the gateways (the logon screen then signs the
+    user in). True when off; False leaves NLA on and the .rdp asks for the password as before."""
     from pegaprox.api.vlab_next import _agent_run
-    if _nla_off.get(desk['id']) == desk['vmid']:
+    ips = tuple(logon_ca.config()['gateway_ips'])
+    if not ips:
+        return False
+    if _nla_off.get(desk['id']) == (desk['vmid'], ips):
         return True
+    if not rdp_scope(desk, mgr, node, ips):
+        return False
     try:
         rc, out, _err, e = _agent_run(mgr, node, int(desk['vmid']), [EXE, 'rdp-nla', 'off'], wait=15)
     except Exception as ex:
         rc, out, e = None, '', str(ex)[:200]
     if rc == 0 and 'rdp_nla=off' in (out or ''):
-        _nla_off[desk['id']] = desk['vmid']
-        if 'changed=1' in out:
-            log_audit('system', 'vlab.logon.nla', f"'{desk['name']}' (qemu/{desk['vmid']}): RDP without NLA for desktop "
-                      "sign-in on the devices route", '')
+        _nla_off[desk['id']] = (desk['vmid'], ips)
+        log_audit('system', 'vlab.logon.nla', f"'{desk['name']}' (qemu/{desk['vmid']}): RDP without NLA for desktop "
+                  f"sign-in on the devices route, RDP only from {', '.join(ips)}", '')
         return True
     logging.info(f"[VLAB] desktop sign-in: NLA on {desk.get('name')} not turned off: {e or out}")
     return False

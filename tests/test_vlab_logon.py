@@ -469,9 +469,27 @@ def test_nla_goes_off_once_for_the_devices_route(sso):
     g, desk = sso['g'], sso['desk']
     vlab_logon._nla_off.clear()
     orig = g._answer
-    g._answer = lambda cmd, stdin: ({'exitcode': 0, 'out-data': 'rdp_nla=off changed=1\n'} if cmd[1:] == ['rdp-nla', 'off']
-                                    else orig(cmd, stdin))
+    fw = {'out': 'rdp_fw=scoped rules=2 remote=192.168.0.55\n', 'rc': 0}
+
+    def answer(cmd, stdin):
+        if cmd[1:] == ['rdp-nla', 'off']:
+            return {'exitcode': 0, 'out-data': 'rdp_nla=off changed=1\n'}
+        if cmd[0] == 'powershell.exe' and '28752' in cmd[-1]:
+            return {'exitcode': fw['rc'], 'out-data': fw['out']}
+        return orig(cmd, stdin)
+    g._answer = answer
+    nla = lambda: sum(1 for d in g.execs() if d['command'][1:] == ['rdp-nla', 'off'])
+    scopes = lambda: [d['command'][-1] for d in g.execs() if d['command'][0] == 'powershell.exe' and '28752' in d['command'][-1]]
+    # the Windows firewall off: no scope, NLA stays on, the .rdp asks for the password as before
+    fw.update(out='rdp_fw=error firewall_off=Domain\n', rc=3)
+    assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is False and nla() == 0
+    fw.update(out='rdp_fw=scoped rules=2 remote=192.168.0.55\n', rc=0)
     assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is True
     assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is True
-    assert sum(1 for d in g.execs() if d['command'][1:] == ['rdp-nla', 'off']) == 1
-    assert sso['seed'].db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'vlab.logon.nla'").fetchone()[0] == 1
+    assert nla() == 1 and len(scopes()) == 2 and "@('192.168.0.55')" in scopes()[-1]
+    # the gateways change: scoped again before NLA
+    logon_ca.save_config(gateway_ips=['192.168.0.55', '192.168.0.56'])
+    assert vlab_logon.rdp_nla_off(desk, sso['mgr'], 'pve1') is True
+    assert "@('192.168.0.55','192.168.0.56')" in scopes()[-1]
+    acts = [r[0] for r in sso['seed'].db.conn.execute("SELECT details FROM audit_log WHERE action = 'vlab.logon.nla' ORDER BY id")]
+    assert len(acts) == 3 and 'NLA stays on' in acts[0] and 'only from 192.168.0.55' in acts[1]
