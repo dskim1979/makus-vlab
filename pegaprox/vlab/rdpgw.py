@@ -38,7 +38,8 @@ TOKEN_MINUTES = 5
 KEY_LENGTH = 32
 INTERNAL = ('rdpgw', 80)    # where the engine checks it answers (the compose network)
 
-# devices the .rdp hands to the desktop when the pool allows them (pegaprox/vlab/policy.py usb_redirect)
+# devices the .rdp hands to the desktop when the pool allows them: pegaprox/vlab/policy.py usb_rdp_lines
+# (USB 정책 - all, or only the chosen device setup classes); this is what a pool without a USB 정책 gets
 USB_LINES = ('usbdevicestoredirect:s:*', 'devicestoredirect:s:*')
 
 

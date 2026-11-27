@@ -935,12 +935,16 @@ def rdp_redirects(pol):
     whose own RDP host decides."""
     if pol is None:
         return ['redirectclipboard:i:1']
+    devices = pol.get('rdp_route') == 'devices' and pol['usb_redirect']
+    from pegaprox.vlab.policy import usb_blocked, usb_rdp_lines
+    # USB 정책 also holds back the PC's printers and drives when it blocks printers / storage
+    printers = pol['client_printers'] and not (devices and usb_blocked(pol, 'printer'))
+    drives = pol['client_drives'] and not (devices and usb_blocked(pol, 'storage'))
     lines = [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
-             f"redirectprinters:i:{1 if pol['client_printers'] else 0}",
-             f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
-    if pol.get('rdp_route') == 'devices' and pol['usb_redirect']:
-        from pegaprox.vlab.rdpgw import USB_LINES
-        lines += USB_LINES
+             f"redirectprinters:i:{1 if printers else 0}",
+             f"drivestoredirect:s:{'*' if drives else ''}", 'redirectcomports:i:0']
+    if devices:
+        lines += usb_rdp_lines(pol)
     return lines
 
 

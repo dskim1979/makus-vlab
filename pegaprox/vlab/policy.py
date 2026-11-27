@@ -10,6 +10,16 @@ takes effect:
                                SPICE leaves it to the guest agent
   usb_redirect, usb_autoshare  the .vv file (SPICE USB redirection); usb_redirect also the .rdp's USB and
                                plug-and-play devices on the devices route
+  usb_mode, usb_classes,       USB 정책: which devices go over (usb_redirect is the master switch).
+  usb_devices                  'deny' = all but the checked kinds and devices, 'allow' = only those.
+                               SPICE: the .vv's usb-filter (usbredir rules: class,vid,pid,version,allow).
+                               RDP (devices route): usbdevicestoredirect from device setup class GUIDs, and
+                               the high-level switches for smart cards, cameras, microphone, printers and
+                               drives (usb_rdp_lines). The .rdp key has no documented way to leave one class
+                               out of '*', so in deny mode RDP keeps '*' and only those high-level kinds
+                               are held back; allow mode lists the classes and is exact.
+                               Nothing is written inside the desktop (no DeviceInstall restrictions): they
+                               would also stop the TPM virtual smart card of 자동 로그인 and passthrough cards
   rdp_route                    the .rdp file's way to the desktop: 'record' = 보안 게이트웨이 (Warpgate:
                                recorded, no device channels), 'devices' = its device route (rdpgw: drives,
                                printers, USB as the switches here say, not recorded; pegaprox/vlab/rdpgw.py)
@@ -52,6 +62,23 @@ RESET_TYPES = ('reset', 'classroom')
 # pools whose desktops pass from one user to the next: the screen picture is off unless set
 SHARED_SCREEN_TYPES = ('reset', 'shared', 'classroom', 'buildfarm')
 RDP_ROUTES = ('record', 'devices')
+USB_MODES = ('deny', 'allow')
+# the kinds 'USB 정책' lists: USB interface class codes (SPICE usbredir) and device setup classes (RDP)
+USB_CLASSES = ('storage', 'printer', 'smartcard', 'camera', 'audio', 'imaging', 'serial', 'wireless')
+USB_CLASS_CODES = {'storage': (0x08,), 'printer': (0x07,), 'smartcard': (0x0b,), 'camera': (0x0e,),
+                   'audio': (0x01,), 'imaging': (0x06,), 'serial': (0x02, 0x0a), 'wireless': (0xe0,)}
+# Microsoft "System-Defined Device Setup Classes Available to Vendors" (ClassGuid)
+USB_CLASS_GUIDS = {
+    'storage': ('{4d36e967-e325-11ce-bfc1-08002be10318}', '{eec5ad98-8080-425f-922a-dabf3de3f69a}'),   # DiskDrive, WPD
+    'printer': ('{4d36e979-e325-11ce-bfc1-08002be10318}',),
+    'smartcard': ('{50dd5230-ba8a-11d1-bf5d-0000f805f530}',),       # SmartCardReader
+    'camera': ('{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}',),
+    'audio': ('{4d36e96c-e325-11ce-bfc1-08002be10318}',),           # Media
+    'imaging': ('{6bdd1fc6-810f-11d0-bec7-08002be2092f}',),         # Image
+    'serial': ('{4d36e978-e325-11ce-bfc1-08002be10318}',),          # Ports
+    'wireless': ('{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}',),        # Bluetooth
+}
+USB_DEVICES_MAX = 50
 
 DEFAULTS = {
     # RDP first (H.264 · UDP, the lightest on a WAN for office work), SPICE / VNC as the choice;
@@ -61,6 +88,9 @@ DEFAULTS = {
     'clipboard': 'both',
     'usb_redirect': True,
     'usb_autoshare': False,
+    'usb_mode': 'deny',         # USB 정책: deny = all but the checked, allow = only the checked
+    'usb_classes': [],
+    'usb_devices': [],          # [{'name', 'vid', 'pid'}] (4 hex digits each)
     'client_drives': False,
     'client_printers': True,
     'rdp_route': 'record',
@@ -116,6 +146,70 @@ def effective(settings, pool_type=None):
     return out
 
 
+def _usb_devices(v):
+    """([{'name', 'vid', 'pid'}], None) with vid/pid as 4 lower-case hex digits, or (None, error)."""
+    if not isinstance(v, list) or len(v) > USB_DEVICES_MAX:
+        return None, f'usb_devices: a list of at most {USB_DEVICES_MAX}'
+    out, seen = [], set()
+    for d in v:
+        if not isinstance(d, dict):
+            return None, 'usb_devices: each entry is {name, vid, pid}'
+        vid, pid = str(d.get('vid', '')).strip().lower(), str(d.get('pid', '')).strip().lower()
+        if any(len(x) != 4 or any(c not in '0123456789abcdef' for c in x) for x in (vid, pid)):
+            return None, 'usb_devices: vid and pid are 4 hex digits (e.g. 046d)'
+        if (vid, pid) in seen:
+            continue
+        seen.add((vid, pid))
+        out.append({'name': str(d.get('name') or '').strip()[:40], 'vid': vid, 'pid': pid})
+    return out, None
+
+
+def usb_blocked(pol, kind):
+    """True when the pool's USB 정책 keeps that kind of device on the user's PC."""
+    if not pol.get('usb_redirect'):
+        return True
+    chosen = kind in (pol.get('usb_classes') or [])
+    return chosen if pol.get('usb_mode', 'deny') == 'deny' else not chosen
+
+
+def usb_spice_filter(pol):
+    """The .vv's usb-filter (usbredir rules 'class,vid,pid,version,allow' joined by '|'); None when
+    the policy has nothing to filter (every device may go)."""
+    mode = pol.get('usb_mode', 'deny')
+    classes, devices = pol.get('usb_classes') or [], pol.get('usb_devices') or []
+    if mode == 'deny' and not classes and not devices:
+        return None
+    hit = 0 if mode == 'deny' else 1
+    rules = [f'-1,0x{d["vid"]},0x{d["pid"]},-1,{hit}' for d in devices]
+    rules += [f'0x{code:02x},-1,-1,-1,{hit}' for c in classes for code in USB_CLASS_CODES[c]]
+    rules.append(f'-1,-1,-1,-1,{1 - hit}')
+    return '|'.join(rules)
+
+
+def usb_rdp_lines(pol):
+    """The .rdp's device lines for the devices route (rdpgw or direct)."""
+    if not pol.get('usb_redirect'):
+        return []
+    mode = pol.get('usb_mode', 'deny')
+    if mode == 'allow':
+        picks = [g for c in USB_CLASSES if c in (pol.get('usb_classes') or []) for g in USB_CLASS_GUIDS[c]]
+        picks += [f"USB\\VID_{d['vid'].upper()}&PID_{d['pid'].upper()}" for d in pol.get('usb_devices') or []]
+        usb = ';'.join(picks)
+    else:
+        usb = '*'           # no documented way to leave one class out of '*': the switches below do it
+    lines = [f'usbdevicestoredirect:s:{usb}', f"devicestoredirect:s:{'' if usb_blocked(pol, 'storage') else '*'}"]
+    # the high-level kinds: deny mode only says no to the blocked ones (a pool without a USB 정책 keeps
+    # mstsc's own defaults); allow mode says yes or no to each
+    for kind, off, on in (('smartcard', 'redirectsmartcards:i:0', 'redirectsmartcards:i:1'),
+                          ('camera', 'camerastoredirect:s:', 'camerastoredirect:s:*'),
+                          ('audio', 'audiocapturemode:i:0', 'audiocapturemode:i:1')):
+        if usb_blocked(pol, kind):
+            lines.append(off)
+        elif mode == 'allow':
+            lines.append(on)
+    return lines
+
+
 def validate(data, pool_type):
     """(policy, None) or (None, error text). Unknown keys are refused; missing ones keep
     their defaults."""
@@ -152,6 +246,19 @@ def validate(data, pool_type):
             if v not in RDP_ROUTES:
                 return None, f"rdp_route must be one of {', '.join(RDP_ROUTES)}"
             out[k] = v
+        elif k == 'usb_mode':
+            if v not in USB_MODES:
+                return None, f"usb_mode must be one of {', '.join(USB_MODES)}"
+            out[k] = v
+        elif k == 'usb_classes':
+            if not isinstance(v, list) or any(x not in USB_CLASSES for x in v):
+                return None, f"usb_classes: a list of {', '.join(USB_CLASSES)}"
+            out[k] = [x for x in USB_CLASSES if x in v]
+        elif k == 'usb_devices':
+            devices, err = _usb_devices(v)
+            if err:
+                return None, err
+            out[k] = devices
         elif k == 'desktop_files':
             if v not in DESKTOP_FILES:
                 return None, f"desktop_files must be one of {', '.join(DESKTOP_FILES)}"
