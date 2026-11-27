@@ -116,11 +116,16 @@ def _side_ticks():
         from pegaprox.api.vlab_reclaim import reclaim_tick         # the 자원 회수 weekly summary, when on
         reclaim_tick()
 
+    def pool_ha():
+        from pegaprox.api.vlab_hadrs import ha_tick              # new desktops of 'HA 사용' pools go under HA
+        ha_tick()
+
     for name, on, fn in (('operations notices', True, ops),
                          ('LAB booking reminders', features.enabled('lab'), bookings),
                          ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
                          ('growth forecast', True, forecast),
-                         ('reclaim summary', True, reclaim)):
+                         ('reclaim summary', True, reclaim),
+                         ('pool HA', True, pool_ha)):
         if not on:
             continue
         try:

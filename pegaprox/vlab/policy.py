@@ -54,6 +54,10 @@ takes effect:
   auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
                                (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
                                bundled directory is in use
+  ha_enabled                   'HA 사용': new and cloned desktops go under Proxmox HA once ready
+                               (pegaprox/vlab/hadrs.py queue_new, ha_tick); existing ones only from
+                               클러스터 > 고가용성. On by default in dedicated pools only - a reset,
+                               classroom or shared desktop is simply handed out again elsewhere
 """
 
 # browser RDP is no protocol of its own: with 보안 게이트웨이 (Warpgate) on, an 'rdp' pool opens in the browser too
@@ -115,6 +119,7 @@ DEFAULTS = {
     'ssh_files': 'off',         # that terminal's file transfer (SFTP)
     'researcher_ssh': False,    # researchers' own SSH tools (PuTTY/scp/WinSCP/VS Code) through Warpgate
     'screen_thumbnail': True,   # the portal card shows the running desktop's screen
+    'ha_enabled': True,         # new desktops go under Proxmox HA (dedicated pools; defaults_for)
     'auto_domain_join': None,
     'desktop_files': 'off',     # the portal's 파일 panel: off / up (to the desktop) / down / both (pegaprox/api/vlab_desk_files.py)
     'desktop_files_max_mb': 500,   # largest single file
@@ -125,7 +130,7 @@ SUBJECT_TYPES = ('user', 'department', 'group')
 MAX_DEVICE_ROUTE_FOR = 200
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
-          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail')
+          'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail', 'ha_enabled')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080), 'desktop_files_max_mb': (1, 10240), 'desktop_files_day_mb': (0, 1048576)}
@@ -136,6 +141,8 @@ def defaults_for(pool_type=None):
     out = dict(DEFAULTS)
     if pool_type in SHARED_SCREEN_TYPES:
         out['screen_thumbnail'] = False
+    if pool_type is not None and pool_type != 'dedicated':
+        out['ha_enabled'] = False
     return out
 
 
@@ -229,6 +236,7 @@ def validate(data, pool_type):
     out = dict(DEFAULTS)
     # not filled in: a pool that never set it keeps its type's default (defaults_for)
     out.pop('screen_thumbnail')
+    out.pop('ha_enabled')
     for k, v in data.items():
         if k == 'protocols':
             if not isinstance(v, list) or not v or any(p not in PROTOCOLS for p in v):
