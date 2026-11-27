@@ -11,6 +11,9 @@
 // before it is handed to LogonUI, key and certificate removed when Windows reports the result.
 // Any failure falls back to the normal sign-in screen.
 #include "common.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <initguid.h>
 #include <credentialprovider.h>
 #include <shlguid.h>
@@ -28,10 +31,8 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
-#ifndef AF_INET
-#define AF_INET 2
-#endif
 
 using namespace moavi;
 
@@ -58,6 +59,69 @@ struct KERB_SMARTCARD_CSP_INFO_ {
 #pragma pack(pop)
 
 enum { FI_LABEL = 0, FI_STATUS = 1, FI_COUNT = 2 };
+
+// --- who is connected to the RDP listener ------------------------------------------------------
+
+static DWORD RdpPort() {
+    DWORD port = 3389, sz = sizeof(port);
+    RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp",
+                 L"PortNumber", RRF_RT_REG_DWORD, nullptr, &port, &sz);
+    return port ? port : 3389;
+}
+
+static std::wstring Ip4(DWORD addr) {     // network byte order
+    wchar_t ip[32];
+    const BYTE* b = (const BYTE*)&addr;
+    swprintf_s(ip, L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    return ip;
+}
+
+static bool InList(const std::wstring& list, const std::wstring& item);
+
+// True when there is at least one established TCP connection on the RDP port and every one of
+// them comes from a gateway address. peers / bad: the addresses seen (for the log).
+static bool RdpPeers(const std::wstring& gateways, std::wstring& peers, std::wstring& bad) {
+    DWORD port = RdpPort();
+    ULONG size = 0;
+    GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_BASIC_CONNECTIONS, 0);
+    std::vector<BYTE> buf(size + 4096);
+    size = (ULONG)buf.size();
+    if (GetExtendedTcpTable(buf.data(), &size, FALSE, AF_INET, TCP_TABLE_BASIC_CONNECTIONS, 0) != NO_ERROR) {
+        bad = L"tcp table";
+        return false;
+    }
+    MIB_TCPTABLE* t = (MIB_TCPTABLE*)buf.data();
+    int n = 0;
+    for (DWORD i = 0; i < t->dwNumEntries; i++) {
+        const MIB_TCPROW& r = t->table[i];
+        DWORD lp = ((r.dwLocalPort & 0xff) << 8) | ((r.dwLocalPort >> 8) & 0xff);
+        if (r.dwState != MIB_TCP_STATE_ESTAB || lp != port) continue;
+        std::wstring ip = Ip4(r.dwRemoteAddr);
+        if (!peers.empty()) peers += L",";
+        peers += ip;
+        n++;
+        if (!InList(gateways, ip)) { if (!bad.empty()) bad += L","; bad += ip; }
+    }
+    // IPv6 connections on the RDP port are never from a gateway here
+    size = 0;
+    GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET6, TCP_TABLE_BASIC_CONNECTIONS, 0);
+    if (size) {
+        std::vector<BYTE> b6(size + 4096);
+        size = (ULONG)b6.size();
+        if (GetExtendedTcpTable(b6.data(), &size, FALSE, AF_INET6, TCP_TABLE_BASIC_CONNECTIONS, 0) == NO_ERROR) {
+            MIB_TCP6TABLE* t6 = (MIB_TCP6TABLE*)b6.data();
+            for (DWORD i = 0; i < t6->dwNumEntries; i++) {
+                const MIB_TCP6ROW& r = t6->table[i];
+                DWORD lp = ((r.dwLocalPort & 0xff) << 8) | ((r.dwLocalPort >> 8) & 0xff);
+                if (r.State != MIB_TCP_STATE_ESTAB || lp != port) continue;
+                if (!bad.empty()) bad += L",";
+                bad += L"ipv6";
+                n++;
+            }
+        }
+    }
+    return n > 0 && bad.empty();
+}
 
 // --- the pending logon ------------------------------------------------------------------------
 
@@ -98,8 +162,15 @@ static bool PendingForSession(KV& st, std::wstring& why) {
     if (!ReadKV(PendingPath(), st)) { why = L"nothing armed"; return false; }
     if (st[L"state"] != L"armed") { why = L"state " + st[L"state"]; return false; }
     if (_wtoi64(st[L"not_after"].c_str()) <= UnixNow()) { why = L"expired"; return false; }
-    std::wstring client = SessionClientAddress();
-    if (!InList(st[L"gateways"], client)) { why = L"client " + (client.empty() ? L"?" : client) + L" is not a gateway"; return false; }
+    // The gateway check uses the TCP peers of the RDP listener, not WTSClientAddress: that one is what
+    // the RDP client says about itself (Warpgate reports its container address there) and can be
+    // anything. Every established connection on the RDP port must come from a gateway.
+    std::wstring peers, bad;
+    if (!RdpPeers(st[L"gateways"], peers, bad)) {
+        why = L"rdp peers [" + peers + L"] not all gateways (" + (bad.empty() ? L"none" : bad) + L"), client says " +
+              SessionClientAddress();
+        return false;
+    }
     return true;
 }
 
