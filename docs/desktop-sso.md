@@ -1,5 +1,23 @@
 # 데스크톱 SSO (비밀번호 없는 Windows 로그온) — Windows 모듈 개발 문서
 
+> **실장비 결과 (2026-11-27, .55 / VM 119 Server 2022 + Samba 4.17) — 지금 결론: VM 안의 키로는 RDP SSO가 안 된다.**
+>
+> | 시도 | 결과 |
+> |---|---|
+> | 인증서 해시(`USE_CERTIFICATE_INFO`) | 항상 `STATUS_INVALID_PARAMETER` |
+> | CSP 정보 + Software KSP 키(머신/SYSTEM) | `0xc0000384` NO_KEY_CONTAINER |
+> | CSP 정보 + CAPI(Enhanced AES) 키 | `0xc0000321` SMARTCARD_SUBSYSTEM_FAILURE |
+> | 자체 KSP(moavi-logon-ksp.dll) | LSASS가 아예 부르지 않음(카드 경로는 리더→카드→컨테이너) |
+> | **TPM 가상 스마트카드(1.2.x)** — LsaLogonUser 직접(selftest, 세션 0) | **성공**(4624 MOAVI\test) |
+> | TPM 가상 스마트카드 — 실제 RDP 로그온(LogonType 10) | `0xc0000321`, "스마트 카드 리소스 관리자가 실행되고 있지 않습니다", LSASS가 카드에 접근 안 함. 스마트카드 리디렉션 끔(`fEnableSmartCard=0`) + 재부팅 후도 같음 |
+>
+> 이유: RDP 세션의 로그온은 **클라이언트가 RDP 스마트카드 채널(MS-RDPESC)로 내주는 카드만** 쓴다. Warpgate는
+> 그 채널을 내주지 않는다. → 남은 길은 **게이트웨이(Warpgate, IronRDP 클라이언트)가 RDP 스마트카드 채널로 가상
+> 카드를 내주는 것**(Teleport Desktop Access와 같은 구조: 게이트웨이가 세션마다 키를 만들고 엔진이 짧은 인증서를
+> 발급, 카드는 PIV 에뮬레이션). 이 저장소의 엔진 발급(`logon_ca`), CP(세션 바인딩·자동 제출, `mode=vsc`일 때
+> reader/card/container/PIN을 CSP 정보로)와 CA 신뢰 설치는 그대로 쓴다. VM 안 TPM 카드 방식(설치 시 vTPM 필요)은
+> 콘솔 로그온에서만 유효.
+>
 > **구현 상태 (2026-11-27, 브랜치 claude/moavi-logon)** — 아래 원래 규격(§1~§7)에서 바뀐 점:
 >
 > - **자체 KSP·상주 서비스 없음.** 키는 VM 안 **Microsoft Software KSP**의 머신 키(SYSTEM 전용 ACL,
