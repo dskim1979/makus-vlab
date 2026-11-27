@@ -125,15 +125,21 @@ static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope
         KV vsc;
         if (!ReadVsc(vsc)) { err = "no virtual smart card (vsc.txt)"; return false; }
         std::wstring full = VscContainer(vsc, keyName), pin = vsc[L"pin"];
+        const char* step = "open provider";
         SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_SMART_CARD_KEY_STORAGE_PROVIDER, 0);
-        if (ss == ERROR_SUCCESS)
+        if (ss == ERROR_SUCCESS) {
+            // the card PIN on the provider too: the card is opened before the key exists
+            NCryptSetProperty(prov, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG);
+            step = "create";
             ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, full.c_str(), AT_KEYEXCHANGE, 0);
+        }
         DWORD bits = 2048;
-        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG);
-        if (ss == ERROR_SUCCESS) ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0);
-        if (ss == ERROR_SUCCESS) ss = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG);
+        if (ss == ERROR_SUCCESS) { step = "pin"; ss = NCryptSetProperty(key, NCRYPT_PIN_PROPERTY, (PBYTE)pin.c_str(), (DWORD)((pin.size() + 1) * sizeof(wchar_t)), NCRYPT_SILENT_FLAG); }
+        if (ss == ERROR_SUCCESS) { step = "length"; ss = NCryptSetProperty(key, NCRYPT_LENGTH_PROPERTY, (BYTE*)&bits, sizeof(bits), 0); }
+        if (ss == ERROR_SUCCESS) { step = "finalize"; ss = NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG); }
         if (ss != ERROR_SUCCESS) {
-            sprintf_s(m, "card key 0x%08lx", (unsigned long)ss); err = m;
+            char m2[96];
+            sprintf_s(m2, "card key %s 0x%08lx", step, (unsigned long)ss); err = m2;
             if (key) NCryptFreeObject(key);
             if (prov) NCryptFreeObject(prov);
             return false;
@@ -210,7 +216,8 @@ static int Prepare() {
     BYTE rnd[16];
     if (BCryptGenRandom(nullptr, rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) { Out("error=rng\n"); return 4; }
     std::wstring nonce = Hex(rnd, sizeof(rnd));
-    std::wstring keyName = std::wstring(MOAVI_KEY_PREFIX) + nonce;
+    // a smart card container name has 39 characters at most: "MOAVI-Logon-" + 16 hex = 28
+    std::wstring keyName = std::wstring(MOAVI_KEY_PREFIX) + nonce.substr(0, 16);
     KV opt;
     ReadKV(DataDir() + L"\\cp-options.txt", opt);
     std::wstring scope = opt[L"keyscope"] == L"machine" ? L"machine" : L"user";
@@ -225,6 +232,7 @@ static int Prepare() {
     std::vector<BYTE> csr;
     std::string err;
     if (!MakeKeyAndCsr(keyprov, scope, keyName, csr, err)) {
+        Log(L"prepare: %s key failed: %s", keyprov.c_str(), Utf8ToW(err).c_str());
         Out("error=" + err + "\n");
         RemoveKeyAndCert(keyName, L"");
         return 4;
