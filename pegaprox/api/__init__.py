@@ -59,6 +59,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_support import bp as vlab_support_bp  # MOAVI Desk: 서포트 번들 (기간 지정)
     from pegaprox.api.vlab_accel import bp as vlab_accel_bp  # MOAVI Desk: 가속 카드 · 패스스루 점검
     from pegaprox.api.vlab_env import bp as vlab_env_bp  # MOAVI Desk: 환경 카탈로그 · NVIDIA MIG
+    from pegaprox.api.vlab_desktpl import bp as vlab_desktpl_bp  # MOAVI Desk: 템플릿 만들기 (일반 · 연구원 · GPU · NPU · FPGA)
     from pegaprox.api.vlab_enroll import bp as vlab_enroll_bp  # MOAVI Desk: LAB 단말 대량 등록 (등록 코드)
     from pegaprox.api.vlab_reserve import bp as vlab_reserve_bp  # MOAVI Desk: LAB 예약
     from pegaprox.api.vlab_license import bp as vlab_license_bp  # MOAVI Desk: 라이선스 사용량 · 보고서
@@ -70,9 +71,14 @@ def register_blueprints(app):
     from pegaprox.api.vlab_features import bp as vlab_features_bp  # MOAVI Desk: 사이트 프로필 · 기능 묶음
     from pegaprox.api.vlab_ops_notices import bp as vlab_ops_notices_bp  # MOAVI Desk: 운영 알림(관리자)
     from pegaprox.api.vlab_builds import bp as vlab_builds_bp  # MOAVI Desk: 빌드 결과물 · CI 연동
+    from pegaprox.api.vlab_mcp import bp as vlab_mcp_bp  # MOAVI Desk: 관리자용 MCP 서버
     from pegaprox.api.vlab_accel_book import bp as vlab_accel_book_bp  # MOAVI Desk: 카드 · 보드 예약
     from pegaprox.api.vlab_forecast import bp as vlab_forecast_bp  # MOAVI Desk: 증설 예측
+    from pegaprox.api.vlab_directory import bp as vlab_directory_bp  # MOAVI Desk: 내장 디렉터리 (Samba AD DC) · 도메인 가입
+    from pegaprox.api.vlab_adobjects import bp as vlab_adobjects_bp  # MOAVI Desk: AD 디렉터리 (사용자 · 그룹 · OU)
     from pegaprox.api.vlab_next import bp as vlab_next_bp  # MOAVI Desk: 부서·가입 심사·USB·게이트웨이·골든 이미지·보드 LAB·빌드 팜·라이선스 서버
+    from pegaprox.api.vlab_warpgate import bp as vlab_warpgate_bp  # MOAVI Desk: Warpgate 접근 게이트웨이(bastion)
+    from pegaprox.api.vlab_desk_files import bp as vlab_desk_files_bp  # MOAVI Desk: 포털 파일 (게스트 에이전트로 내 데스크톱에 파일)
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -127,6 +133,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_support_bp)
     app.register_blueprint(vlab_accel_bp)
     app.register_blueprint(vlab_env_bp)
+    app.register_blueprint(vlab_desktpl_bp)
     app.register_blueprint(vlab_enroll_bp)
     app.register_blueprint(vlab_reserve_bp)
     app.register_blueprint(vlab_license_bp)
@@ -138,8 +145,13 @@ def register_blueprints(app):
     app.register_blueprint(vlab_features_bp)
     app.register_blueprint(vlab_ops_notices_bp)
     app.register_blueprint(vlab_builds_bp)
+    app.register_blueprint(vlab_mcp_bp)
     app.register_blueprint(vlab_accel_book_bp)
     app.register_blueprint(vlab_forecast_bp)
+    app.register_blueprint(vlab_warpgate_bp)
+    app.register_blueprint(vlab_directory_bp)
+    app.register_blueprint(vlab_adobjects_bp)
+    app.register_blueprint(vlab_desk_files_bp)
     from pegaprox.api.vlab_accounts import attach_terms_gate
     attach_terms_gate(app)   # after every vlab blueprint is registered
 

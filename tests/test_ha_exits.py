@@ -337,6 +337,15 @@ EXITS = {
     ('pegaprox/api/pbs.py', 'probe_pbs_fingerprint', 'socket'): (1, 'read'),
     # MOAVI Desk: the gateway and licence-server port checks (an admin's request, no cluster)
     ('pegaprox/api/vlab_next.py', '_tcp_probe', 'socket'): (1, 'read'),
+    # MOAVI Desk: a desktop's RDP/SSH/VNC port probe on connect (a user's request, no cluster write)
+    ('pegaprox/api/vlab_next.py', 'rdp_listening', 'socket'): (1, 'read'),
+    # MOAVI Desk: the Warpgate bastion admin API (an external gateway service, not a cluster/node/BMC)
+    ('pegaprox/vlab/warpgate.py', '_api', 'http-direct'): (1, 'external'),
+    # ... the first-start login that mints its API token, and the ssh-keyscan of a desktop (host key
+    # only, no login) that goes into Warpgate's known hosts
+    ('pegaprox/vlab/warpgate.py', '_mint_api_token', 'http-session'): (1, 'external'),
+    ('pegaprox/vlab/warpgate.py', 'scan_host_keys', 'socket'): (1, 'read'),
+    ('pegaprox/vlab/warpgate.py', 'scan_host_keys', 'ssh-paramiko'): (1, 'read'),
     ('pegaprox/api/pbs.py', 'auto_attach_pbs_to_clusters', 'socket'): (1, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'socket'): (2, 'read'),
     ('pegaprox/api/pbs.py', 'storage_preflight', 'http-session'): (1, 'login'),
@@ -515,8 +524,10 @@ def test_the_inventory_counts_what_the_report_says():
     # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
     # (+1 since: the licence seats' lmstat, an external read)
-    assert sum(n for n, _v in EXITS.values()) == 260 and len(EXITS) == 155
-    assert len({(f, q) for f, q, _k in EXITS}) == 141
+    # (+2 since: the Warpgate bastion admin API, an external http; the desktop RDP/SSH/VNC
+    #  port probe on connect, a socket read)
+    assert sum(n for n, _v in EXITS.values()) == 265 and len(EXITS) == 160
+    assert len({(f, q) for f, q, _k in EXITS}) == 145
     assert by['guard'] == 46 and by['client'] == 85
 
 
@@ -708,6 +719,15 @@ AUTOMATIONS = {
     ('pegaprox/api/clusters.py', 'update_ha_config'): (2, 'job'),
     # MOAVI Desk: loan returns and the pool policies' idle shutdown / session limit, once a minute
     ('pegaprox/vlab/loans.py', 'start_loan_thread'): (1, 'confirm'),
+    # MOAVI Desk: Warpgate first-start connect and the removal of a gone desktop's targets
+    # (the Warpgate admin API and the DB only, no cluster)
+    ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
+    ('pegaprox/vlab/warpgate.py', 'forget_desktop'): (1, 'read'),
+    ('pegaprox/vlab/warpgate.py', 'resync_targets'): (1, 'read'),
+    # MOAVI Desk: the portal card's screen picture refreshed off the request (a screendump, read only)
+    ('pegaprox/api/vms.py', '_grab_in_background'): (1, 'read'),
+    # MOAVI Desk: new, cloned and reset desktops join the bundled directory by themselves
+    ('pegaprox/api/vlab_directory.py', 'start_autojoin_thread'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),
@@ -967,6 +987,8 @@ CONFIRM_SITES = [
     # a clean-up put off while the desktop was working runs later; an idle loaned card goes back
     ('pegaprox/api/vlab_work.py', 'deferral_tick', ['vm_action', '_reset_one']),
     ('pegaprox/api/vlab_work.py', 'reclaim_tick', ['return_lease']),
+    # the automatic domain join of a desktop (guest agent: Add-Computer / realm join)
+    ('pegaprox/api/vlab_directory.py', 'autojoin_round', ['join_desktop']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_recovery_worker',
      ['_ha_ssh_stop_vms_on_node', '_ha_write_poison_pill', '_ha_fence_outside', '_ha_fence_node']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_start_vm_on_node',

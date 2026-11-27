@@ -323,9 +323,11 @@ SYNC_TABLES = (
     'vlab_labs', 'vlab_terminals', 'vlab_lab_schedules',
     # and their bookings with the booking rules (pegaprox/vlab/reservations.py)
     'vlab_reservations', 'vlab_reservation_settings',
-    'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
+    'vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices',
     'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
     'vlab_desktop_versions', 'vlab_build_jobs',
+    # JTAG gateway VMs of the board lab: cables passed through, the last cable read and health (vlab_next.py)
+    'vlab_jtag_gateways',
     # the environment of each golden image: components, cards, history (pegaprox/vlab/envcat.py)
     'vlab_golden_env',
     # MOAVI Desk shared storage (pegaprox/vlab/nas.py): the pool's NAS and the last mount per desktop and user
@@ -344,8 +346,19 @@ SYNC_TABLES = (
     'vlab_notice_prefs', 'vlab_notice_sent',
     # CI connections to the build farm (pegaprox/vlab/ci.py) and card / board bookings (pegaprox/vlab/accel_bookings.py)
     'vlab_ci_links', 'vlab_accel_bookings',
+    # the MCP server's tokens, kept as hashes (pegaprox/vlab/mcp.py)
+    'vlab_mcp_tokens',
     # the daily capacity numbers the growth forecast reads (pegaprox/vlab/forecast.py)
     'vlab_capacity_daily',
+    # Warpgate bastion config (1 row, sealed admin token) and desktop->target map (pegaprox/vlab/warpgate.py)
+    'vlab_warpgate', 'vlab_warpgate_targets', 'vlab_warpgate_state', 'vlab_warpgate_nla',
+    # the portal 파일 panel's transfers (per-day limit, audit) (pegaprox/api/vlab_desk_files.py)
+    'vlab_desktop_file_log',
+    # the signing key Warpgate checks MOAVI Desk sign-ins with (sealed; pegaprox/vlab/wg_oidc.py)
+    'vlab_wg_oidc',
+    # the bundled directory (pegaprox/vlab/directory.py): the engine's sealed accounts, the last
+    # push of each portal account, the domain join of each desktop
+    'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -367,6 +380,8 @@ LOCAL_TABLES = (
     'vlab_data_uploads', 'vlab_data_hashes',
     # MOAVI Desk: GPU / NPU use this instance read from the card desktops every few minutes
     'vlab_accel_samples',
+    # desktop template builds this instance runs in its own thread (pegaprox/api/vlab_desktpl.py)
+    'vlab_desktpl_builds',
 )
 
 # server_settings keys that describe this host, not the deployment
@@ -414,6 +429,10 @@ ENCRYPTED_COLUMNS = {
     'auto_install_profiles': ('answer_encrypted',),
     'vlab_pool_storage': ('password_encrypted',),
     'vlab_ide_sessions': ('token_encrypted',),
+    'vlab_warpgate': ('admin_token_encrypted', 'rdp_nla_password_encrypted'),
+    'vlab_wg_oidc': ('private_key_encrypted',),
+    'vlab_warpgate_nla': ('password_encrypted',),
+    'vlab_directory_secrets': ('secret_encrypted',),
 }
 SECRET_SETTING_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret')
 

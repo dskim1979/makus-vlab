@@ -198,10 +198,19 @@ def create_app():
             # Both of these are gated by the installation token instead.
             '/api/auto-install/answer',
             '/api/auto-install/progress',
+            # MOAVI Desk - Warpgate's server-side calls to the sign-in provider (pegaprox/vlab/wg_oidc.py):
+            # no session to protect; the client secret / the bearer token is the gate
+            '/api/vlab/oidc/token',
+            '/api/vlab/oidc/userinfo',
+            # MOAVI Desk - the MCP server (pegaprox/api/vlab_mcp.py) takes a bearer mcp_ token only, never
+            # the session cookie, so there is no session to protect; AI clients send no Origin
+            '/api/vlab/mcp',
         )
         if (request.method in ('POST', 'PUT', 'PATCH', 'DELETE')
                 and request.path.startswith('/api/')
-                and request.path not in _CSRF_EXEMPT):
+                and request.path not in _CSRF_EXEMPT
+                # MOAVI Desk - a desktop handing a 파일 part to its one-time URL: no session, the token is the gate
+                and not request.path.startswith('/api/vlab/desk-files/')):
             # NS Jul 2026 (CodeAnt CSRF) — the CSRF check must run for EVERY state-changing
             # non-exempt /api/* request, not only JSON/form bodies: a cross-site form with
             # enctype=text/plain is a browser "simple request" that previously skipped this gate.
@@ -1666,12 +1675,29 @@ def main(debug_mode=False):
     from pegaprox.vlab.loans import start_loan_thread
     start_loan_thread()
 
-    # MOAVI Desk - the Guacamole bundled with the compose install becomes a gateway by itself
+    # MOAVI Desk - the gateway catalog (Guacamole, RD gateways) is gone: drop it once (pegaprox/vlab/catalog.py)
     try:
-        from pegaprox.vlab.catalog import sync_builtin_guacamole
-        sync_builtin_guacamole()
+        from pegaprox.vlab.catalog import retire_gateways
+        retire_gateways()
     except Exception as e:
-        print(f"Built-in Guacamole gateway not set up: {e}")
+        print(f"Gateway catalog not retired: {e}")
+
+    # MOAVI Desk - the bundled Warpgate connects itself at first start (VLAB_WARPGATE=1, nothing configured yet)
+    try:
+        from pegaprox.vlab.warpgate import start_auto_connect
+        start_auto_connect()
+    except Exception as e:
+        print(f"Warpgate auto-connect not started: {e}")
+
+    # MOAVI Desk - the bundled directory (VLAB_DIRECTORY=1): its service account, and sign-in on it
+    try:
+        from pegaprox.vlab.directory import sync_builtin as sync_builtin_directory
+        sync_builtin_directory()
+        # desktops of pools with auto_domain_join join by themselves (pegaprox/api/vlab_directory.py)
+        from pegaprox.api.vlab_directory import start_autojoin_thread
+        start_autojoin_thread()
+    except Exception as e:
+        print(f"Bundled directory not set up: {e}")
 
     start_cross_cluster_lb_thread()
     print("Started cross-cluster load balancer thread")

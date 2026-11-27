@@ -203,6 +203,11 @@ def grab_frame(ws, vnc_ticket, timeout=8.0):
             raise IOError('unexpected server message type %d' % msg_type)
 
 
+class BlankFrame(IOError):
+    """The display is there but black: switched off, DPMS asleep, or a screen saver. The
+    portal card says 화면 꺼짐 for it instead of drawing the OS. MK Oct 2026"""
+
+
 def to_png_thumbnail(img, max_width=480):
     """Downscale to a tile-sized PNG. Keeps aspect ratio."""
     from PIL import Image
@@ -252,5 +257,5 @@ def screendump_to_png(pve_mgr, node, vmid, max_width=480, timeout=20):
     # have pixels well above this.)
     ex = img.getextrema()  # ((rmin,rmax),(gmin,gmax),(bmin,bmax))
     if max(hi for _lo, hi in ex) <= 10:
-        raise IOError("blank framebuffer (display likely off)")
+        raise BlankFrame("blank framebuffer (display likely off)")
     return to_png_thumbnail(img, max_width=max_width)

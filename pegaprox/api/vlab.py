@@ -14,6 +14,7 @@ vLAB API (MAKUS) - the only API the vLAB console uses besides /api/auth/*.
   POST   /api/vlab/desktops/<desktop_id>/connect      {protocol: vnc|spice} -> how to connect  vlab.desk
   POST   /api/vlab/sessions/<session_id>/end          close the caller's own session        vlab.desk
   POST   /api/vlab/desktops/<desktop_id>/power        {action: start|shutdown|reboot|stop}  vlab.desk
+  GET    /api/vlab/desktops/<desktop_id>/screenshot   PNG of the running desktop's screen, 204 when none  assigned user / vlab.pool.view
   GET    /api/vlab/admin/audit                        audit log (?q=&user=&date_from=&date_to=&vlab_only=&offset=&limit=)  admin role
   GET    /api/vlab/admin/summary                      counts for the dashboard / system summary  vlab.pool.view
   GET    /api/vlab/admin/sessions                     session log (?username=&pool_id=&limit=)  vlab.report.view
@@ -115,9 +116,10 @@ able to reach that cluster (tenant scope) to see or change it. docs/vlab-design.
 import json
 from datetime import datetime
 import re
+import time
 import logging
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from pegaprox.api.helpers import acting_user, check_cluster_access
 from pegaprox.core import ha
@@ -142,6 +144,39 @@ def _user():
 
 def _bad(msg, code=400):
     return jsonify({'error': msg}), code
+
+
+# who is signed in on a desktop, from its guest agent (get-users); kept a few seconds so the portal's
+# 10-second refresh of a user's desktops costs one agent call per running desktop at most
+_SIGNED_IN_TTL = 8
+_signed_in_cache = {}
+
+
+def _signed_in(desk, vm):
+    """[{'user', 'domain', 'login_time'}] of the people signed in on a running desktop - the console
+    session and RDP alike - or None when it cannot be told (not running, LXC, no guest agent)."""
+    if not vm or vm.get('status') != 'running' or desk.get('vm_type', 'qemu') != 'qemu':
+        return None
+    key = (desk['cluster_id'], int(desk['vmid']))
+    hit = _signed_in_cache.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _SIGNED_IN_TTL:
+        return hit[1]
+    users = None
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if mgr is not None:
+        node = vm.get('node') or desk['node']
+        try:
+            resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{int(desk['vmid'])}/agent/get-users",
+                                timeout=3)
+            if getattr(resp, 'status_code', 0) == 200:
+                got = (resp.json().get('data') or {}).get('result') or []
+                users = [{'user': u.get('user'), 'domain': u.get('domain'), 'login_time': u.get('login-time')}
+                         for u in got if isinstance(u, dict) and u.get('user')]
+        except Exception as e:
+            logging.debug(f"[VLAB] signed-in users of {desk['vmid']}: {e}")
+    _signed_in_cache[key] = (now, users)
+    return users
 
 
 def _vm_states(cluster_id):
@@ -202,6 +237,9 @@ def _desktop_view(d, live):
         _auto_base(d, vm)
     if state not in ('provisioning', 'resetting', 'error') and vm is not None:
         state = 'ready' if vm.get('status') == 'running' else 'stopped'
+    elif state != 'provisioning' and vm is None and live:
+        # the cluster answered and the guest is not on it: deleted outside the console
+        state = 'missing'
     settings = d.get('pool_settings')   # JSON text from the join, or the pool's parsed settings
     if isinstance(settings, str):
         try:
@@ -323,13 +361,17 @@ def my_desktops():
     pools = {}
     out = []
     for d in rows:
-        v = _desktop_view(d, live.get(d['cluster_id'], {}))
+        vms = live.get(d['cluster_id'], {})
+        v = _desktop_view(d, vms)
         v['work'] = work.get(d['id'])
+        # 로그인됨: who is on it right now (the card shows this instead of a dark console picture)
+        v['signed_in'] = _signed_in(d, vms.get(int(d['vmid'])))
         v['pool_type'] = d.get('pool_type', '')
         v['last_connected'] = last.get(d['id'])
-        pol = pool_policy.effective(_settings_of(d))
+        pol = pool_policy.effective(_settings_of(d), d.get('pool_type'))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
-                       'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide']}
+                       'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide'],
+                       'screen_thumbnail': pol['screen_thumbnail'], 'desktop_files': pol['desktop_files']}
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:
@@ -337,6 +379,9 @@ def my_desktops():
             v['storage'] = dict(paths, ok=got['ok'] if got else None, code=got['code'] if got else '',
                                 warnings=got['warnings'] if got else [])
         out.append(v)
+    from pegaprox.api.ha import standby_console_refusal
+    if standby_console_refusal() is None:
+        warm_screens(rows, live)
     return jsonify({'desktops': out})
 
 
@@ -375,6 +420,11 @@ def _vv_file(data, pol=None):
         data = dict(data)
         data['enable-usbredir'] = 1 if pol['usb_redirect'] else 0
         data['enable-usb-autoshare'] = 1 if pol['usb_redirect'] and pol['usb_autoshare'] else 0
+        # USB 정책: which devices may go over (usbredir rules; remote-viewer's usb-filter)
+        from pegaprox.vlab.policy import usb_spice_filter
+        usb_filter = usb_spice_filter(pol) if pol['usb_redirect'] else None
+        if usb_filter:
+            data['usb-filter'] = usb_filter
         data['delete-this-file'] = 1
         if pol['spice_fullscreen']:
             data['fullscreen'] = 1
@@ -442,7 +492,7 @@ def connect_desktop(desktop_id):
         return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
     node, vmid, vm_type = vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type']
 
-    if protocol in ('rdp', 'guac'):
+    if protocol == 'rdp':
         from pegaprox.api.vlab_next import desktop_rdp_answer
         answer, err = desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool)
         if err:
@@ -537,6 +587,85 @@ def power_desktop(desktop_id):
     return jsonify({'success': True, 'action': action, 'task': result.get('data') or result.get('upid')})
 
 
+@bp.route('/api/vlab/desktops/<desktop_id>/screenshot', methods=['GET'])
+@require_auth()
+def desktop_screenshot(desktop_id):
+    """The portal card's picture of a running desktop: the console tile's grab (screendump, one
+    shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache.
+    The assigned user (vlab.desk) or an admin with vlab.pool.view; in a pool whose desktops pass
+    between users only the user on it now (assigned or in a session). 204 when there is no picture
+    (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo;
+    with X-Screen: off the display is there but black and the card says so.
+    It is the VM's console, so a Windows desktop used over RDP shows its lock screen."""
+    from pegaprox.api.ha import standby_console_refusal
+    from pegaprox.api.vms import cached_vm_frame
+    from pegaprox.utils.auth import resolve_authz_user
+    from pegaprox.utils.rbac import has_permission
+
+    user = resolve_authz_user(request.session)
+    desk = store.get_desktop(desktop_id)
+    if not user or not desk or not _can_reach(desk['cluster_id']):
+        return _bad('Desktop not found', 404)
+    pool = store.get_pool(desk['pool_id']) or {}
+    shared = pool.get('type') in pool_policy.SHARED_SCREEN_TYPES
+    me = _user()
+    mine = has_permission(user, 'vlab.desk') and (desk['assigned_user'] == me or (shared and any(
+        s['desktop_id'] == desk['id'] and s['username'] == me for s in store.open_sessions())))
+    # where desktops pass between users only the one on it now sees it - not an admin either
+    if not mine and (shared or not has_permission(user, 'vlab.pool.view')):
+        return _bad('Desktop not found', 404)
+    none = ('', 204)
+    if desk['vm_type'] != 'qemu' or standby_console_refusal():
+        return none
+    if not pool_policy.effective(pool.get('settings'), pool.get('type'))['screen_thumbnail']:
+        return none
+    mgr = cluster_managers.get(desk['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False) or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return none
+    vm = _vm_states(desk['cluster_id']).get(int(desk['vmid']))
+    if not vm or vm.get('status') != 'running':
+        return none
+    started = time.monotonic()
+    png, state = cached_vm_frame(mgr, desk['cluster_id'], vm.get('node') or desk['node'], 'qemu', int(desk['vmid']),
+                                 **SHOT_OPTS)
+    timing = f"grab;desc={state};dur={int((time.monotonic() - started) * 1000)}"
+    if png is None:
+        # the display is there but black: the card says 화면 꺼짐 instead of drawing the OS
+        return '', 204, ({'X-Screen': 'off', 'Server-Timing': timing} if state == 'off' else {'Server-Timing': timing})
+    resp = current_app.response_class(png, mimetype='image/png')
+    resp.headers['Cache-Control'] = f"private, max-age={int(SHOT_OPTS['ttl'])}"
+    resp.headers['X-Screenshot-Cache'] = state
+    resp.headers['Server-Timing'] = timing
+    return resp
+
+
+# The portal card's grab (api/vms.py cached_vm_frame): a picture is fresh for 20 s, a failure
+# is retried after 15 s (a desktop that just started shows up within one card refresh), an
+# older picture is answered at once while a new one is taken, and the two grabs get short
+# timeouts - a card that waits half a minute is worse than one that keeps its drawing.
+SHOT_OPTS = {'ttl': 20.0, 'fail_ttl': 15.0, 'stale': True, 'timeouts': (8, 6)}
+
+
+def warm_screens(desks, live):
+    """Start the grabs of the caller's running desktops in the background while the portal
+    lists them, so the cards' first look finds a picture (or the grab already under way)."""
+    from pegaprox.api.vms import cached_vm_frame
+    for d in desks:
+        if d.get('vm_type') != 'qemu':
+            continue
+        vm = (live.get(d['cluster_id']) or {}).get(int(d['vmid'])) or {}
+        mgr = cluster_managers.get(d['cluster_id'])
+        if (vm.get('status') != 'running' or not mgr or not getattr(mgr, 'is_connected', False)
+                or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox'
+                or not pool_policy.effective(_settings_of(d), d.get('pool_type'))['screen_thumbnail']):
+            continue
+        try:
+            cached_vm_frame(mgr, d['cluster_id'], vm.get('node') or d['node'], 'qemu', int(d['vmid']),
+                            wait=False, **SHOT_OPTS)
+        except Exception as e:
+            logging.debug(f"[vLAB] screen warm-up {d['id']}: {e}")
+
+
 # --- admin: session log ------------------------------------------------------------
 
 @bp.route('/api/vlab/admin/sessions', methods=['GET'])
@@ -567,7 +696,7 @@ def desktop_ws_tag(desk):
 
 
 # protocols whose connection the engine does not carry: ending the session only closes the record
-UNREACHED_PROTOCOLS = ('spice', 'rdp', 'guac')
+UNREACHED_PROTOCOLS = ('spice', 'rdp')
 
 
 def _end_admin_session(s):
@@ -851,14 +980,24 @@ def cluster_nodes(cluster_id):
         return jsonify({'error': 'Could not read the nodes'}), 502
     if not isinstance(status, dict):
         status = {}
-    guests, running, desks = {}, {}, {}
+    guests, running, desks, vcpus, vmem = {}, {}, {}, {}, {}
     for vm in _vm_states(cluster_id).values():
         if vm.get('template') or vm.get('type') not in ('qemu', 'lxc'):
             continue
         n = vm.get('node', '')
         guests[n] = guests.get(n, 0) + 1
+        vcpus[n] = vcpus.get(n, 0) + int(_num(vm.get('maxcpu')))      # what the guests are given (할당률)
+        vmem[n] = vmem.get(n, 0) + int(_num(vm.get('maxmem')))
         if vm.get('status') == 'running':
             running[n] = running.get(n, 0) + 1
+    ips = {}
+    try:   # node addresses from /cluster/status (best effort; a single node has none)
+        entries = mgr._ha_cluster_status(timeout=4)
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict) and e.get('type') == 'node' and e.get('name') and e.get('ip'):
+                ips[str(e['name'])] = str(e['ip'])
+    except Exception as e:
+        logging.debug(f'[VLAB] cluster status of {cluster_id}: {e}')
     for d in store.list_desktops():
         if d['cluster_id'] == cluster_id:
             desks[d['node']] = desks.get(d['node'], 0) + 1
@@ -876,8 +1015,52 @@ def cluster_nodes(cluster_id):
             'uptime': _num(s.get('uptime')), 'loadavg': [str(x) for x in load[:3]],
             'version': s.get('pveversion') or '', 'maintenance': bool(s.get('maintenance_mode')),
             'guests': guests.get(name, 0), 'running': running.get(name, 0), 'desktops': desks.get(name, 0),
+            'ip': ips.get(name, ''), 'vcpus_given': vcpus.get(name, 0), 'mem_given': vmem.get(name, 0),
         })
     return jsonify({'nodes': out, 'connected': bool(getattr(mgr, 'is_connected', False))})
+
+
+RRD_TIMEFRAMES = ('hour', 'day', 'week', 'month', 'year')
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/rrd', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def cluster_rrd(cluster_id):
+    """클러스터 > 개요 history: CPU and memory use of the whole cluster over ?timeframe=hour|day|week|month|year,
+    from each online node's Proxmox rrddata - CPU weighted by the node's cores, memory by its size.
+    {timeframe, points: [{t, cpu, mem}]} in percent; a node that does not answer is left out (nodes_missing)."""
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not _can_reach(cluster_id):
+        return _bad('Cluster not found', 404)
+    tf = request.args.get('timeframe', 'hour')
+    if tf not in RRD_TIMEFRAMES:
+        return _bad(f"timeframe must be one of {', '.join(RRD_TIMEFRAMES)}")
+    try:
+        status = mgr.get_node_status() or {}
+    except Exception:
+        status = {}
+    acc, missing = {}, []
+    for name, s in sorted(status.items() if isinstance(status, dict) else []):
+        if not isinstance(s, dict) or s.get('offline') or s.get('status') != 'online':
+            continue
+        cores = _num((s.get('cpuinfo') or {}).get('cpus') if isinstance(s.get('cpuinfo'), dict) else 0) or 1
+        memtotal = _num(s.get('mem_total')) or 1
+        try:
+            r = mgr.get_node_rrddata(name, tf)
+        except Exception:
+            r = None
+        if not isinstance(r, dict) or not isinstance(r.get('timestamps'), list) or not isinstance(r.get('metrics'), dict):
+            missing.append(name)
+            continue
+        cpu, mem = r['metrics'].get('cpu') or [], r['metrics'].get('memory') or []
+        for i, t in enumerate(r['timestamps']):
+            if i >= len(cpu) or i >= len(mem):
+                break
+            a = acc.setdefault(int(t), [0.0, 0.0, 0.0, 0.0])
+            a[0] += _num(cpu[i]) * cores; a[1] += cores
+            a[2] += _num(mem[i]) * memtotal; a[3] += memtotal
+    points = [{'t': t, 'cpu': round(a[0] / a[1], 2), 'mem': round(a[2] / a[3], 2)} for t, a in sorted(acc.items()) if a[1] and a[3]]
+    return jsonify({'timeframe': tf, 'points': points, 'nodes_missing': missing})
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/storage', methods=['GET'])
@@ -1647,7 +1830,8 @@ def get_pool_policy(pool_id):
     pool, err = _pool_or_error(pool_id)
     if err:
         return err
-    return jsonify({'policy': pool_policy.effective(pool.get('settings')), 'defaults': pool_policy.DEFAULTS,
+    return jsonify({'policy': pool_policy.effective(pool.get('settings'), pool.get('type')),
+                    'defaults': pool_policy.defaults_for(pool.get('type')),
                     'reset_allowed': pool.get('type') in pool_policy.RESET_TYPES})
 
 
@@ -1660,8 +1844,30 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
+    old = pool_policy.effective(pool.get('settings'))
+    was = old.get('ssh_files', 'off') != 'off'
+    from pegaprox.vlab import directory
+    joined_before = directory.auto_join_on(pool)
     settings = dict(pool.get('settings') or {}, policy=pol, protocols=pol['protocols'])
     store.set_pool_settings(pool['id'], settings)
+    now_on = pol.get('ssh_files', 'off') != 'off'
+    if now_on != was:
+        # existing Warpgate SSH targets follow the switch (their web file panel)
+        try:
+            from pegaprox.vlab.warpgate import resync_ssh_file_transfer
+            resync_ssh_file_transfer(store.list_desktops(pool['id']), now_on)
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate SSH file panel for pool '{pool['name']}': {str(e)[:200]}")
+    if old.get('clipboard') != pol.get('clipboard'):
+        # existing Warpgate RDP / VNC targets follow the clipboard policy
+        try:
+            from pegaprox.api.vlab_warpgate import resync_clipboard
+            resync_clipboard(store.list_desktops(pool['id']), pol)
+        except Exception as e:
+            logging.warning(f"[VLAB] Warpgate clipboard for pool '{pool['name']}': {str(e)[:200]}")
+    pool = store.get_pool(pool['id']) or pool
+    if not joined_before and directory.auto_join_on(pool):
+        directory.queue_pool(pool)          # the switch turned on: the desktops not joined yet
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
               get_client_ip())
     return jsonify({'policy': pol})
@@ -1951,8 +2157,10 @@ def cluster_templates(cluster_id):
             t = {'vmid': vmid, 'name': vm.get('name') or f'tpl-{vmid}', 'node': vm.get('node', ''),
                  'type': vm.get('type'), 'spec': spec}
             if details:
-                disks = _template_disks(cluster_id, vm)
+                raw = {}
+                disks = _template_disks(cluster_id, vm, raw)
                 t['disks'] = [dict(x, plugin=plugin.get(x['storage'], '')) for x in disks] if disks is not None else None
+                t['ostype'] = str(raw.get('ostype') or '')
                 t['linked_clone'] = _linked_clone_ok(t['disks'], vm.get('type'))
                 t['pools'] = len(from_tpl.get(vmid, ()))
             out.append(t)
@@ -1978,9 +2186,9 @@ def _storage_plugins(cluster_id):
     return {s.get('storage'): s.get('plugintype') or '' for s in rows if s.get('storage')}
 
 
-def _template_disks(cluster_id, vm):
+def _template_disks(cluster_id, vm, raw_out=None):
     """[{key, storage, volume}] of the template's disks (CD-ROMs left out); None when the
-    config cannot be read."""
+    config cannot be read. raw_out (a dict) receives the config as read."""
     mgr = cluster_managers.get(cluster_id)
     try:
         r = mgr.get_vm_config(vm.get('node', ''), int(vm['vmid']), vm.get('type'))
@@ -1990,6 +2198,8 @@ def _template_disks(cluster_id, vm):
     raw = r.get('config', {}).get('raw') if isinstance(r, dict) and r.get('success') else None
     if not isinstance(raw, dict):
         return None
+    if isinstance(raw_out, dict):
+        raw_out.update(raw)
     out = []
     for k, v in sorted(raw.items()):
         if not _DISK_KEY.match(k) or not isinstance(v, str) or 'media=cdrom' in v:
@@ -2195,15 +2405,13 @@ def _pool_or_error(pool_id):
 
 
 # settings the pool form changes; the policy, GPU, grants and templates have routes of their own
-GATEWAY_SETTINGS = {'rdp_gateway_id': ('rdpgw', 'msrdgw'), 'guac_gateway_id': ('guacamole',)}
 
 
 def _pool_settings_change(pool, data):
     """(new settings, [changed keys]) from the request's `settings`, or raises ValueError."""
-    from pegaprox.vlab import catalog
     if not isinstance(data, dict):
         raise ValueError('settings must be an object')
-    unknown = set(data) - set(GATEWAY_SETTINGS) - {'max_sessions'}
+    unknown = set(data) - {'max_sessions'}
     if unknown:
         raise ValueError(f"settings: unknown {', '.join(sorted(unknown))}")
     settings = dict(pool.get('settings') or {})
@@ -2220,21 +2428,6 @@ def _pool_settings_change(pool, data):
         if ((settings.get('shared') or {}).get('max_sessions')) != ms:
             settings['shared'] = dict(settings.get('shared') or {}, max_sessions=ms)
             changed.append('max_sessions')
-    for key, kinds in GATEWAY_SETTINGS.items():
-        if key not in data:
-            continue
-        gid = str(data[key] or '').strip()
-        if gid:
-            g = catalog.get_gateway(gid)
-            if not g or g['kind'] not in kinds:
-                raise ValueError(f"{key}: no {' / '.join(kinds)} gateway {gid}")
-        if (settings.get(key) or '') == gid:
-            continue
-        if gid:
-            settings[key] = gid
-        else:
-            settings.pop(key, None)
-        changed.append(key)
     return settings, changed
 
 
@@ -2242,7 +2435,7 @@ def _pool_settings_change(pool, data):
 @require_auth(perms=['vlab.pool.manage'])
 def update_pool(pool_id):
     """Rename a pool, change its description, switch it on or off, or its connection settings
-    (max_sessions of a shared pool, the RDP / Guacamole gateway). Its cluster and type stay:
+    (max_sessions of a shared pool). Its cluster and type stay:
     the desktops, grants and schedules were made for them - make a new pool instead.
     A switched-off pool hands out and connects no desktop; open sessions run on."""
     pool, err = _pool_or_error(pool_id)
@@ -2470,6 +2663,28 @@ def remove_desktop(desktop_id):
     return jsonify({'success': True})
 
 
+@bp.route('/api/vlab/admin/pools/<pool_id>/desktops/prune', methods=['POST'])
+@require_auth(perms=['vlab.pool.manage'])
+def prune_desktops(pool_id):
+    """Drop the pool's desktops whose guest is gone from the cluster (deleted in Proxmox)."""
+    pool, err = _pool_or_error(pool_id)
+    if err:
+        return err
+    live = _vm_states(pool['cluster_id'])
+    if not live:
+        return _bad('Cluster not reachable - cannot tell which guests are gone', 503)
+    removed = []
+    for d in store.list_desktops(pool_id):
+        if d.get('state') == 'provisioning' or int(d['vmid']) in live:
+            continue
+        if d['assigned_user']:
+            _acl_set(d['cluster_id'], d['vmid'], d['assigned_user'], False)   # the guest is gone: best effort
+        store.remove_desktop(d['id'])
+        removed.append(d['vmid'])
+        log_audit(_user(), 'vlab.desktop.remove', f"{d['vm_type']}/{d['vmid']} (gone from the cluster)", get_client_ip())
+    return jsonify({'removed': removed})
+
+
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/assign', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def assign_desktop(desktop_id):
@@ -2538,6 +2753,12 @@ def _reset_one(desk):
     r = mgr.rollback_snapshot(node, int(desk['vmid']), desk['vm_type'], desk['base_snap'])
     if not isinstance(r, dict) or not r.get('success'):
         return str((r or {}).get('error') if isinstance(r, dict) else r) or 'rollback failed'
+    # the base has no moavi-nla account (or an older password): a new one on the next Warpgate RDP
+    try:
+        from pegaprox.vlab.warpgate import nla_forget
+        nla_forget(desk['id'])
+    except Exception as e:
+        logging.warning(f"[VLAB] Warpgate NLA reset for {desk['name']}: {str(e)[:200]}")
     policy = _gpu_policy((store.get_pool(desk['pool_id']) or {}).get('settings'))
     if policy:
         e = _apply_gpu(desk, node, policy)
@@ -2548,6 +2769,8 @@ def _reset_one(desk):
         e = _set_slot(desk['cluster_id'], node, desk['vmid'], accel.LEASE_SLOT, f"mapping={loan['resource_id']},pcie=1")
         if e:
             logging.warning(f"[VLAB] loaned card of {desk['vm_type']}/{desk['vmid']} after reset: {e}")
+    from pegaprox.vlab import directory
+    directory.queue_new(desk, 'reset')       # its base may predate the join
     return None
 
 
@@ -3025,7 +3248,9 @@ def kiosk_start():
     mine = next((d for d in desks if d['assigned_user'] == username), None)
     if not mine:
         busy = store.open_session_desktops()
-        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')]
+        live = _vm_states(desks[0]['cluster_id']) if desks else {}   # a pool lives on one cluster
+        free = [d for d in desks if not d['assigned_user'] and d['id'] not in busy and d.get('state') not in ('provisioning', 'resetting', 'error')
+                and not (live and int(d['vmid']) not in live)]   # not one deleted in Proxmox
         if not free:
             return jsonify({'error': 'Every desktop of this session is taken', 'code': 'FULL', **view}), 409
         mine = free[0]

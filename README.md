@@ -66,7 +66,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | 접속 | RDP 우선(새 풀 기본: RDP · SPICE · 브라우저, `.rdp`는 H.264 · UDP를 mstsc가 고름, Windows는 첫 RDP 접속 때 원격 데스크톱 · 방화벽 · AVC444 · UDP를 게스트 에이전트로 설정, Linux는 xrdp가 3389에 있을 때만 — 없으면 NO_RDP로 SPICE · VNC), 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
 | 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
-| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결 · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
+| FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결, 또는 네트워크 JTAG — Xilinx hw_server · XVC · Intel Quartus jtagd를 host:port로 공유해 VM 설정 변경 없이 대여, RDP · Warpgate · SPICE 어느 화면 프로토콜에서나 사용([docs/board-lab-network-jtag.md](docs/board-lab-network-jtag.md)) · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
 | 빌드 결과물 · CI | 작업이 끝나면 비트스트림 · 리포트 · 로그를 NAS `artifacts/<사용자>/<작업>`에 보관 · 내려받기(반출 규칙 적용), GitLab CI · Jenkins 연결(토큰 · `POST /api/vlab/ci/jobs` · 상태 · 결과물) |
 | 카드 · 보드 예약 | 포털에서 GPU · NPU · FPGA 카드나 JTAG 보드를 내 데스크톱에 쓸 시간 예약(수량 · 대여 중 · 데스크톱 겹침 검사, 승인, 시작 때 자동 대여 · 끝에 반납) |
 | 라이선스 서버 | FlexLM · vGPU 라이선스 서버 포트 자동 감시(5분), 끊김 · 복구 때 웹훅 · 메일 알림, 기능별 라이선스 사용 · 대기 · 거절 |
@@ -75,6 +75,7 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | LAB | LAB · 주간 시간표, 일정형 풀 준비 · 정리, 키오스크, LAB 예약(충돌 검사 · 승인 · 반복 · 참가자 · 자동 준비 · 노쇼 보고서), 단말 에이전트(MOAVI Desk Agent: 등록 코드 · 하트비트 · 키 자동 전달 · 1파일 설치) |
 | 공유 저장소 | 풀마다 NFS(autofs) · SMB, 사용자별 home · project · scratch 폴더(엔진이나 사용자가 만들고 VM root는 쓰지 않음), Windows 로그온 드라이브와 바탕 화면 · 문서 · 다운로드 · 사진 리디렉션(홈 드라이브), C 드라이브 숨기기 · 막기, 빌드 작업은 scratch에서, 실패해도 접속은 막지 않음 |
 | 사용자 | 로컬 계정 만들기 · 수정 · 삭제 · 비밀번호 · 2단계 인증 초기화 · 잠금 해제, 역할 관리, 내 계정(비밀번호 · TOTP · 받을 알림 메일), 계정 · 신청 알림(가입 승인 · 거절, 데스크톱 배정 · 초기화, 대여 · 반출 결과, 관리자의 비밀번호 · 2단계 인증 초기화는 항상), 관리자에게 가입 심사 대기 경보, AD/LDAP, 가입 신청(메일 확인 · 약관 동의) · 심사, 비밀번호 찾기, CSV 일괄 등록 · 계정 만료, 부서, 유효 권한 조회(권한이 어디서 왔는지) |
+| 내장 디렉터리 | AD 가 없는 현장용 선택 기능(`VLAB_DIRECTORY=1`): 설치 묶음의 Samba AD DC 에 포털 계정을 그대로 두어 포털 계정 = 데스크톱 계정. 만들기 · 일괄 등록 · 가입 승인 · 사용 중지 · 삭제 · 부서(그룹)를 바로 반영하고 10분마다 맞춤, 비밀번호는 사용자가 정할 때 DC 로만 보냄(엔진은 저장하지 않음), 데스크톱 도메인 가입(게스트 에이전트: Windows Add-Computer · Linux realm join, 데스크톱별 가입 상태) |
 | 운영 | 대시보드, 시스템 요약, 작업 진행(Proxmox 작업 진행률 · 로그), 접속 끊기, 공지 배너, 사용률 보고서(일·풀·사용자별, CSV), 작업 기록(감사), 플랫폼 설정(폐쇄망 모드 포함), 서포트 번들(기간 지정 · 비밀 정보 제거 · IP/사용자 가리기) |
 | 증설 예측 | 클러스터마다 하루 한 번 CPU · 메모리 · 스토리지 · 동시 접속 · 카드 사용을 쌓고 추세선으로 기준에 닿는 날 계산(대시보드) |
 | 알림 | 사용자 메일(종류별로 끄기: GPU 작업 · 할당량 · 대여 · 웹 IDE · 데스크톱 배정 · 교체 · 이동 · 접속 끊김 · LAB 예약 시작 전 · NAS 90%/100% · 신청 결과, 보안 알림은 항상), 관리자 운영 알림(실습실 PC 승인 대기 · 서버 이중화 · 라이선스 거부 · 긴 작업 실패, `pegaprox/vlab/ops_notices.py`), 경보 채널 · 경보 메일 |
@@ -98,6 +99,42 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 - 엔진은 Flask·gevent, 설정은 SQLite(SQLCipher). vLAB 기능은 `pegaprox/vlab/` 와 `pegaprox/api/vlab.py` · `pegaprox/api/vlab_next.py` (`/api/vlab/*`).
 - 설치 묶음(docker compose, Guacamole 포함)은 콘솔 저장소의 `deploy/`.
 - API 명세: [`docs/openapi.json`](docs/openapi.json)
+
+## 내장 디렉터리 (Samba AD DC)
+
+기관 AD 가 없는 곳에서도 **포털 계정 = 데스크톱 계정** 이 되게 하는 선택 기능입니다. 기관 AD 가 있으면 끄고 그 AD 를
+**도메인(AD/LDAP)** 설정에 넣습니다 — 그 설정이 켜져 있으면 내장 DC 는 로그인에 쓰이지 않습니다.
+
+- 설치: 콘솔 저장소 `deploy/` 의 `vlab-directory` 컨테이너(Samba 4.17 AD DC, 내부 DNS). `.env` 에
+  `VLAB_DIRECTORY=1` 과 `VLAB_DIRECTORY_IP`(데스크톱 망에서의 주소)를 넣고 `docker compose up -d`. 첫 시작에 도메인을 만들고
+  `OU=MOAVI` 아래에 Users · Groups · Desktops · Service, 엔진 계정 `vlab-svc`(OU=MOAVI 만 관리), 가입 계정 `vlab-join`(OU=Desktops 에
+  컴퓨터만 만듦)을 둡니다. 자세한 것은 `deploy/README.md` "내장 디렉터리".
+- 계정: 포털이 계정을 만들 때(한 명씩 · CSV · 가입 승인) 그 비밀번호로 DC 계정을 만들고, 사용 중지 · 이름 · 메일 · 부서 · 삭제를
+  바로 보냅니다(`pegaprox/vlab/directory.py`). 실패하면 기록하고 10분마다 도는 맞춤(활성 서버만)이 다시 합니다. 켜기 전부터 있던
+  포털 계정은 다음 로그인 때 그때 입력한 비밀번호로 옮겨집니다. 관리자 계정은 DC 가 멈춰도 들어올 수 있도록 포털 계정으로 남습니다.
+- 부서 = 그룹: 부서마다 `dep-<id>` 그룹(설명 = 부서 이름, 하위 부서 그룹은 상위 그룹의 구성원), 모든 계정은 `moavi-users`.
+  풀 권한의 "AD 그룹" 에 이 DN 을 넣으면 그대로 동작합니다.
+- 로그인: 기존 LDAP 로그인(`pegaprox/utils/ldap.py`)이 내장 DC(LDAPS 636, DC 가 만든 CA 로 인증서 확인)를 봅니다.
+  역할 · 테넌트 · 권한은 포털이 정하고 DC 는 누가 누구인지와 그룹만 알려 줍니다.
+- 비밀번호: 사용자가 정할 때(가입 신청 · 비밀번호 찾기 · 내 계정 · 관리자의 초기화 · 옮기는 첫 로그인) 그 요청 안에서 DC 의
+  비밀번호 설정(unicodePwd)으로만 갑니다. 엔진은 사용자 비밀번호를 저장 · 기록하지 않습니다. 가입 신청은 그 자리에서 사용 중지된 DC
+  계정을 만들어 비밀번호를 거기에 두고, 승인하면 켜고 거절하면 지웁니다. 데스크톱 자동 로그인용 비밀번호 보관 기능은 없습니다.
+- 도메인 가입: 풀 상세 > 도메인 가입, 또는 `POST /api/vlab/admin/desktops/<id>/domain-join`. QEMU 게스트 에이전트로 Windows 는
+  `Add-Computer`(OU=Desktops, 이름 `MD-{vmid}`, DNS 를 DC 로, `moavi-users` 를 원격 데스크톱 사용자에), Linux 는 `realm join`(sssd,
+  짧은 이름, 홈 폴더 자동). 가입 계정의 비밀번호는 엔진이 정해 DC 에 넣고 핵심 DB 키로 봉인해 둡니다(NAS 서비스 계정과 같은 방식) —
+  게스트에는 에이전트의 stdin 으로만 갑니다. **Windows 템플릿은 sysprep 으로 일반화**해 두어야 합니다(같은 설치본의 복제는 SID ·
+  이름이 같음). 가입한 데스크톱의 RDP 파일은 `MOAVI\아이디` 로 로그인합니다.
+- 이중화: HA 상대 서버에 두 번째 DC(`VLAB_DIRECTORY_ROLE=replica`)를 두면 DC 끼리 복제하고, 각 서버의 엔진은 자기 쪽 DC 를 씁니다.
+  엔진의 봉인된 계정 · 가입 상태 표는 HA 동기화로 넘어갑니다.
+- 비밀번호 규칙: 포털 정책과 DC 정책(minPwdLength, 복잡도)을 합친 것을 `GET /api/vlab/password-policy` 로 알리고(가입 · 비밀번호 찾기 ·
+  내 계정 화면), 모든 경로에서 그 규칙으로 먼저 검사합니다 — 포털이 받은 비밀번호는 DC 도 받습니다. CSV 일괄 등록의 첫 비밀번호도 그 규칙에 맞춰 만듭니다.
+- AD 디렉터리(관리 콘솔 > 사용자 > AD 디렉터리, `pegaprox/vlab/adobjects.py`): 내장 DC 또는 도메인(AD/LDAP)에 설정한 기관 AD 의 OU 트리 ·
+  사용자 · 그룹 · OU 를 보고 만들고 바꾸고 사용 중지 · 삭제, 그룹 구성원(직접 · 중첩) 추가 · 제거(자기 자신 · 순환 거부). 바꾸는 것은 그 소스의
+  바인드 계정으로 실제 디렉터리에 쓰고 감사 기록에 남깁니다(권한이 없으면 디렉터리가 거부하고 그대로 알림). 내장 DC 에서 포털이 관리하는
+  계정 · `moavi-users` · 부서 그룹은 여기서 바꾸지 않습니다(사용자 · 부서 화면에서). 부서와 OU 는 서로 따로 움직입니다.
+- API: `/api/vlab/admin/ad/*`(sources · test · tree · objects · object · ous · groups · users · members),
+  `/api/vlab/admin/bundled-directory`(상태 · 설정 · 확인 · 맞춤 · 가입 계정 새 비밀번호 · 계정 · 그룹 · 가입 상태),
+  `/api/vlab/admin/desktops/<id>/domain-join[/check]`, `/api/vlab/admin/pools/<id>/domain-join`.
 
 ## 빠르게 시작하기
 

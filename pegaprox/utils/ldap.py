@@ -19,6 +19,15 @@ def get_ldap_settings() -> dict:
     """Get LDAP configuration from server settings"""
     from pegaprox.api.helpers import load_server_settings
     settings = load_server_settings()
+    # MOAVI Desk: with the bundled directory on (VLAB_DIRECTORY=1) and no LDAP of the site's own,
+    # sign-in goes to the bundled DC (pegaprox/vlab/directory.py)
+    if not settings.get('ldap_enabled', False):
+        try:
+            from pegaprox.vlab import directory as _bundled
+            if _bundled.active():
+                return _bundled.ldap_settings()
+        except Exception as e:
+            logging.warning(f"[LDAP] bundled directory settings: {e}")
     config = {
         'enabled': settings.get('ldap_enabled', False),
         'server': settings.get('ldap_server', ''),
@@ -126,7 +135,8 @@ def ldap_authenticate(username: str, password: str) -> dict:
             validate = ssl_module.CERT_REQUIRED if verify_tls else ssl_module.CERT_NONE
             if validate == ssl_module.CERT_NONE:
                 logging.warning("[LDAP] TLS certificate verification disabled - MITM risk")
-            tls_config = Tls(validate=validate)
+            # MOAVI Desk: the bundled DC's own CA (ldap_settings of pegaprox/vlab/directory.py)
+            tls_config = Tls(validate=validate, ca_certs_file=ldap_config.get('ca_certs_file') or None)
         else:
             # MK Sep 2026 - the warning above only fires INSIDE the TLS branch, so the one
             # configuration that has no protection at all was the only one that said nothing.
@@ -362,6 +372,17 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
             logging.warning(f"[LDAP] Rejected provisioning for '{username}' - the account "
                             f"belongs to '{existing_source}', not to this directory")
             return None
+
+        # MOAVI Desk: an account of the bundled directory is the portal's own - its role,
+        # tenant and grants are set in the portal, the directory only says who signed in and
+        # in which groups (pegaprox/vlab/directory.py)
+        from pegaprox.vlab import directory as _bundled
+        if _bundled.active() and _bundled.owns(existing):
+            user = copy.deepcopy(existing)
+            user['ldap_dn'] = ldap_result.get('user_dn', '') or user.get('ldap_dn', '')
+            user['last_ldap_sync'] = datetime.now().isoformat()
+            user['groups'] = _directory_groups_of(ldap_result)
+            return user
 
         # Update the existing LDAP user with fresh LDAP info - on a copy, so the row
         # the caller handed in stays what it was

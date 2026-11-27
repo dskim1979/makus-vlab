@@ -21,6 +21,9 @@ from pegaprox.background import alert_events
 
 bp = Blueprint('alerts', __name__)
 
+# NS #501: a rule's severity; anything else would reach the dispatch loop unchecked
+ALERT_SEVERITIES = ('auto', 'critical', 'warning', 'info')
+
 
 def _mask_channel(ch):
     """Webhook URLs and tokens are bearer capabilities — never hand them back on a read or as
@@ -294,6 +297,8 @@ def create_cluster_alert(cluster_id):
     # NS May 2026 — used to silently drop `channels` and `cluster_id`, so the
     # background loop never knew where to dispatch and which cluster the alert
     # belonged to. Persist both in the JSON config.
+    if data.get('severity', 'auto') not in ALERT_SEVERITIES:
+        return jsonify({'error': 'severity must be one of ' + ', '.join(ALERT_SEVERITIES)}), 400
     channels = _sanitize_channels(data.get('channels'))
     metric = data.get('metric', 'cpu')
     is_rolling_update = metric == 'rolling_update'
@@ -343,6 +348,8 @@ def update_cluster_alert(cluster_id, alert_id):
     
     for alert in cluster_alerts:
         if alert['id'] == alert_id:
+            if 'severity' in data and data['severity'] not in ALERT_SEVERITIES:
+                return jsonify({'error': 'severity must be one of ' + ', '.join(ALERT_SEVERITIES)}), 400
             before = {k: alert.get(k) for k in alert_events.MATCH_FIELDS}
             for k in ('enabled', 'name', 'threshold', 'metric', 'operator',
                       'target_type', 'target_id', 'action', 'severity'):

@@ -232,6 +232,34 @@ def test_nodes_show_load_guests_and_desktops(env):
     assert alice.get(f'/api/vlab/admin/clusters/{CID}/nodes').status_code == 403
 
 
+def test_nodes_carry_ip_and_what_guests_are_given(env):
+    api, admin, _, _, _ = env
+    mgr = api.make_fake_manager(CID, get_vm_resources=RES, get_node_status=NODES)
+    mgr.is_connected = True
+    mgr._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}, {'type': 'node', 'name': 'pve1', 'ip': '10.0.0.11'}]
+    api.set_manager(CID, mgr)
+    one, two = admin.get(f'/api/vlab/admin/clusters/{CID}/nodes').get_json()['nodes']
+    assert one['ip'] == '10.0.0.11' and two['ip'] == ''
+    assert one['vcpus_given'] == sum(int(v.get('maxcpu') or 0) for v in RES if v.get('node') == 'pve1' and not v.get('template'))
+
+
+def test_cluster_rrd_weights_nodes_and_checks_the_timeframe(env):
+    api, admin, alice, _, _ = env
+    nodes = dict(NODES, pve3=dict(NODES['pve1'], cpuinfo={'cpus': 96}, mem_total=192 * 1024 ** 3))
+    mgr = api.make_fake_manager(CID, get_vm_resources=RES, get_node_status=nodes)
+    mgr.is_connected = True
+    rrd = {'pve1': {'timestamps': [100, 160], 'metrics': {'cpu': [10, 20], 'memory': [50, 50]}},
+           'pve3': {'timestamps': [100, 160], 'metrics': {'cpu': [50, 60], 'memory': [10, 30]}}}
+    mgr.get_node_rrddata.side_effect = lambda node, tf: rrd[node]
+    api.set_manager(CID, mgr)
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/rrd?timeframe=decade').status_code == 400
+    assert alice.get(f'/api/vlab/admin/clusters/{CID}/rrd').status_code == 403
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/rrd?timeframe=day').get_json()
+    assert r['timeframe'] == 'day' and r['nodes_missing'] == []
+    assert r['points'][0] == {'t': 100, 'cpu': 40.0, 'mem': 20.0}      # (10*32+50*96)/128, (50*64+10*192)/256
+    assert mgr.get_node_rrddata.call_count == 2                          # pve2 is offline
+
+
 def test_storage_lists_shared_storage_once(env, monkeypatch):
     _, admin, alice, _, _ = env
     import pegaprox.api.clusters as core_clusters
@@ -401,7 +429,8 @@ def test_the_policy_shapes_the_connection(connectable):
     a = alice.post(f"/api/vlab/desktops/{desk['id']}/connect", json={'protocol': 'vnc'}).get_json()
     assert a['clipboard'] == 'to_desktop'
     (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
-    assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': []}
+    assert mine['policy'] == {'clipboard': 'to_desktop', 'allow_power': True, 'start_on_connect': True, 'web_ide': [],
+                              'screen_thumbnail': False, 'desktop_files': 'off'}   # a reset pool: thumbnail off unless turned on
 
 
 def test_the_policy_can_take_power_away(connectable):
@@ -517,6 +546,207 @@ def test_a_failed_power_action_is_reported(connectable):
     assert r.status_code == 502 and 'locked' in r.get_json()['error']
 
 
+# --- screen thumbnail -------------------------------------------------------------
+
+SHOT = b'\x89PNG\r\n\x1a\nfake'
+
+
+@pytest.fixture
+def grabs(monkeypatch):
+    """grab_vm_frame stubbed out, the shared tile cache empty: the calls it got."""
+    import pegaprox.api.vms as vms
+    class Calls(list):
+        pass
+    calls = Calls()
+
+    def grab(mgr, node, vm_type, vmid, max_width=480, timeouts=(20, 10)):
+        calls.append((node, vm_type, vmid))
+        if grab.fail:
+            raise grab.fail
+        return SHOT
+    grab.fail = None
+    monkeypatch.setattr(vms, 'grab_vm_frame', grab)
+    for name in ('_vm_screenshot_cache', '_vm_screenshot_good', '_vm_screenshot_inflight', '_vm_grab_method'):
+        monkeypatch.setattr(vms, name, {})
+    monkeypatch.setattr(vms, '_vm_screenshot_blank', set())
+    calls.grab = grab
+    return calls
+
+
+def _on(admin, desk):
+    """connectable's pools are reset pools, where the picture is off until an admin turns it on."""
+    r = admin.put(f"/api/vlab/admin/pools/{desk['pool_id']}/policy", json={'screen_thumbnail': True})
+    assert r.status_code == 200, r.get_json()
+
+
+def test_the_assigned_user_sees_their_running_desktop(connectable, grabs):
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 200 and r.mimetype == 'image/png' and r.data == SHOT
+    assert r.headers['Cache-Control'] == 'private, max-age=20' and r.headers['X-Screenshot-Cache'] == 'miss'
+    # the second look comes out of the cache the console tile shares
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").headers['X-Screenshot-Cache'] == 'hit'
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_in_a_shared_pool_only_the_user_on_the_desktop_sees_it(connectable, grabs):
+    admin, alice, bob, viewer, desk, _ = connectable
+    _on(admin, desk)
+    for who in (bob, viewer, admin):   # not an admin either: it could be anyone's screen
+        r = who.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+        assert r.status_code == 404 and r.data[:4] != SHOT[:4]
+    # whoever has a session on it now does
+    store.start_session('bob', store.get_desktop(desk['id']), 'vnc', '10.0.0.9')
+    assert bob.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_a_dedicated_pool_shows_it_by_default_to_its_user_and_admins(env, grabs):
+    _, admin, alice, bob, _ = env
+    pool = admin.post('/api/vlab/admin/pools', json={'name': '전용', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    desk = admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': 300}).get_json()['desktop']
+    admin.put(f"/api/vlab/admin/desktops/{desk['id']}/assign", json={'username': 'alice'})
+    assert admin.get(f"/api/vlab/admin/pools/{pool['id']}/policy").get_json()['policy']['screen_thumbnail'] is True
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    assert admin.get(f"/api/vlab/desktops/{desk['id']}/screenshot").data == SHOT
+    assert bob.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 404
+    assert admin.get('/api/vlab/desktops/nope/screenshot').status_code == 404
+
+
+def test_no_picture_is_204_without_a_reason(connectable, grabs):
+    admin, alice, _, _, desk, stopped = connectable
+    _on(admin, desk)
+    _on(admin, stopped)
+    r = alice.get(f"/api/vlab/desktops/{stopped['id']}/screenshot")
+    assert r.status_code == 204 and r.data == b''
+    grabs.grab.fail = IOError('vncproxy refused: HTTP 500')
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 204 and r.data == b'' and 'X-Screen' not in r.headers
+    # the failure is remembered: no second grab until it runs out
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    assert grabs == [('pve1', 'qemu', 300)]
+
+
+def test_shared_pools_start_with_the_picture_off(connectable, grabs):
+    admin, alice, _, _, desk, _ = connectable
+    url = f"/api/vlab/admin/pools/{desk['pool_id']}/policy"
+    got = admin.get(url).get_json()
+    assert got['policy']['screen_thumbnail'] is False and got['defaults']['screen_thumbnail'] is False
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    # saving another setting does not pin the default down
+    assert admin.put(url, json={'clipboard': 'off'}).status_code == 200
+    assert 'screen_thumbnail' not in store.get_pool(desk['pool_id'])['settings']['policy']
+    assert admin.put(url, json={'screen_thumbnail': 'no'}).status_code == 400
+    _on(admin, desk)
+    (mine,) = [d for d in alice.get('/api/vlab/me/desktops').get_json()['desktops'] if d['id'] == desk['id']]
+    assert mine['policy']['screen_thumbnail'] is True
+    assert admin.put(url, json={'screen_thumbnail': False}).status_code == 200
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").status_code == 204
+    assert grabs == [('pve1', 'qemu', 300)]   # the one the listing started while it was on
+
+
+def test_a_black_display_says_off(connectable, grabs):
+    from pegaprox.utils import vnc_grab
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
+    grabs.grab.fail = vnc_grab.BlankFrame('blank framebuffer (display likely off)')
+    for _ in range(2):   # the second answer comes out of the cache
+        r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+        assert r.status_code == 204 and r.data == b'' and r.headers['X-Screen'] == 'off'
+    assert len(grabs) == 1
+
+
+def test_an_old_picture_is_answered_at_once_and_replaced_behind(connectable, grabs):
+    import time
+    import pegaprox.api.vms as vms
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
+    old = b'old-png'
+    then = time.monotonic() - 60      # past the card's 20 s, inside the 5 min it may still show
+    vms._vm_screenshot_cache[f'{CID}:300'] = (then, old)
+    vms._vm_screenshot_good[f'{CID}:300'] = (then, old)
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.status_code == 200 and r.data == old and r.headers['X-Screenshot-Cache'] == 'stale'
+    _settle(vms)
+    assert grabs == [('pve1', 'qemu', 300)]
+    r = alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot")
+    assert r.data == SHOT and r.headers['X-Screenshot-Cache'] == 'hit'
+
+
+def _settle(vms, key=f'{CID}:300'):
+    """Wait for a background grab to land in the cache."""
+    import time
+    for _ in range(200):
+        if key not in vms._vm_screenshot_inflight and key in vms._vm_screenshot_cache \
+                and vms._vm_screenshot_cache[key][1] != b'old-png':
+            return
+        time.sleep(0.01)
+
+
+def test_listing_the_desktops_starts_their_grabs(connectable, grabs):
+    import pegaprox.api.vms as vms
+    admin, alice, _, _, desk, _ = connectable
+    _on(admin, desk)
+    assert alice.get('/api/vlab/me/desktops').status_code == 200
+    _settle(vms)
+    # only the running one (301 is stopped); the card's first look finds it cached
+    assert grabs == [('pve1', 'qemu', 300)]
+    assert alice.get(f"/api/vlab/desktops/{desk['id']}/screenshot").headers['X-Screenshot-Cache'] == 'hit'
+
+
+def test_the_grab_that_worked_goes_first_next_time(monkeypatch):
+    import pegaprox.api.vms as vms
+    from pegaprox.utils import vnc_grab
+    monkeypatch.setattr(vms, '_vm_grab_method', {})
+    seen = []
+
+    def dump(*a, **k):
+        seen.append('screendump')
+        raise vnc_grab.BlankFrame('blank framebuffer')   # Windows on QXL: the dump is black
+
+    def rfb(*a, **k):
+        seen.append('rfb')
+        return SHOT
+    monkeypatch.setattr(vnc_grab, 'screendump_to_png', dump)
+    monkeypatch.setattr(vms, '_screenshot_via_rfb', rfb)
+    mgr = type('M', (), {'id': CID})()
+    assert vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300) == SHOT
+    assert vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300) == SHOT
+    assert seen == ['screendump', 'rfb', 'rfb']
+    # black on both is a display that is off
+    monkeypatch.setattr(vms, '_screenshot_via_rfb', dump)
+    with pytest.raises(vnc_grab.BlankFrame):
+        vms.grab_vm_frame(mgr, 'pve1', 'qemu', 300)
+
+
+def test_one_guest_is_grabbed_once_at_a_time(monkeypatch):
+    import threading
+    import pegaprox.api.vms as vms
+    for name in ('_vm_screenshot_cache', '_vm_screenshot_good', '_vm_screenshot_inflight'):
+        monkeypatch.setattr(vms, name, {})
+    gate, calls = threading.Event(), []
+
+    def grab(*a, **k):
+        calls.append(1)
+        gate.wait(5)
+        return SHOT
+    monkeypatch.setattr(vms, 'grab_vm_frame', grab)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(vms.cached_vm_frame(None, CID, 'pve1', 'qemu', 300)))
+          for _ in range(3)]
+    for t in ts:
+        t.start()
+    for _ in range(100):
+        if calls:
+            break
+        threading.Event().wait(0.01)
+    gate.set()
+    for t in ts:
+        t.join(5)
+    assert len(calls) == 1 and sorted(o[1] for o in out) == ['miss', 'miss', 'miss'] and all(o[0] == SHOT for o in out)
+
+
 # --- session log -----------------------------------------------------------------
 
 def test_admin_reads_the_session_log(connectable):
@@ -628,9 +858,10 @@ def test_template_details_say_whether_a_linked_clone_works(cloning, monkeypatch,
                         lambda cid, m: [{'storage': store_name, 'plugintype': plugin, 'node': 'pve1'}])
     mgr.get_vm_config.return_value = {'success': True, 'config': {'raw': {
         'scsi0': disk, 'ide2': 'local:iso/virtio.iso,media=cdrom', 'efidisk0': disk.replace('disk-0', 'disk-1'),
-        'net0': 'virtio=AA:BB,bridge=vmbr0'}}}
+        'net0': 'virtio=AA:BB,bridge=vmbr0', 'ostype': 'win11'}}}
     (t,) = admin.get(f'/api/vlab/admin/clusters/{CID}/templates?details=1').get_json()['templates']
     assert [d['key'] for d in t['disks']] == ['efidisk0', 'scsi0'] and t['disks'][1]['plugin'] == plugin
+    assert t['ostype'] == 'win11'
     assert t['linked_clone'] is linked and t['pools'] == 0
 
 
@@ -642,6 +873,7 @@ def test_template_details_count_pools_cloned_from_it(cloning, monkeypatch):
     admin.post(f"/api/vlab/admin/pools/{pool['id']}/clone", json={'template_vmid': 900, 'count': 1, 'name_prefix': 'lab'})
     (t,) = admin.get(f'/api/vlab/admin/clusters/{CID}/templates?details=1').get_json()['templates']
     assert (t['pools'], t['disks'], t['linked_clone']) == (1, None, None)      # config unreadable: unknown
+    assert t['ostype'] == ''
 
 
 def test_clone_creates_provisioning_desktops_with_free_ids(cloning):

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 MOAVI Desk - the next-phase catalogues: departments, sign-up requests, the USB device
-library, gateways, external desktops, golden images, board lab boards and licence servers.
+library, external desktops, golden images, board lab boards and licence servers.
 
 Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, NOTICE).
 
@@ -54,19 +54,6 @@ _SCHEMA = (
         builtin INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         UNIQUE (vid, pid)
-    )''',
-    '''CREATE TABLE IF NOT EXISTS vlab_gateways (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        address TEXT NOT NULL,
-        port INTEGER NOT NULL,
-        notes TEXT NOT NULL DEFAULT '',
-        enabled INTEGER NOT NULL DEFAULT 1,
-        last_check TEXT,
-        last_ok INTEGER,
-        last_detail TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL
     )''',
     '''CREATE TABLE IF NOT EXISTS vlab_external_desktops (
         id TEXT PRIMARY KEY,
@@ -142,15 +129,39 @@ _SCHEMA = (
         last_detail TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL
     )''',
+    # JTAG gateway VMs (board lab, network target): a small Linux VM with many JTAG cables passed
+    # through (per USB device or a whole PCIe USB controller) that runs hw_server / XVC / jtagd.
+    # passthrough = [{slot, kind 'usb'|'pci', value}] MOAVI Desk put on the VM; cables = the last
+    # read of the cables the guest sees [{vidpid, serial, manufacturer, product, port, jtag}].
+    '''CREATE TABLE IF NOT EXISTS vlab_jtag_gateways (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        cluster_id TEXT NOT NULL,
+        vmid INTEGER,
+        host TEXT NOT NULL,
+        hw_port INTEGER NOT NULL DEFAULT 3121,
+        jtagd_port INTEGER NOT NULL DEFAULT 1309,
+        passthrough TEXT NOT NULL DEFAULT '[]',
+        cables TEXT NOT NULL DEFAULT '[]',
+        cables_at TEXT,
+        cables_error TEXT NOT NULL DEFAULT '',
+        cables_error_code TEXT NOT NULL DEFAULT '',
+        cables_error_at TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        last_check TEXT,
+        last_ok INTEGER,
+        last_detail TEXT NOT NULL DEFAULT '{}',
+        alerted_at TEXT,
+        created_at TEXT NOT NULL
+    )''',
 )
 
-TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices', 'vlab_gateways',
+TABLES = ('vlab_departments', 'vlab_user_departments', 'vlab_signups', 'vlab_usb_devices',
           'vlab_external_desktops', 'vlab_golden_images', 'vlab_boards', 'vlab_license_servers',
-          'vlab_desktop_versions', 'vlab_build_jobs')
+          'vlab_desktop_versions', 'vlab_build_jobs', 'vlab_jtag_gateways')
 
 # columns added after a table first shipped: (table, column, definition)
 _COLUMNS = (
-    ('vlab_gateways', 'secret_key', "TEXT NOT NULL DEFAULT ''"),          # Guacamole (guacamole-auth-json)
     ('vlab_boards', 'lease_user', "TEXT NOT NULL DEFAULT ''"),
     # who hears of the department's GPU quota steps (pegaprox/api/vlab_notices.py)
     ('vlab_departments', 'manager', "TEXT NOT NULL DEFAULT ''"),
@@ -184,6 +195,20 @@ _COLUMNS = (
     ('vlab_build_jobs', 'artifacts', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'artifacts_dir', "TEXT NOT NULL DEFAULT ''"),
     ('vlab_build_jobs', 'source', "TEXT NOT NULL DEFAULT ''"),
+    # board target (pegaprox/api/vlab_next.py): 'usb' = USB-JTAG passthrough (today), 'network' =
+    # the JTAG cable is reached over TCP (Xilinx hw_server / XVC, Intel Quartus jtagd). A network
+    # board carries host/port/protocol/label and no usb id; it never changes the desktop VM config.
+    ('vlab_boards', 'target', "TEXT NOT NULL DEFAULT 'usb'"),
+    ('vlab_boards', 'host', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'port', 'INTEGER'),
+    ('vlab_boards', 'protocol', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'label', "TEXT NOT NULL DEFAULT ''"),
+    # a network board on a JTAG gateway VM: the gateway, the cable's serial number (the hw_server
+    # target), the board's UART on the gateway (ser2net TCP port) and the remote power hook config
+    ('vlab_boards', 'gateway_id', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'cable_serial', "TEXT NOT NULL DEFAULT ''"),
+    ('vlab_boards', 'uart_port', 'INTEGER'),
+    ('vlab_boards', 'power', "TEXT NOT NULL DEFAULT ''"),
 )
 
 # USB library entries every install starts with: the JTAG cables of FPGA boards. Generic names
@@ -325,8 +350,8 @@ def count_pending():
     return r['n'] if r else 0
 
 
-def add_signup(username, display_name, email, department_id, note, salt, password_hash, client_ip):
-    sid = new_id('sig')
+def add_signup(username, display_name, email, department_id, note, salt, password_hash, client_ip, sid=None):
+    sid = sid or new_id('sig')
     db().execute('INSERT INTO vlab_signups (id, username, display_name, email, department_id, note, password_salt, password_hash, '
                  'status, client_ip, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                  (sid, username, display_name, email, department_id, note, salt, password_hash, 'pending', client_ip, now()))
@@ -380,87 +405,41 @@ def delete_usb_device(uid):
     db().execute('DELETE FROM vlab_usb_devices WHERE id = ?', (uid,))
 
 
-# --- gateways ----------------------------------------------------------------------------
+# --- gateways: gone (보안 게이트웨이 / Warpgate replaced Guacamole and the RD gateways) -----------
 
-GATEWAY_KINDS = {'guacamole': 8080, 'rdpgw': 443, 'msrdgw': 443}
-
-
-def _gateway_row(r, secret=False):
-    if not r:
+def retire_gateways():
+    """Once, at start, on an install that still has the gateway catalog: drop it and every reference
+    to it - external desktops' gateway, pools' rdp_gateway_id / guac_gateway_id, and the pool protocol
+    'guac' (a pool that offered only browser RDP gets 'rdp': with Warpgate on, that opens in the browser
+    too). Returns what it cleaned, or None when there was nothing to do."""
+    import logging
+    from pegaprox.vlab import store
+    d = db()
+    if not d.query_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vlab_gateways'"):
         return None
-    g = dict(r)
-    key = g.pop('secret_key', '')
-    g['has_key'] = bool(key)
-    if secret:
-        g['secret_key'] = key
-    return g
-
-
-def list_gateways(secret=False):
-    return [_gateway_row(r, secret) for r in db().query('SELECT * FROM vlab_gateways ORDER BY name')]
-
-
-def get_gateway(gid, secret=False):
-    return _gateway_row(db().query_one('SELECT * FROM vlab_gateways WHERE id = ?', (gid,)), secret)
-
-
-def save_gateway(gid, name, kind, address, port, notes, enabled, secret_key=None):
-    if gid:
-        db().execute('UPDATE vlab_gateways SET name = ?, kind = ?, address = ?, port = ?, notes = ?, enabled = ? WHERE id = ?',
-                     (name, kind, address, port, notes, int(enabled), gid))
-    else:
-        gid = new_id('gw')
-        db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                     (gid, name, kind, address, port, notes, int(enabled), now()))
-    if secret_key is not None:
-        db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (secret_key, gid))
-    return get_gateway(gid)
-
-
-# The Guacamole bundled with the docker compose install (deploy/docker-compose.yml in
-# makus-vlab-console): served by vlab-proxy at /guacamole/ on the console's own address, its
-# key made on first start in a file both containers mount. VLAB_GUAC_BUILTIN=0 turns it off.
-BUILTIN_GUAC_ID = 'gw_builtin_guac'
-
-
-def sync_builtin_guacamole():
-    """Create or refresh the bundled Guacamole gateway from the environment, at start.
-    The key file wins over whatever is stored (the file is what Guacamole itself reads)."""
-    on = os.environ.get('VLAB_GUAC_BUILTIN', '').strip() not in ('', '0', 'false', 'no')
-    row = get_gateway(BUILTIN_GUAC_ID)
-    key = ''
-    path = os.environ.get('VLAB_GUAC_KEY_FILE', '/etc/vlab/guac/json-secret-key')
-    if on:
-        try:
-            with open(path, encoding='ascii') as f:
-                key = f.read().strip().lower()
-        except OSError:
-            key = ''
-        if not re.match(r'^[0-9a-f]{32}$', key):
-            on = False
-    if not on:
-        if row and row['enabled']:
-            db().execute('UPDATE vlab_gateways SET enabled = 0 WHERE id = ?', (BUILTIN_GUAC_ID,))
-        return get_gateway(BUILTIN_GUAC_ID)
-    if not row:
-        port = os.environ.get('VLAB_HTTPS_PORT', '443')
-        db().execute('INSERT INTO vlab_gateways (id, name, kind, address, port, notes, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
-                     (BUILTIN_GUAC_ID, 'MOAVI Desk 내장 Guacamole', 'guacamole', os.environ.get('VLAB_HOSTNAME') or 'vlab.local',
-                      int(port) if port.isdigit() else 443, '설치 묶음에 함께 들어 있는 브라우저 RDP (/guacamole/, 콘솔과 같은 주소)', now()))
-    elif not row['enabled']:
-        db().execute('UPDATE vlab_gateways SET enabled = 1 WHERE id = ?', (BUILTIN_GUAC_ID,))
-    db().execute('UPDATE vlab_gateways SET secret_key = ? WHERE id = ?', (key, BUILTIN_GUAC_ID))
-    return get_gateway(BUILTIN_GUAC_ID)
-
-
-def mark_gateway(gid, ok, detail):
-    db().execute('UPDATE vlab_gateways SET last_check = ?, last_ok = ?, last_detail = ? WHERE id = ?', (now(), int(ok), detail[:300], gid))
-    return get_gateway(gid)
-
-
-def delete_gateway(gid):
-    db().execute('UPDATE vlab_external_desktops SET gateway_id = NULL WHERE gateway_id = ?', (gid,))
-    db().execute('DELETE FROM vlab_gateways WHERE id = ?', (gid,))
+    gateways = (d.query_one('SELECT COUNT(*) AS n FROM vlab_gateways') or {'n': 0})['n']
+    ext = (d.query_one('SELECT COUNT(*) AS n FROM vlab_external_desktops WHERE gateway_id IS NOT NULL') or {'n': 0})['n']
+    d.execute('UPDATE vlab_external_desktops SET gateway_id = NULL WHERE gateway_id IS NOT NULL')
+    pools = 0
+    for pool in store.list_pools():
+        s = dict(pool.get('settings') or {})
+        before = repr(s)
+        s.pop('rdp_gateway_id', None)
+        s.pop('guac_gateway_id', None)
+        for holder in (s, s.get('policy') if isinstance(s.get('policy'), dict) else None):
+            protos = holder.get('protocols') if holder else None
+            if isinstance(protos, list) and 'guac' in protos:
+                left = [p for p in protos if p != 'guac']
+                if 'rdp' not in left:
+                    left.append('rdp')
+                holder['protocols'] = left
+        if repr(s) != before:
+            store.set_pool_settings(pool['id'], s)
+            pools += 1
+    d.execute('DROP TABLE vlab_gateways')
+    logging.warning(f'[VLAB] gateway catalog retired (보안 게이트웨이 replaces it): {gateways} gateway(s) removed, '
+                    f'{ext} external desktop(s) now direct / Warpgate, {pools} pool(s) cleaned')
+    return {'gateways': gateways, 'external': ext, 'pools': pools}
 
 
 # --- external desktops (physical PCs reached over RDP) -----------------------------------
@@ -475,14 +454,15 @@ def get_external(eid):
     return _one('SELECT * FROM vlab_external_desktops WHERE id = ?', (eid,))
 
 
-def save_external(eid, name, address, port, assigned_user, gateway_id, notes):
+def save_external(eid, name, address, port, assigned_user, notes):
+    # (gateway_id stays in the table, unused: the gateway catalog is gone)
     if eid:
-        db().execute('UPDATE vlab_external_desktops SET name = ?, address = ?, port = ?, assigned_user = ?, gateway_id = ?, notes = ? WHERE id = ?',
-                     (name, address, port, assigned_user, gateway_id, notes, eid))
+        db().execute('UPDATE vlab_external_desktops SET name = ?, address = ?, port = ?, assigned_user = ?, notes = ? WHERE id = ?',
+                     (name, address, port, assigned_user, notes, eid))
     else:
         eid = new_id('ext')
-        db().execute('INSERT INTO vlab_external_desktops (id, name, address, port, assigned_user, gateway_id, notes, created_at) '
-                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (eid, name, address, port, assigned_user, gateway_id, notes, now()))
+        db().execute('INSERT INTO vlab_external_desktops (id, name, address, port, assigned_user, notes, created_at) '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?)', (eid, name, address, port, assigned_user, notes, now()))
     return get_external(eid)
 
 
@@ -533,15 +513,25 @@ def get_board(bid):
     return _one('SELECT * FROM vlab_boards WHERE id = ?', (bid,))
 
 
-def save_board(bid, name, cluster_id, node, usb, kind, notes):
+def save_board(bid, name, cluster_id, node, usb, kind, notes, target='usb', host='', port=None, protocol='', label='',
+               gateway_id='', cable_serial='', uart_port=None, power=''):
+    """Register or update a board. target 'usb' keeps the usb id and node (passthrough);
+    target 'network' keeps protocol/label and either a JTAG gateway VM + the cable's serial number
+    or a host/port of its own, and no usb id (hw_server / XVC / jtagd)."""
+    cols = ('name', 'cluster_id', 'node', 'usb', 'kind', 'notes', 'target', 'host', 'port', 'protocol', 'label',
+            'gateway_id', 'cable_serial', 'uart_port', 'power')
+    vals = (name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, gateway_id, cable_serial, uart_port, power)
     if bid:
-        db().execute('UPDATE vlab_boards SET name = ?, cluster_id = ?, node = ?, usb = ?, kind = ?, notes = ? WHERE id = ?',
-                     (name, cluster_id, node, usb, kind, notes, bid))
+        db().execute(f"UPDATE vlab_boards SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?", vals + (bid,))
     else:
         bid = new_id('brd')
-        db().execute('INSERT INTO vlab_boards (id, name, cluster_id, node, usb, kind, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                     (bid, name, cluster_id, node, usb, kind, notes, now()))
+        db().execute(f"INSERT INTO vlab_boards (id, {', '.join(cols)}, created_at) VALUES ({', '.join('?' * (len(cols) + 2))})",
+                     (bid,) + vals + (now(),))
     return get_board(bid)
+
+
+def boards_on_gateway(gid):
+    return _rows('SELECT * FROM vlab_boards WHERE gateway_id = ? ORDER BY name', (gid,))
 
 
 def set_board_attachment(bid, desktop_id, vmid, by, lease_user='', lease_until=None):
@@ -560,6 +550,72 @@ def due_boards(at_iso):
 
 def delete_board(bid):
     db().execute('DELETE FROM vlab_boards WHERE id = ?', (bid,))
+
+
+# --- JTAG gateway VMs --------------------------------------------------------------------
+
+def _jtag_gateway_row(r):
+    if not r:
+        return None
+    g = dict(r)
+    for k, empty in (('passthrough', []), ('cables', []), ('last_detail', {})):
+        try:
+            g[k] = json.loads(g.get(k) or 'null') or empty
+        except ValueError:
+            g[k] = empty
+    return g
+
+
+def list_jtag_gateways():
+    return [_jtag_gateway_row(r) for r in db().query('SELECT * FROM vlab_jtag_gateways ORDER BY name')]
+
+
+def get_jtag_gateway(gid):
+    return _jtag_gateway_row(db().query_one('SELECT * FROM vlab_jtag_gateways WHERE id = ?', (gid,))) if gid else None
+
+
+def save_jtag_gateway(gid, name, cluster_id, vmid, host, hw_port, jtagd_port, notes):
+    args = (name, cluster_id, vmid, host, int(hw_port), int(jtagd_port), notes)
+    if gid:
+        db().execute('UPDATE vlab_jtag_gateways SET name = ?, cluster_id = ?, vmid = ?, host = ?, hw_port = ?, jtagd_port = ?, '
+                     'notes = ? WHERE id = ?', args + (gid,))
+    else:
+        gid = new_id('jgw')
+        db().execute('INSERT INTO vlab_jtag_gateways (id, name, cluster_id, vmid, host, hw_port, jtagd_port, notes, created_at) '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', (gid,) + args + (now(),))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_passthrough(gid, items):
+    db().execute('UPDATE vlab_jtag_gateways SET passthrough = ? WHERE id = ?', (json.dumps(items), gid))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_cables(gid, cables):
+    db().execute("UPDATE vlab_jtag_gateways SET cables = ?, cables_at = ?, cables_error = '', cables_error_code = '', "
+                 "cables_error_at = NULL WHERE id = ?", (json.dumps(cables), now(), gid))
+    return get_jtag_gateway(gid)
+
+
+def set_jtag_gateway_cables_error(gid, code, message):
+    """The last cable read failed: keep the cables read before (stale, with their time) and say why."""
+    db().execute('UPDATE vlab_jtag_gateways SET cables_error = ?, cables_error_code = ?, cables_error_at = ? WHERE id = ?',
+                 (message[:300], code, now(), gid))
+    return get_jtag_gateway(gid)
+
+
+def mark_jtag_gateway(gid, ok, detail):
+    db().execute('UPDATE vlab_jtag_gateways SET last_check = ?, last_ok = ?, last_detail = ? WHERE id = ?',
+                 (now(), int(ok), json.dumps(detail), gid))
+    return get_jtag_gateway(gid)
+
+
+def mark_jtag_gateway_alerted(gid, at):
+    db().execute('UPDATE vlab_jtag_gateways SET alerted_at = ? WHERE id = ?', (at, gid))
+
+
+def delete_jtag_gateway(gid):
+    db().execute('DELETE FROM vlab_jtag_gateways WHERE id = ?', (gid,))
 
 
 # --- licence servers ---------------------------------------------------------------------

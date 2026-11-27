@@ -48454,6 +48454,45 @@
         ]
       }
     },
+    "/api/vlab/desktops/{desktop_id}/screenshot": {
+      "get": {
+        "operationId": "vlab.desktop_screenshot_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "The portal card's picture of a running desktop: the console tile's grab (screendump, one shared RFB frame as the fallback - nothing the user sees opens) behind the same 60 s cache. The assigned user (vlab.desk) or an admin with vlab.pool.view; in a pool whose desktops pass between users only the user on it now (assigned or in a session). 204 when there is no picture (stopped, not QEMU, the pool turned it off, the grab failed): the card keeps its OS logo; with X-Screen: off the display is there but black and the card says so. It is the VM's console, so a Windows desktop used over RDP shows its lock screen.",
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/vlab/admin/sessions": {
       "get": {
         "operationId": "vlab.session_log_get",
@@ -48820,6 +48859,51 @@
           }
         },
         "summary": "The nodes as the core sees them (cached a few seconds there), with how many guests and vLAB desktops each one runs.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/rrd": {
+      "get": {
+        "operationId": "vlab.cluster_rrd_get",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "클러스터 > 개요 history: CPU and memory use of the whole cluster over ?timeframe=hour|day|week|month|year, from each online node's Proxmox rrddata - CPU weighted by the node's cores, memory by its size. {timeframe, points: [{t, cpu, mem}]} in percent; a node that does not answer is left out (nodes_missing).",
         "parameters": [
           {
             "name": "cluster_id",
@@ -51081,7 +51165,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Rename a pool, change its description, switch it on or off, or its connection settings (max_sessions of a shared pool, the RDP / Guacamole gateway). Its cluster and type stay: the desktops, grants and schedules were made for them - make a new pool instead. A switched-off pool hands out and connects no desktop; open sessions run on.",
+        "summary": "Rename a pool, change its description, switch it on or off, or its connection settings (max_sessions of a shared pool). Its cluster and type stay: the desktops, grants and schedules were made for them - make a new pool instead. A switched-off pool hands out and connects no desktop; open sessions run on.",
         "parameters": [
           {
             "name": "pool_id",
@@ -51340,6 +51424,61 @@
             }
           }
         ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/pools/{pool_id}/desktops/prune": {
+      "post": {
+        "operationId": "vlab.prune_desktops_post",
+        "tags": [
+          "vlab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Drop the pool's desktops whose guest is gone from the cluster (deleted in Proxmox).",
+        "parameters": [
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -53986,232 +54125,6 @@
         ]
       }
     },
-    "/api/vlab/admin/gateways": {
-      "get": {
-        "operationId": "vlab_next.list_gateways_get",
-        "tags": [
-          "vlab_next"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "x-pegaprox-auth": "decorator",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ],
-        "x-pegaprox-permissions": [
-          "vlab.pool.view"
-        ]
-      },
-      "post": {
-        "operationId": "vlab_next.create_gateway_post",
-        "tags": [
-          "vlab_next"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          }
-        },
-        "x-pegaprox-auth": "decorator",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ],
-        "x-pegaprox-permissions": [
-          "vlab.pool.manage"
-        ]
-      }
-    },
-    "/api/vlab/admin/gateways/{gid}": {
-      "put": {
-        "operationId": "vlab_next.update_gateway_put",
-        "tags": [
-          "vlab_next"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "parameters": [
-          {
-            "name": "gid",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          }
-        },
-        "x-pegaprox-auth": "decorator",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ],
-        "x-pegaprox-permissions": [
-          "vlab.pool.manage"
-        ]
-      },
-      "delete": {
-        "operationId": "vlab_next.delete_gateway_delete",
-        "tags": [
-          "vlab_next"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "parameters": [
-          {
-            "name": "gid",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-pegaprox-auth": "decorator",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ],
-        "x-pegaprox-permissions": [
-          "vlab.pool.manage"
-        ]
-      }
-    },
-    "/api/vlab/admin/gateways/{gid}/check": {
-      "post": {
-        "operationId": "vlab_next.check_gateway_post",
-        "tags": [
-          "vlab_next"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          },
-          "403": {
-            "description": "Insufficient permissions"
-          }
-        },
-        "parameters": [
-          {
-            "name": "gid",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          }
-        },
-        "x-pegaprox-auth": "decorator",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ],
-        "x-pegaprox-permissions": [
-          "vlab.pool.manage"
-        ]
-      }
-    },
     "/api/vlab/admin/external-desktops": {
       "get": {
         "operationId": "vlab_next.list_external_get",
@@ -55026,6 +54939,484 @@
         ]
       }
     },
+    "/api/vlab/me/boards": {
+      "get": {
+        "operationId": "vlab_next.my_boards_get",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Boards lent to the caller. A network board carries its connection (host:port, protocol and a how-to): the researcher opens Vivado / Quartus inside the desktop and dials it, so it works over RDP, Warpgate or SPICE alike. A USB board is on the desktop already (connection None).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/admin/boards/{bid}/power": {
+      "post": {
+        "operationId": "vlab_next.board_power_post",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Remote power for a board (smart PDU / relay): {action: on|off|cycle}. An extension point - answers 501 until a driver is registered (pegaprox/vlab/jtag_gw.py register_power_driver).",
+        "parameters": [
+          {
+            "name": "bid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways": {
+      "get": {
+        "operationId": "vlab_next.list_jtag_gateways_get",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      },
+      "post": {
+        "operationId": "vlab_next.create_jtag_gateway_post",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways/{gid}": {
+      "put": {
+        "operationId": "vlab_next.update_jtag_gateway_put",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      },
+      "delete": {
+        "operationId": "vlab_next.delete_jtag_gateway_delete",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways/{gid}/passthrough": {
+      "post": {
+        "operationId": "vlab_next.add_gateway_passthrough_post",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Pass a JTAG cable {kind: 'usb', usb: '03fd:0008' | '1-4.2'} or a whole PCIe USB controller {kind: 'pci', pci: '0000:05:00.0'} through to the gateway VM, on the first free usbN / hostpciN. USB goes on while the VM runs; a PCIe controller needs a VM restart (needs_restart).",
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways/{gid}/passthrough/{slot}": {
+      "delete": {
+        "operationId": "vlab_next.remove_gateway_passthrough_delete",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "slot",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways/{gid}/discover": {
+      "post": {
+        "operationId": "vlab_next.discover_gateway_cables_post",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Read the USB devices the gateway sees (guest agent, sysfs) - JTAG cables with their serial numbers, to map each cable to a board. Changes nothing on the gateway.",
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/jtag-gateways/{gid}/check": {
+      "post": {
+        "operationId": "vlab_next.check_jtag_gateway_post",
+        "tags": [
+          "vlab_next"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.accel.manage"
+        ]
+      }
+    },
     "/api/vlab/admin/buildfarm": {
       "get": {
         "operationId": "vlab_next.buildfarm_get",
@@ -55528,9 +55919,9 @@
         ]
       }
     },
-    "/api/vlab/me/external/{eid}/guac": {
+    "/api/vlab/me/external/{eid}/web": {
       "get": {
-        "operationId": "vlab_next.my_external_guac_get",
+        "operationId": "vlab_next.my_external_web_get",
         "tags": [
           "vlab_next"
         ],
@@ -55548,6 +55939,7 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "Browser RDP to an external desktop: through 보안 게이트웨이 (its web UI opens the PC). There is no other browser path: with Warpgate off, WG_OFF.",
         "parameters": [
           {
             "name": "eid",
@@ -56855,7 +57247,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "{cores?, sockets?, memory_mb?} - vCPUs and memory.",
+        "summary": "{cores?, sockets?, memory_mb?, name?} - vCPUs, memory, and the VM's name (the desktop takes it too).",
         "parameters": [
           {
             "name": "desktop_id",
@@ -58845,6 +59237,200 @@
         ],
         "x-pegaprox-permissions": [
           "vlab.accel.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktop-templates": {
+      "get": {
+        "operationId": "vlab_desktpl.presets_get",
+        "tags": [
+          "vlab_desktpl"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktop-templates/builds/{bid}": {
+      "get": {
+        "operationId": "vlab_desktpl.build_detail_get",
+        "tags": [
+          "vlab_desktpl"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "bid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktop-templates/builds/{bid}/cancel": {
+      "post": {
+        "operationId": "vlab_desktpl.build_cancel_post",
+        "tags": [
+          "vlab_desktpl"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "bid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/clusters/{cluster_id}/desktop-templates/{preset_id}/build": {
+      "post": {
+        "operationId": "vlab_desktpl.start_build_post",
+        "tags": [
+          "vlab_desktpl"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
         ]
       }
     },
@@ -61900,6 +62486,24 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/vlab/password-policy": {
+      "get": {
+        "operationId": "vlab_accounts.password_policy_get",
+        "tags": [
+          "vlab_accounts"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "{min_length, uppercase, lowercase, numbers, special, complexity, unified, domain} - for the sign-up, reset and 내 계정 forms; a password that passes it passes the directory too.",
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/api/vlab/password-reset/check": {
       "post": {
         "operationId": "vlab_accounts.password_reset_check_post",
@@ -64541,6 +65145,265 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/vlab/mcp": {
+      "delete": {
+        "operationId": "vlab_mcp.mcp_no_stream_delete",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "x-pegaprox-auth": "public"
+      },
+      "get": {
+        "operationId": "vlab_mcp.mcp_no_stream_get",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "x-pegaprox-auth": "public"
+      },
+      "post": {
+        "operationId": "vlab_mcp.mcp_endpoint_post",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/mcp/stdio.py": {
+      "get": {
+        "operationId": "vlab_mcp.stdio_bridge_get",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/mcp/moavi-desk.mcpb": {
+      "get": {
+        "operationId": "vlab_mcp.mcpb_bundle_get",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "No secret inside: the address this was downloaded from is the default, the token is asked at install.",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/admin/mcp": {
+      "get": {
+        "operationId": "vlab_mcp.admin_mcp_get",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_mcp.admin_mcp_switch_put",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{enabled?, networks?, user_password, otp?} - switching on and changing the networks need the password again and an allowed network; switching off does not (it only takes access away).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/admin/mcp/tokens": {
+      "post": {
+        "operationId": "vlab_mcp.admin_mcp_issue_post",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "{name, scope, days?, sources?, user_password, otp?} - a manage token only for a platform administrator (admin.settings); sources default to the network of the PC asking.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/mcp/tokens/{token_id}": {
+      "delete": {
+        "operationId": "vlab_mcp.admin_mcp_revoke_delete",
+        "tags": [
+          "vlab_mcp"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Revoking only takes access away: no password asked, from anywhere.",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
     "/api/vlab/me/accel-bookings/options": {
       "get": {
         "operationId": "vlab_accel_book.my_options_get",
@@ -64952,6 +65815,2105 @@
         ],
         "x-pegaprox-permissions": [
           "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/warpgate": {
+      "get": {
+        "operationId": "vlab_warpgate.get_warpgate_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_warpgate.put_warpgate_put",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/rdpgw": {
+      "get": {
+        "operationId": "vlab_warpgate.get_rdpgw_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "보안 게이트웨이 · 장치 연결 방식 (rdpgw): set up by the deploy (.env), read here. The pools that use it (policy rdp_route 'devices') are counted; whether it answers is checked now.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/warpgate/test": {
+      "post": {
+        "operationId": "vlab_warpgate.test_warpgate_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/warpgate/sessions": {
+      "get": {
+        "operationId": "vlab_warpgate.warpgate_sessions_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/me/warpgate": {
+      "get": {
+        "operationId": "vlab_warpgate.my_warpgate_status_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "포털이 보안 게이트웨이 연결 항목을 보일지 판단하는 가벼운 상태(토큰·주소 노출 없음).",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-keys": {
+      "get": {
+        "operationId": "vlab_warpgate.my_ssh_keys_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "내 계정: 내가 Warpgate에 등록한 SSH 공개키 목록. 개인키는 다루지 않는다.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      },
+      "post": {
+        "operationId": "vlab_warpgate.add_my_ssh_key_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "내 공개키를 Warpgate에 등록(엔진은 저장하지 않음). 개인키·잘못된 형식은 거부한다.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-keys/{key_id}": {
+      "delete": {
+        "operationId": "vlab_warpgate.delete_my_ssh_key_delete",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/ssh-config": {
+      "get": {
+        "operationId": "vlab_warpgate.my_ssh_config_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "researcher_ssh 풀의 내 데스크톱을 자기 SSH 도구로 쓰기 위한 정보: Warpgate 호스트·포트·로그인과 데스크톱별 ~/.ssh/config 항목(`User <wguser>:<target>`; Warpgate는 점프 호스트가 아니라 이 형식으로 대상을 고른다). MOAVI Desk 클라이언트가 이 블록을 사용자의 config에 자동으로 넣는다.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktops/{desktop_id}/warpgate-nla/rotate": {
+      "post": {
+        "operationId": "vlab_warpgate.rotate_desktop_nla_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A new NLA service account password for this Windows desktop, now: set in the VM through the guest agent and put on its Warpgate RDP target. A stopped desktop gets it on its next connect (the old one keeps working in the VM until then). The password is never in the answer.",
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/warpgate": {
+      "post": {
+        "operationId": "vlab_warpgate.my_desktop_warpgate_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "그 사용자+그 대상에만 쓸 수 있는 1회용·단시간 Warpgate 티켓을 발급하고 접속 좌표를 돌려준다. 사용자 비밀번호는 묻지도 저장하지도 않는다.",
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/oidc/.well-known/openid-configuration": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_discovery_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "OIDC discovery for Warpgate (no sign-in; nothing secret).",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/jwks": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_jwks_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The public key Warpgate checks the ID token with.",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/authorize": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_authorize_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Warpgate sends the browser here; the user's portal session answers (no password). Only Warpgate's own SSO return URL is accepted, with PKCE S256.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/oidc/token": {
+      "post": {
+        "operationId": "vlab_warpgate.oidc_token_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "Code -> ID token, for Warpgate (client_secret_basic or _post).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/oidc/userinfo": {
+      "get": {
+        "operationId": "vlab_warpgate.oidc_userinfo_get",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "x-pegaprox-auth": "public"
+      },
+      "post": {
+        "operationId": "vlab_warpgate.oidc_userinfo_post",
+        "tags": [
+          "vlab_warpgate"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/admin/bundled-directory": {
+      "get": {
+        "operationId": "vlab_directory.get_directory_get",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_directory.put_directory_put",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/check": {
+      "post": {
+        "operationId": "vlab_directory.check_directory_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/sync": {
+      "post": {
+        "operationId": "vlab_directory.sync_directory_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/join-account/rotate": {
+      "post": {
+        "operationId": "vlab_directory.rotate_join_account_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/accounts": {
+      "get": {
+        "operationId": "vlab_directory.directory_accounts_get",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/groups": {
+      "get": {
+        "operationId": "vlab_directory.directory_groups_get",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/bundled-directory/joins": {
+      "get": {
+        "operationId": "vlab_directory.directory_joins_get",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktops/{desktop_id}/domain-join": {
+      "post": {
+        "operationId": "vlab_directory.join_one_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/desktops/{desktop_id}/domain-join/check": {
+      "post": {
+        "operationId": "vlab_directory.check_one_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
+    "/api/vlab/admin/pools/{pool_id}/domain-join": {
+      "post": {
+        "operationId": "vlab_directory.join_pool_post",
+        "tags": [
+          "vlab_directory"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The pool's running desktops that are not joined yet, up to `limit` (default 10, at most 20) in this request; `remaining` says how many are left for the next call.",
+        "parameters": [
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.manage"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/sources": {
+      "get": {
+        "operationId": "vlab_adobjects.ad_sources_get",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/test": {
+      "post": {
+        "operationId": "vlab_adobjects.ad_test_post",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/tree": {
+      "get": {
+        "operationId": "vlab_adobjects.ad_tree_get",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/objects": {
+      "get": {
+        "operationId": "vlab_adobjects.ad_objects_get",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/object": {
+      "get": {
+        "operationId": "vlab_adobjects.ad_object_get",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "put": {
+        "operationId": "vlab_adobjects.ad_update_put",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      },
+      "delete": {
+        "operationId": "vlab_adobjects.ad_delete_delete",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/ous": {
+      "post": {
+        "operationId": "vlab_adobjects.ad_create_ou_post",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/groups": {
+      "post": {
+        "operationId": "vlab_adobjects.ad_create_group_post",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/users": {
+      "post": {
+        "operationId": "vlab_adobjects.ad_create_user_post",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/object/enabled": {
+      "put": {
+        "operationId": "vlab_adobjects.ad_enabled_put",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/object/password": {
+      "put": {
+        "operationId": "vlab_adobjects.ad_password_put",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/admin/ad/members": {
+      "post": {
+        "operationId": "vlab_adobjects.ad_members_post",
+        "tags": [
+          "vlab_adobjects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/vlab/desk-files/{token}": {
+      "get": {
+        "operationId": "vlab_desk_files.fast_pull_get",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The desktop fetches an upload part (single use).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "public"
+      },
+      "put": {
+        "operationId": "vlab_desk_files.fast_push_put",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The desktop hands over a download read (single use, exactly the length asked for; sent as application/offset+octet-stream, a type the engine's request filter lets through).",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files": {
+      "get": {
+        "operationId": "vlab_desk_files.list_files_get",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      },
+      "delete": {
+        "operationId": "vlab_desk_files.delete_file_delete",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files/mkdir": {
+      "post": {
+        "operationId": "vlab_desk_files.make_folder_post",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files/download": {
+      "get": {
+        "operationId": "vlab_desk_files.download_file_get",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files/uploads": {
+      "post": {
+        "operationId": "vlab_desk_files.start_upload_post",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files/uploads/{uid}": {
+      "patch": {
+        "operationId": "vlab_desk_files.upload_part_patch",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      },
+      "delete": {
+        "operationId": "vlab_desk_files.abort_upload_delete",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
+        ]
+      }
+    },
+    "/api/vlab/me/desktops/{desktop_id}/files/uploads/{uid}/finish": {
+      "post": {
+        "operationId": "vlab_desk_files.finish_upload_post",
+        "tags": [
+          "vlab_desk_files"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "desktop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.desk"
         ]
       }
     },

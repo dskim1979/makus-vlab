@@ -24,7 +24,6 @@ def env(api, seed):
     desk = store.add_desktop(pool, 'pve1', 300, 'lab-win11-01')
     store.assign(desk['id'], 'alice') if hasattr(store, 'assign') else None
     store.start_session('alice', desk, 'spice', '192.168.10.21')
-    catalog.save_gateway(None, '브라우저 RDP', 'guacamole', 'guac.example.com', 8443, '', True, 'a' * 32)
     return admin, alice
 
 
@@ -66,7 +65,7 @@ def test_bundle_holds_the_period_and_no_secrets(env):
     zf, root, read = _zip(r)
     names = {n.split('/', 1)[1] for n in zf.namelist()}
     for need in ('manifest.json', 'system/versions.json', 'clusters/status.json', 'clusters/tasks.json',
-                 'activity/sessions.json', 'audit/audit_log.json', 'config/pools.json', 'config/gateways.json'):
+                 'activity/sessions.json', 'audit/audit_log.json', 'config/pools.json'):
         assert need in names, need
     manifest = json.loads(read('manifest.json'))
     assert manifest['contents']['sessions'] == 1 and 'docker compose logs --since' in manifest['not_included']

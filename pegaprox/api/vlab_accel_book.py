@@ -81,7 +81,13 @@ def _clusters():
 
 
 def _boards():
-    return [{'cluster_id': b['cluster_id'], 'id': b['id'], 'name': b['name'], 'node': b['node'], 'kind': b.get('kind') or ''}
+    from pegaprox.api.vlab_next import _jtag_gateway_state
+    gws = {g['id']: g for g in catalog.list_jtag_gateways()}
+    return [{'cluster_id': b['cluster_id'], 'id': b['id'], 'name': b['name'], 'node': b['node'], 'kind': b.get('kind') or '',
+             'target': b.get('target') or 'usb', 'protocol': b.get('protocol') or '',
+             # a board on a JTAG gateway that is down cannot be lent now (booking still allowed for later)
+             'gateway': (gws[b['gateway_id']]['name'] if b.get('gateway_id') in gws else ''),
+             'available': not (b.get('gateway_id') in gws and _jtag_gateway_state(gws[b['gateway_id']]) == 'down')}
             for b in catalog.list_boards() if core._can_reach(b['cluster_id'])]
 
 
@@ -199,7 +205,8 @@ def book():
     why = ab.check_times(start, end, s, _local_now(), privileged)
     if why:
         return _bad(_WHY_KO[why], 400, code=why)
-    if kind == 'board':
+    if kind == 'board' and (catalog.get_board(resource).get('target') or 'usb') == 'usb':
+        # a network board (hw_server / XVC / jtagd) is reached over TCP from any node
         b = catalog.get_board(resource)
         live = core._vm_states(cluster_id).get(int(desk['vmid'])) or {}
         if (live.get('node') or desk['node']) != b['node']:

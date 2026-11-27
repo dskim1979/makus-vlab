@@ -32,10 +32,10 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   terms: pegaprox/api/vlab_accounts.py)
 
   GET/POST /api/vlab/admin/usb-devices, PUT/DELETE .../<id>   the USB device library       vlab.pool.view / manage
-  GET/POST /api/vlab/admin/gateways, PUT/DELETE .../<id>, POST .../<id>/check   gateways    vlab.pool.view / manage
   GET/POST /api/vlab/admin/external-desktops, PUT/DELETE .../<id>   physical PCs over RDP   vlab.pool.view / manage
   GET    /api/vlab/me/external                           the caller's external desktops       vlab.desk
-  GET    /api/vlab/me/external/<id>/rdp                  an .rdp file for it                  vlab.desk
+  GET    /api/vlab/me/external/<id>/rdp                  an .rdp file for it (via 보안 게이트웨이 when its RDP switch is on)  vlab.desk
+  GET    /api/vlab/me/external/<id>/web                  browser RDP through 보안 게이트웨이 (Warpgate web UI link)  vlab.desk
 
   GET    /api/vlab/admin/golden-images                   with their versions (snapshots)      vlab.pool.view
   POST   /api/vlab/admin/golden-images                   {cluster_id, vmid, name?, notes?}    vlab.pool.manage
@@ -45,8 +45,15 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   POST   /api/vlab/admin/golden-images/<id>/deploy       {pool_id, count, name_prefix, start_vmid?} full clones of the current version  vlab.pool.manage
 
   GET/POST /api/vlab/admin/boards, PUT/DELETE .../<id>   the board lab (JTAG cables)          vlab.pool.view / vlab.accel.manage
-  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough, slot usb4  vlab.accel.manage
+  POST   /api/vlab/admin/boards/<id>/attach              {desktop_id} USB passthrough (slot usb4), or a network
+                                                       board's grant (hw_server/XVC/jtagd: no VM change)  vlab.accel.manage
   POST   /api/vlab/admin/boards/<id>/detach                                                    vlab.accel.manage
+  GET    /api/vlab/me/boards                             boards lent to the caller, network ones with host:port  vlab.desk
+  POST   /api/vlab/admin/boards/<id>/power               {action on|off|cycle} remote power hook (501 without a driver)  vlab.accel.manage
+  GET/POST /api/vlab/admin/jtag-gateways, PUT/DELETE .../<id>   JTAG gateway VMs (hw_server / XVC / jtagd)  vlab.pool.view / vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/passthrough, DELETE .../passthrough/<slot>   a cable (USB) or a PCIe USB controller on the gateway VM  vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/discover   the cables the gateway sees (guest agent)  vlab.accel.manage
+  POST   /api/vlab/admin/jtag-gateways/<id>/check      health now (VM running, ports answering)  vlab.accel.manage
 
   GET    /api/vlab/admin/buildfarm                       build farm pools: size, in use, load  vlab.pool.view
 
@@ -55,7 +62,6 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
 
   GET/PUT /api/vlab/admin/pools/<id>/grants          who may claim / use a pool (user, department, group)  vlab.pool.view / manage
   GET    /api/vlab/me/pools, POST .../<id>/claim, POST .../<id>/route   claim a desktop, route into a shared pool  vlab.desk
-  GET    /api/vlab/me/external/<id>/guac              browser RDP link (Guacamole) for an external desktop  vlab.desk
   POST   /api/vlab/admin/golden-images/<id>/rollout   desktops of an older version replaced by the current one  vlab.pool.manage
   GET/POST /api/vlab/me/build-jobs, POST .../<id>/cancel     the caller's build jobs                vlab.desk
   GET/POST /api/vlab/admin/build-jobs, POST .../<id>/cancel  every build job                        vlab.pool.view / manage
@@ -114,9 +120,6 @@ Copyright (C) 2025-2026 PegaProx Team / MAKUS SYSTEMS - AGPL-3.0 (see LICENSE, N
   (applied on connect, on a shared pool's routing and before a build job starts)
 """
 
-import base64
-import hashlib
-import hmac
 import json as _json
 import logging
 import re
@@ -124,16 +127,15 @@ import shlex
 import socket
 import time
 from datetime import datetime
-from urllib.parse import quote as _quote
 
-from flask import Blueprint, has_request_context, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from pegaprox.api import vlab as core
 from pegaprox.api import vlab_accounts as acct
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
-from pegaprox.vlab import catalog, datasets, envcat, nas, store
+from pegaprox.vlab import catalog, datasets, directory, envcat, nas, store
 
 bp = Blueprint('vlab_next', __name__)
 
@@ -225,6 +227,7 @@ def create_department():
         return _bad(str(e))
     dep = catalog.save_department(None, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.create', f"department '{name}'", get_client_ip())
+    directory.after_departments()
     return jsonify({'department': dep}), 201
 
 
@@ -239,6 +242,7 @@ def update_department(dep_id):
         return _bad(str(e))
     dep = catalog.save_department(dep_id, name, parent, sort, manager)
     log_audit(_user(), 'vlab.department.update', f"department '{name}'", get_client_ip())
+    directory.after_departments()
     return jsonify({'department': dep})
 
 
@@ -252,6 +256,7 @@ def delete_department(dep_id):
         return _bad('Move or delete its sub-departments first', 409)
     catalog.delete_department(dep_id)
     log_audit(_user(), 'vlab.department.delete', f"department '{dep['name']}' (its members now belong to none)", get_client_ip())
+    directory.after_departments()
     return jsonify({'success': True})
 
 
@@ -275,6 +280,7 @@ def set_user_department(username):
         return _bad('department_id: no such department')
     catalog.set_department(username, dep)
     log_audit(_user(), 'vlab.department.member', f"{username} -> {dep or '(none)'}", get_client_ip())
+    directory.after_change(username)
     return jsonify({'username': username, 'department_id': dep})
 
 
@@ -349,6 +355,12 @@ def create_account():
         return _bad(str(e))
     if data.get('expires_at') and (data.get('role') or 'user') == 'admin':
         return _bad('expires_at: an administrator account does not expire')
+    # the bundled directory: the first password must be one the DC takes too
+    if directory.eligible(str(data.get('username') or '').strip().lower(), {'role': data.get('role') or 'user', 'auth_source': 'local'}):
+        why = directory.policy_error(data.get('password') or '', str(data.get('username') or '').strip().lower(),
+                                     data.get('display_name') or '')
+        if why:
+            return jsonify({'error': why, 'code': 'PASSWORD_POLICY'}), 400
     resp = core_users.create_user()
     ok, body = _core_ok(resp)
     if not ok:
@@ -361,8 +373,11 @@ def create_account():
     exp = None
     if data.get('expires_at'):
         exp = (acct.apply_expiry(name, data['expires_at'], _user()) or {}).get('expires_at')
+    # the bundled directory: the account and the password given here go there now (none kept)
+    moved = directory.after_create(name, data.get('password') or '')
     return jsonify({'user': dict(body['user'], department_id=data.get('department_id') or None,
-                                 must_change_password=bool(data.get('must_change_password')), expires_at=exp)}), 201
+                                 must_change_password=bool(data.get('must_change_password')), expires_at=exp,
+                                 directory=bool(moved))}), 201
 
 
 @bp.route('/api/vlab/admin/users/<username>', methods=['PUT'])
@@ -398,6 +413,7 @@ def update_account(username):
     if 'expires_at' in data:
         row = acct.apply_expiry(username, data['expires_at'], _user())
         log_audit(_user(), 'vlab.account.expiry', f"{username}: last day {row['expires_at'] if row else 'none'}", get_client_ip())
+    directory.after_change(username)
     return jsonify({'success': True})
 
 
@@ -415,6 +431,7 @@ def delete_account(username):
         accounts.forget(username)
         from pegaprox.vlab import notices
         notices.forget_user(username)
+        directory.after_delete(username)
     return resp
 
 
@@ -429,12 +446,57 @@ def reset_account_password(username):
         _only(data, ('password', 'must_change_password'))
     except ValueError as e:
         return _bad(str(e))
+    from pegaprox.utils.auth import load_users
+    if directory.owns((load_users() or {}).get(username)) and directory.active():
+        return _directory_password_reset(username, data)
     resp = core_users.admin_change_password(username)
     if _core_ok(resp)[0]:
         _force_password_change(username, bool(data.get('must_change_password')))
         if username != _user():
             from pegaprox.api.vlab_notices import account_security
             account_security(username, 'password', _user())
+    return resp
+
+
+def _directory_password_reset(username, data):
+    """An admin's reset of a bundled-directory account: the core route's checks (visible,
+    tenant, outrank, policy), then the DC's own password set - no hash is kept here."""
+    from pegaprox.api import users as core_users
+    from pegaprox.core.db import DEFAULT_TENANT_ID
+    from pegaprox.utils.auth import (invalidate_all_user_sessions, load_users, revoke_user_api_tokens,
+                                     validate_password_policy)
+    from pegaprox.utils.realtime import invalidate_user_sse_tokens
+    if username not in core._visible_users():
+        return _bad('User not found', 404)
+    rec = (load_users() or {}).get(username)
+    ct = core_users._caller_tenant_or_none()
+    if ct is not None and rec.get('tenant_id', DEFAULT_TENANT_ID) != ct:
+        return _bad('Access denied: cannot change passwords for users in other tenants', 403)
+    if not core_users._caller_can_manage_user(rec):
+        return _bad('Access denied: target has privileges beyond your own', 403)
+    password = str(data.get('password') or '')
+    ok, why = validate_password_policy(password)
+    if not ok:
+        return _bad(why)
+    try:
+        directory.set_password(username, password, rec)
+    except directory.DirectoryError as e:
+        if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+            return jsonify({'error': e.detail if e.code == 'PASSWORD_POLICY' else 'The directory refused the password', 'code': e.code, 'detail': e.detail}), 400
+        return jsonify({'error': 'The directory cannot be reached - try again later', 'code': e.code}), 503
+    sessions = invalidate_all_user_sessions(username)
+    revoke_user_api_tokens(username)
+    invalidate_user_sse_tokens(username)
+    _force_password_change(username, bool(data.get('must_change_password')))
+    log_audit(_user(), 'user.password_reset', f"Admin reset the directory password of {username} ({sessions} sessions invalidated)",
+              get_client_ip())
+    if username != _user():
+        from pegaprox.api.vlab_notices import account_security
+        account_security(username, 'password', _user())
+    resp = jsonify({'success': True, 'message': f'Password for {username} changed', 'sessions_invalidated': sessions,
+                    'relogin_required': username == _user()})
+    if username == _user():
+        resp.delete_cookie('session_id')
     return resp
 
 
@@ -557,6 +619,7 @@ def signup_config():
     t = acct.terms_settings()
     out = {'enabled': s['enabled'], 'departments': deps}
     if s['enabled']:
+        out['password_policy'] = directory.password_policy()
         out.update(verify_email=s['verify_email'], auto_domains=s['auto_domains'],
                    terms={'enabled': t['enabled'], 'version': t['version']})
     return jsonify(out)
@@ -602,8 +665,23 @@ def signup():
         return _bad('Too many requests are waiting - try again later', 429)
     if ip and sum(1 for s in catalog.list_signups('pending') if s['client_ip'] == ip) >= MAX_PENDING_PER_IP:
         return _bad('Too many requests from this address are waiting', 429)
-    salt, pw_hash = hash_password(password)
-    req = catalog.add_signup(username, display, email, dep, note, salt, pw_hash, ip)
+    req = None
+    if directory.active() and directory.NAME.match(username):
+        # the bundled directory: the password goes to a disabled directory account now and the
+        # request keeps no hash of it; the review enables or deletes that account
+        sid = store.new_id('sig')
+        try:
+            directory.signup_account(username, display, email, password, sid)
+            req = catalog.add_signup(username, display, email, dep, note, directory.SIGNUP_SALT, '', ip, sid=sid)
+        except directory.DirectoryError as e:
+            if e.code == 'EXISTS':
+                return _bad('This username is taken or already waiting for review', 409)
+            if e.code in ('PASSWORD_REFUSED', 'PASSWORD_POLICY'):
+                return _bad(e.detail if e.code == 'PASSWORD_POLICY' else 'The password was refused - choose another one')
+            logging.warning(f'[VLAB] sign-up of {username}: bundled directory away ({e.code}), kept for the portal')
+    if req is None:
+        salt, pw_hash = hash_password(password)
+        req = catalog.add_signup(username, display, email, dep, note, salt, pw_hash, ip)
     log_audit(username, 'vlab.signup.request', f"sign-up request {req['id']}", ip)
     from pegaprox.vlab import accounts
     if terms['enabled']:
@@ -666,6 +744,7 @@ def reject_signup(sid):
     except ValueError as e:
         return _bad(str(e))
     out = catalog.review_signup(sid, 'rejected', _user(), reason)
+    directory.after_signup_rejected(req['username'])
     log_audit(_user(), 'vlab.signup.reject', f"sign-up of {req['username']} rejected" + (f': {reason}' if reason else ''), get_client_ip())
     from pegaprox.api.vlab_notices import signup_answered
     signup_answered(req, False, reason)
@@ -777,86 +856,6 @@ def delete_usb_device(uid):
     return jsonify({'success': True})
 
 
-# --- gateways ----------------------------------------------------------------------------
-
-def _gateway_body():
-    data = _body()
-    kind = str(data.get('kind') or '')
-    if kind not in catalog.GATEWAY_KINDS:
-        raise ValueError('kind must be ' + ', '.join(catalog.GATEWAY_KINDS))
-    key = data.get('secret_key')
-    if key not in (None, ''):
-        key = str(key).strip().lower()
-        if kind != 'guacamole' or not re.match(r'^[0-9a-f]{32}$', key):
-            raise ValueError('secret_key: 32 hex digits (the 128-bit key of guacamole-auth-json), Guacamole only')
-    else:
-        key = None
-    return (_text(data, 'name', 80, required=True), kind, _host(data, 'address'),
-            _int(data, 'port', 1, 65535, catalog.GATEWAY_KINDS[kind]), _text(data, 'notes', 300), data.get('enabled', True) is not False, key)
-
-
-@bp.route('/api/vlab/admin/gateways', methods=['GET'])
-@require_auth(perms=['vlab.pool.view'])
-def list_gateways():
-    used = {}
-    for e in catalog.list_external():
-        if e['gateway_id']:
-            used[e['gateway_id']] = used.get(e['gateway_id'], 0) + 1
-    return jsonify({'gateways': [dict(g, external=used.get(g['id'], 0)) for g in catalog.list_gateways()],
-                    'kinds': catalog.GATEWAY_KINDS})
-
-
-@bp.route('/api/vlab/admin/gateways', methods=['POST'])
-@require_auth(perms=['vlab.pool.manage'])
-def create_gateway():
-    try:
-        args = _gateway_body()
-    except ValueError as e:
-        return _bad(str(e))
-    gw = catalog.save_gateway(None, *args)
-    log_audit(_user(), 'vlab.gateway.create', f"gateway '{gw['name']}' {gw['kind']} {gw['address']}:{gw['port']}", get_client_ip())
-    return jsonify({'gateway': gw}), 201
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>', methods=['PUT'])
-@require_auth(perms=['vlab.pool.manage'])
-def update_gateway(gid):
-    if not catalog.get_gateway(gid):
-        return _bad('Gateway not found', 404)
-    try:
-        args = _gateway_body()
-    except ValueError as e:
-        return _bad(str(e))
-    gw = catalog.save_gateway(gid, *args)
-    log_audit(_user(), 'vlab.gateway.update', f"gateway '{gw['name']}'", get_client_ip())
-    return jsonify({'gateway': gw})
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>', methods=['DELETE'])
-@require_auth(perms=['vlab.pool.manage'])
-def delete_gateway(gid):
-    gw = catalog.get_gateway(gid)
-    if not gw:
-        return _bad('Gateway not found', 404)
-    catalog.delete_gateway(gid)
-    log_audit(_user(), 'vlab.gateway.delete', f"gateway '{gw['name']}' (external desktops on it go direct)", get_client_ip())
-    return jsonify({'success': True})
-
-
-@bp.route('/api/vlab/admin/gateways/<gid>/check', methods=['POST'])
-@require_auth(perms=['vlab.pool.manage'])
-def check_gateway(gid):
-    gw = catalog.get_gateway(gid)
-    if not gw:
-        return _bad('Gateway not found', 404)
-    if gid == catalog.BUILTIN_GUAC_ID:      # the bundled one: the engine reaches it inside compose
-        ok, ms, err = _tcp_probe('guacamole', 8080)
-    else:
-        ok, ms, err = _tcp_probe(gw['address'], gw['port'])
-    gw = catalog.mark_gateway(gid, ok, f'{ms} ms' if ok else err)
-    return jsonify({'gateway': gw, 'ok': ok, 'ms': ms, 'error': err})
-
-
 # --- external desktops -------------------------------------------------------------------
 
 def _external_body():
@@ -865,11 +864,8 @@ def _external_body():
     user = str(data.get('assigned_user') or '').strip() or None
     if user and user not in load_users():
         raise ValueError('assigned_user: no such user')
-    gw = str(data.get('gateway_id') or '').strip() or None
-    if gw and not catalog.get_gateway(gw):
-        raise ValueError('gateway_id: no such gateway')
     return (_text(data, 'name', 80, required=True), _host(data, 'address'), _int(data, 'port', 1, 65535, 3389),
-            user, gw, _text(data, 'notes', 300))
+            user, _text(data, 'notes', 300))
 
 
 @bp.route('/api/vlab/admin/external-desktops', methods=['GET'])
@@ -893,13 +889,16 @@ def create_external():
 @bp.route('/api/vlab/admin/external-desktops/<eid>', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def update_external(eid):
-    if not catalog.get_external(eid):
+    old = catalog.get_external(eid)
+    if not old:
         return _bad('External desktop not found', 404)
     try:
         args = _external_body()
     except ValueError as e:
         return _bad(str(e))
     ext = catalog.save_external(eid, *args)
+    if old and old['assigned_user'] != ext['assigned_user']:
+        _forget_warpgate(eid)
     log_audit(_user(), 'vlab.external.update', f"external desktop '{ext['name']}' -> {ext['assigned_user'] or '-'}", get_client_ip())
     return jsonify({'desktop': ext})
 
@@ -911,8 +910,18 @@ def delete_external(eid):
     if not ext:
         return _bad('External desktop not found', 404)
     catalog.delete_external(eid)
+    _forget_warpgate(eid)
     log_audit(_user(), 'vlab.external.delete', f"external desktop '{ext['name']}'", get_client_ip())
     return jsonify({'success': True})
+
+
+def _forget_warpgate(eid):
+    """The external desktop's 보안 게이트웨이 target goes (best effort, pegaprox/vlab/warpgate.py)."""
+    try:
+        from pegaprox.vlab.warpgate import forget_desktop
+        forget_desktop(eid)
+    except Exception as e:
+        logging.warning(f'[VLAB] Warpgate cleanup for {eid} skipped: {str(e)[:200]}')
 
 
 @bp.route('/api/vlab/me/external', methods=['GET'])
@@ -926,9 +935,17 @@ def rdp_redirects(pol):
     whose own RDP host decides."""
     if pol is None:
         return ['redirectclipboard:i:1']
-    return [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
-            f"redirectprinters:i:{1 if pol['client_printers'] else 0}",
-            f"drivestoredirect:s:{'*' if pol['client_drives'] else ''}", 'redirectcomports:i:0']
+    devices = pol.get('rdp_route') == 'devices' and pol['usb_redirect']
+    from pegaprox.vlab.policy import usb_blocked, usb_rdp_lines
+    # USB 정책 also holds back the PC's printers and drives when it blocks printers / storage
+    printers = pol['client_printers'] and not (devices and usb_blocked(pol, 'printer'))
+    drives = pol['client_drives'] and not (devices and usb_blocked(pol, 'storage'))
+    lines = [f"redirectclipboard:i:{1 if pol['clipboard'] == 'both' else 0}",
+             f"redirectprinters:i:{1 if printers else 0}",
+             f"drivestoredirect:s:{'*' if drives else ''}", 'redirectcomports:i:0']
+    if devices:
+        lines += usb_rdp_lines(pol)
+    return lines
 
 
 # the lines that let mstsc pick the codec and transport for the link it measures (RDP 8+: UDP
@@ -942,10 +959,6 @@ def rdp_file(ext, username, pol=None):
              'screen mode id:i:2', 'use multimon:i:1', *rdp_redirects(pol), 'audiomode:i:0', 'authentication level:i:2']
     if pol is not None:
         lines += RDP_NETWORK
-    gw = catalog.get_gateway(ext['gateway_id']) if ext.get('gateway_id') else None
-    if gw and gw['enabled'] and gw['kind'] in ('rdpgw', 'msrdgw'):
-        lines += [f"gatewayhostname:s:{gw['address']}:{gw['port']}", 'gatewayusagemethod:i:1', 'gatewaycredentialssource:i:4',
-                  'gatewayprofileusagemethod:i:1']
     return '\r\n'.join(lines) + '\r\n'
 
 
@@ -955,8 +968,16 @@ def my_external_rdp(eid):
     ext = catalog.get_external(eid)
     if not ext or ext['assigned_user'] != _user():
         return _bad('External desktop not found', 404)
-    log_audit(_user(), 'vlab.external.connect', f"RDP file for '{ext['name']}'", get_client_ip())
     safe = re.sub(r'[^A-Za-z0-9._-]+', '-', ext['name']).strip('-') or 'desktop'
+    # 보안 게이트웨이 with its RDP switch on: the .rdp goes through Warpgate (a single-use ticket);
+    # off: straight to the PC as before (pegaprox/api/vlab_warpgate.py)
+    from pegaprox.api.vlab_warpgate import external_rdp_via_warpgate
+    answer, err = external_rdp_via_warpgate(ext, _user())
+    if err:
+        return err
+    if answer:
+        return jsonify(dict(answer, filename=f'{safe}.rdp'))
+    log_audit(_user(), 'vlab.external.connect', f"RDP file for '{ext['name']}'", get_client_ip())
     return jsonify({'filename': f'{safe}.rdp', 'rdp': rdp_file(ext, _user())})
 
 
@@ -976,6 +997,19 @@ def _versions(img):
     out = [{'name': s.get('name'), 'description': s.get('description') or '', 'time': s.get('snaptime')}
            for s in snaps if isinstance(s, dict) and str(s.get('name') or '').startswith(GOLD_PREFIX)]
     return sorted(out, key=lambda v: v['time'] or 0, reverse=True)
+
+
+def _golden_ostype(img, live):
+    """The image VM's OS type (win11, l26 ...) for the template list; '' when it cannot be read."""
+    mgr = cluster_managers.get(img['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return ''
+    try:
+        r = mgr.get_vm_config(live.get('node') or img['node'], int(img['vmid']), img['vm_type'])
+        raw = r.get('config', {}).get('raw') if isinstance(r, dict) and r.get('success') else None
+        return str(raw.get('ostype') or '') if isinstance(raw, dict) else ''
+    except Exception:
+        return ''
 
 
 def _golden_or_error(gid):
@@ -1007,7 +1041,7 @@ def list_golden():
                     outdated[p['id']]['total'] += 1
                     outdated[p['id']]['outdated'] += 1 if have.get(d['id']) != img['current_version'] else 0
         out.append(dict(img, versions=_versions(img), status=live.get('status') or 'unknown', pools=used.get(img['id'], []),
-                        rollout=[dict(v, pool_id=k) for k, v in outdated.items()]))
+                        rollout=[dict(v, pool_id=k) for k, v in outdated.items()], ostype=_golden_ostype(img, live)))
     return jsonify({'images': out})
 
 
@@ -1163,30 +1197,159 @@ def deploy_golden(gid):
 
 BOARD_SLOT = 'usb4'     # the slot MOAVI Desk owns on a desktop VM (usb0-3 stay the admin's)
 _USB_ID = re.compile(r'^([0-9a-f]{4}:[0-9a-f]{4}|\d+-\d+(\.\d+)*)$')
+_HOSTRE = re.compile(r'^[A-Za-z0-9._-]+$')     # hostname or IPv4; the cable host reached over TCP
+# network JTAG servers the researcher's tool dials: Xilinx hw_server (3121) / Xilinx Virtual Cable,
+# Intel Quartus jtagd (1309). The port the board is shared on is whatever the server listens on.
+BOARD_PROTOCOLS = {'hw_server': 3121, 'xvc': 2542, 'quartus': 1309}
+_SERIAL = re.compile(r'^[A-Za-z0-9._-]{1,64}$')     # a JTAG cable serial (Digilent 210251A08870, ...)
 
 
-def _board_body():
+def _port_of(data, key, default=None, required=False):
+    v = data.get(key)
+    if v in (None, ''):
+        if required:
+            raise ValueError(f'{key}: 1-65535')
+        return default
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        raise ValueError(f'{key}: 1-65535')
+    if not (1 <= v <= 65535):
+        raise ValueError(f'{key}: 1-65535')
+    return v
+
+
+def _board_body(bid=None):
+    """(name, cluster_id, node, usb, kind, notes, target, host, port, protocol, label, gateway_id,
+    cable_serial, uart_port, power) in catalog.save_board's order."""
     data = _body()
     cluster_id = str(data.get('cluster_id') or '')
     if not core._can_reach(cluster_id):
         raise LookupError('Cluster not found')
-    usb = str(data.get('usb') or '').strip().lower()
-    if not _USB_ID.match(usb):
-        raise ValueError('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
-    node = _text(data, 'node', 64, required=True)
-    return _text(data, 'name', 80, required=True), cluster_id, node, usb, _text(data, 'kind', 80), _text(data, 'notes', 300)
+    target = str(data.get('target') or 'usb').strip().lower()
+    if target not in ('usb', 'network'):
+        raise ValueError("target: 'usb' or 'network'")
+    name = _text(data, 'name', 80, required=True)
+    kind, notes = _text(data, 'kind', 80), _text(data, 'notes', 300)
+    power = data.get('power') or ''
+    if power:
+        if not isinstance(power, dict) or not str(power.get('driver') or '').strip() or len(_json.dumps(power)) > 1000:
+            raise ValueError('power: {"driver": "<name>", ...} (the remote power hook, see pegaprox/vlab/jtag_gw.py)')
+        power = _json.dumps(power, ensure_ascii=False)
+    if target == 'usb':
+        usb = str(data.get('usb') or '').strip().lower()
+        if not _USB_ID.match(usb):
+            raise ValueError('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
+        node = _text(data, 'node', 64, required=True)
+        return name, cluster_id, node, usb, kind, notes, 'usb', '', None, '', '', '', '', None, power
+    protocol = str(data.get('protocol') or 'hw_server').strip().lower()
+    if protocol not in BOARD_PROTOCOLS:
+        raise ValueError('protocol: hw_server, xvc or quartus')
+    label = _text(data, 'label', 80)
+    uart_port = _port_of(data, 'uart_port')
+    gateway_id = str(data.get('gateway_id') or '').strip()
+    serial = str(data.get('cable_serial') or '').strip()
+    if serial and not _SERIAL.match(serial):
+        raise ValueError('cable_serial: the cable serial number (letters, digits, - _ .)')
+    if gateway_id:
+        # on a JTAG gateway VM: hw_server / jtagd ports are the gateway's; an XVC board has its own
+        # XVC server port on the gateway. hw_server boards are told apart by the cable serial.
+        gw = catalog.get_jtag_gateway(gateway_id)
+        if not gw or gw['cluster_id'] != cluster_id:
+            raise LookupError('JTAG gateway not found on that cluster')
+        if protocol == 'hw_server' and not serial:
+            raise ValueError('cable_serial: hw_server serves every cable of the gateway - say which one is this board')
+        port = _port_of(data, 'port', BOARD_PROTOCOLS['xvc']) if protocol == 'xvc' else None
+        for o in catalog.boards_on_gateway(gateway_id):
+            if o['id'] == bid:
+                continue
+            if serial and (o.get('cable_serial') or '') == serial:
+                raise ValueError(f"cable_serial: cable {serial} is board '{o['name']}' already - one cable, one board")
+            if port and o.get('protocol') == 'xvc' and o.get('port') == port:
+                raise ValueError(f"port: XVC port {port} of this gateway is board '{o['name']}' already")
+            if uart_port and o.get('uart_port') == uart_port:
+                raise ValueError(f"uart_port: {uart_port} of this gateway is board '{o['name']}' already")
+        return name, cluster_id, '', '', kind, notes, 'network', '', port, protocol, label, gateway_id, serial, uart_port, power
+    host = str(data.get('host') or '').strip()
+    if not host or not _HOSTRE.match(host) or len(host) > 255:
+        raise ValueError('host: the cable host MOAVI Desk VMs reach over the network (or pick a JTAG gateway)')
+    port = _port_of(data, 'port', BOARD_PROTOCOLS[protocol])
+    # a network board has no usb id and no node (it is reached by host, not plugged into one)
+    return name, cluster_id, '', '', kind, notes, 'network', host, port, protocol, label, '', serial, uart_port, power
+
+
+def _board_addr(b, gw=None):
+    """(host, port) a network board is dialled at: the gateway's for a gateway board."""
+    proto = b.get('protocol') or 'hw_server'
+    if b.get('gateway_id'):
+        gw = gw or catalog.get_jtag_gateway(b['gateway_id']) or {}
+        port = b.get('port') if proto == 'xvc' else gw.get('jtagd_port') if proto == 'quartus' else gw.get('hw_port')
+        return gw.get('host') or '', port
+    return b.get('host') or '', b.get('port')
+
+
+def _board_conn(b, gw=None):
+    """Connection info a researcher's tool dials for a network board: host:port, the cable serial,
+    the board's UART and a short how-to per protocol. None for a USB board (that one goes through
+    the desktop VM)."""
+    if (b.get('target') or 'usb') != 'network':
+        return None
+    proto = b.get('protocol') or 'hw_server'
+    host, port = _board_addr(b, gw)
+    serial = b.get('cable_serial') or ''
+    endpoint = f"{host}:{port}" if port else host
+    pick = f" Then open the cable {serial} (target */xilinx_tcf/*/{serial})." if serial else ''
+    how = {
+        'hw_server': 'Vivado Hardware Manager > Open Target > Open New Target > Remote server: '
+                     f'{endpoint} (hw_server).{pick} Or: connect_hw_server -url {endpoint}',
+        'xvc': f'Vivado Hardware Manager > Open New Target > Add Xilinx Virtual Cable (XVC): {endpoint}. '
+               f'Or: open_hw_target -xvc_url {endpoint}',
+        'quartus': f'Quartus Programmer > Hardware Setup > JTAG Settings > Add Server: {host} (jtagd {endpoint}).'
+                   + (f' Then pick the cable {serial}.' if serial else '')
+                   + f' Or: jtagconfig --addserver {host} <password>  (the cable host ran jtagconfig --enableremote).',
+    }
+    tcl = {'hw_server': [f'connect_hw_server -url {endpoint}']
+                        + ([f'open_hw_target [lindex [get_hw_targets */{serial}] 0]'] if serial else ['open_hw_target']),
+           'xvc': ['connect_hw_server', f'open_hw_target -xvc_url {endpoint}'],
+           'quartus': [f'jtagconfig --addserver {host} <password>', 'jtagconfig']}
+    return {'target': 'network', 'protocol': proto, 'host': host, 'port': port, 'endpoint': endpoint,
+            'label': b.get('label') or '', 'cable_serial': serial, 'gateway_id': b.get('gateway_id') or '',
+            'uart': f"{host}:{b['uart_port']}" if b.get('uart_port') and host else '',
+            'tcl': tcl.get(proto, []), 'howto': how.get(proto, '')}
+
+
+def _jtag_gateway_state(gw):
+    """'up' | 'down' | 'unknown' (never checked) for a gateway row."""
+    if not gw:
+        return 'unknown'
+    return 'unknown' if gw.get('last_ok') is None else ('up' if gw['last_ok'] else 'down')
+
+
+def _board_view(b, gws=None):
+    """A board for the lists: its desktop, connection, gateway and whether it can be lent now."""
+    gw = (gws or {}).get(b.get('gateway_id')) if gws is not None else catalog.get_jtag_gateway(b.get('gateway_id'))
+    desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
+    state = _jtag_gateway_state(gw) if b.get('gateway_id') else None
+    return dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None),
+                connection=_board_conn(b, gw),
+                gateway=({'id': gw['id'], 'name': gw['name'], 'state': state} if gw else None),
+                available=state != 'down')
 
 
 @bp.route('/api/vlab/admin/boards', methods=['GET'])
 @require_auth(perms=['vlab.pool.view'])
 def list_boards():
-    out = []
-    for b in catalog.list_boards():
-        if not core._can_reach(b['cluster_id']):
-            continue
-        desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-        out.append(dict(b, desktop=({'id': desk['id'], 'name': desk['name'], 'assigned_user': desk['assigned_user']} if desk else None)))
-    return jsonify({'boards': out, 'slot': BOARD_SLOT})
+    gws = {g['id']: g for g in catalog.list_jtag_gateways()}
+    out = [_board_view(b, gws) for b in catalog.list_boards() if core._can_reach(b['cluster_id'])]
+    return jsonify({'boards': out, 'slot': BOARD_SLOT, 'protocols': BOARD_PROTOCOLS})
+
+
+def _board_where(b):
+    """'usb 03fd:0008' or 'network hw_server host:3121 cable X' for audit lines"""
+    if (b.get('target') or 'usb') == 'network':
+        host, port = _board_addr(b)
+        return f"network {b.get('protocol')} {host}:{port}" + (f" cable {b['cable_serial']}" if b.get('cable_serial') else '')
+    return f"usb {b['usb']}"
 
 
 @bp.route('/api/vlab/admin/boards', methods=['POST'])
@@ -1199,7 +1362,7 @@ def create_board():
     except ValueError as e:
         return _bad(str(e))
     b = catalog.save_board(None, *args)
-    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node']} usb {b['usb']}", get_client_ip())
+    log_audit(_user(), 'vlab.board.create', f"board '{b['name']}' {b['node'] or '-'} {_board_where(b)}", get_client_ip())
     return jsonify({'board': b}), 201
 
 
@@ -1212,7 +1375,7 @@ def update_board(bid):
     if old['attached_desktop']:
         return _bad('Detach the board before changing it', 409)
     try:
-        args = _board_body()
+        args = _board_body(bid)
     except LookupError as e:
         return _bad(str(e), 404)
     except ValueError as e:
@@ -1261,19 +1424,43 @@ def attach_board(bid):
     out, err = lend_board(b, desk, _user(), lease_user, lease_until)
     if err:
         return _bad(err[0], err[1])
-    return jsonify({'board': out})
+    return jsonify({'board': out, 'connection': _board_conn(out)})
 
 
 def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     """Attach board b to the desktop (it must run on the board's node), lent to lease_user until
-    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status))."""
+    lease_until (local 'YYYY-MM-DDTHH:MM', or None). (board, None) or (None, (message, status)).
+
+    A network board (hw_server / XVC / jtagd) changes nothing on the VM: the grant is recorded
+    and the researcher's tool dials host:port from inside the desktop, over any display protocol.
+    The desktop must be able to reach the cable host's port (deploy firewall; see the README)."""
+    if (b.get('target') or 'usb') == 'network':
+        if b.get('gateway_id'):
+            gw = catalog.get_jtag_gateway(b['gateway_id'])
+            if not gw:
+                return None, ("The board's JTAG gateway is gone - register it again", 409)
+            if _jtag_gateway_state(gw) == 'down':
+                return None, (f"The JTAG gateway {gw['name']} is down (VM stopped or hw_server not answering) - the board cannot be lent now", 409)
+        # one cable, one person: the same cable may be registered once, but say no here as well
+        if b.get('cable_serial') and any(o['id'] != b['id'] and o.get('attached_desktop') and o.get('cable_serial') == b['cable_serial']
+                                         and (o.get('gateway_id') or o.get('host')) == (b.get('gateway_id') or b.get('host'))
+                                         for o in catalog.list_boards()):
+            return None, (f"Cable {b['cable_serial']} is lent already", 409)
+        b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
+        log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} ({desk['vm_type']}/{desk['vmid']})"
+                  + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
+        from pegaprox.api.vlab_notices import board_lent
+        board_lent(b, desk['name'], lease_user, lease_until)
+        return b, None
     if desk['vm_type'] != 'qemu':
         return None, ('USB passthrough needs a virtual machine (QEMU)', 400)
     live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
     node = live.get('node') or desk['node']
     if node != b['node']:
         return None, (f"The desktop runs on {node}, the board is on {b['node']} - move the desktop first", 409)
-    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id'] for o in catalog.list_boards()):
+    # only USB boards take the slot; network boards held by the same desktop do not count
+    if any(o['attached_vmid'] == int(desk['vmid']) and o['cluster_id'] == desk['cluster_id']
+           and (o.get('target') or 'usb') == 'usb' for o in catalog.list_boards()):
         return None, ('Another board is attached to this desktop', 409)
     mgr = cluster_managers.get(desk['cluster_id'])
     if not mgr or not getattr(mgr, 'is_connected', False):
@@ -1282,7 +1469,7 @@ def lend_board(b, desk, by, lease_user, lease_until, ip=None):
     if not isinstance(r, dict) or not r.get('success'):
         return None, (f"Could not attach: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
     b = catalog.set_board_attachment(b['id'], desk['id'], desk['vmid'], by, lease_user, lease_until)
-    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' usb {b['usb']} -> {desk['name']} (qemu/{desk['vmid']})"
+    log_audit(by, 'vlab.board.attach', f"board '{b['name']}' {_board_where(b)} -> {desk['name']} (qemu/{desk['vmid']})"
               + (f", lent to {lease_user} until {lease_until}" if lease_until else ''), ip if ip is not None else get_client_ip())
     from pegaprox.api.vlab_notices import board_lent
     board_lent(b, desk['name'], lease_user, lease_until)
@@ -1298,7 +1485,7 @@ def detach_board(bid):
     if not b['attached_desktop']:
         return _bad('The board is not attached', 409)
     desk = store.get_desktop(b['attached_desktop'])
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board left the VM config alone
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return _bad('Cluster not connected', 503)
@@ -1314,6 +1501,330 @@ def detach_board(bid):
         board_returned(b, lent_to, by=_user())
     return jsonify({'board': b})
 
+
+@bp.route('/api/vlab/me/boards', methods=['GET'])
+@require_auth(perms=['vlab.desk'])
+def my_boards():
+    """Boards lent to the caller. A network board carries its connection (host:port, protocol and
+    a how-to): the researcher opens Vivado / Quartus inside the desktop and dials it, so it works
+    over RDP, Warpgate or SPICE alike. A USB board is on the desktop already (connection None)."""
+    me = _user()
+    out = []
+    for b in catalog.list_boards():
+        if not b.get('attached_desktop') or not core._can_reach(b['cluster_id']):
+            continue
+        desk = store.get_desktop(b['attached_desktop'])
+        if (b.get('lease_user') or (desk or {}).get('assigned_user')) != me:
+            continue
+        v = _board_view(b)
+        out.append({'id': b['id'], 'name': b['name'], 'kind': b.get('kind') or '', 'target': b.get('target') or 'usb',
+                    'desktop': ({'id': desk['id'], 'name': desk['name']} if desk else None),
+                    'lease_until': b.get('lease_until'), 'connection': v['connection'], 'available': v['available'],
+                    'gateway': ({'name': v['gateway']['name'], 'state': v['gateway']['state']} if v['gateway'] else None)})
+    return jsonify({'boards': out})
+
+
+@bp.route('/api/vlab/admin/boards/<bid>/power', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def board_power(bid):
+    """Remote power for a board (smart PDU / relay): {action: on|off|cycle}. An extension point -
+    answers 501 until a driver is registered (pegaprox/vlab/jtag_gw.py register_power_driver)."""
+    from pegaprox.vlab import jtag_gw
+    b = catalog.get_board(bid)
+    if not b or not core._can_reach(b['cluster_id']):
+        return _bad('Board not found', 404)
+    action = str(_body().get('action') or '')
+    if action not in jtag_gw.POWER_ACTIONS:
+        return _bad('action: on, off or cycle')
+    try:
+        cfg = _json.loads(b.get('power') or '{}') or {}
+    except ValueError:
+        cfg = {}
+    ok, why = jtag_gw.power(b, action, cfg)
+    if why == 'NO_DRIVER':
+        return _bad('No remote power driver for this board (see docs/board-lab-network-jtag.md)', 501)
+    if not ok:
+        return _bad(f'Power {action} failed: {why}', 502)
+    log_audit(_user(), 'vlab.board.power', f"board '{b['name']}' power {action}", get_client_ip())
+    return jsonify({'success': True})
+
+
+# --- JTAG gateway VMs (board lab, network target) -----------------------------------------
+#
+# A gateway VM holds many JTAG cables (USB devices or a whole PCIe USB controller passed through)
+# and runs hw_server / XVC / jtagd. It relays programming and debug traffic only - it does not
+# build. Researchers' desktops reach it over the network and pick their cable by serial number.
+
+GATEWAY_EVERY = 120          # seconds between health checks of the gateways (the minute loop)
+_gateway_last = [0.0]
+
+
+def _jtag_gateway_body():
+    data = _body()
+    cluster_id = str(data.get('cluster_id') or '')
+    if not core._can_reach(cluster_id):
+        raise LookupError('Cluster not found')
+    host = str(data.get('host') or '').strip()
+    if not host or not _HOSTRE.match(host) or len(host) > 255:
+        raise ValueError('host: the address desktops dial the gateway at (name or IP)')
+    vmid = data.get('vmid')
+    try:
+        vmid = int(vmid) if vmid not in (None, '') else None
+    except (TypeError, ValueError):
+        raise ValueError('vmid: the gateway VM id')
+    if vmid is not None and not (100 <= vmid <= 999999999):
+        raise ValueError('vmid: the gateway VM id')
+    return (_text(data, 'name', 80, required=True), cluster_id, vmid, host,
+            _port_of(data, 'hw_port', BOARD_PROTOCOLS['hw_server']), _port_of(data, 'jtagd_port', BOARD_PROTOCOLS['quartus']),
+            _text(data, 'notes', 300))
+
+
+def _jtag_gateway_view(g, states=None):
+    states = states if states is not None else core._vm_states(g['cluster_id'])
+    live = states.get(int(g['vmid'])) if g.get('vmid') else None
+    boards = catalog.boards_on_gateway(g['id'])
+    mapped = {b.get('cable_serial'): b['name'] for b in boards if b.get('cable_serial')}
+    return dict(g, state=_jtag_gateway_state(g), vm=({'status': live.get('status'), 'node': live.get('node')} if live else None),
+                boards=[{'id': b['id'], 'name': b['name'], 'cable_serial': b.get('cable_serial') or '', 'protocol': b.get('protocol'),
+                         'lent': bool(b.get('attached_desktop'))} for b in boards],
+                cables=[dict(c, board=mapped.get(c.get('serial'))) for c in g.get('cables') or []])
+
+
+def _jtag_gateway_or_404(gid):
+    g = catalog.get_jtag_gateway(gid)
+    return g if g and core._can_reach(g['cluster_id']) else None
+
+
+@bp.route('/api/vlab/admin/jtag-gateways', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def list_jtag_gateways():
+    out, states = [], {}
+    for g in catalog.list_jtag_gateways():
+        if not core._can_reach(g['cluster_id']):
+            continue
+        if g['cluster_id'] not in states:
+            states[g['cluster_id']] = core._vm_states(g['cluster_id'])
+        out.append(_jtag_gateway_view(g, states[g['cluster_id']]))
+    return jsonify({'gateways': out, 'every': GATEWAY_EVERY})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def create_jtag_gateway():
+    try:
+        args = _jtag_gateway_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    g = catalog.save_jtag_gateway(None, *args)
+    log_audit(_user(), 'vlab.jtag_gateway.create', f"JTAG gateway '{g['name']}' {g['host']} (vm {g['vmid'] or '-'})", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)}), 201
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>', methods=['PUT'])
+@require_auth(perms=['vlab.accel.manage'])
+def update_jtag_gateway(gid):
+    old = _jtag_gateway_or_404(gid)
+    if not old:
+        return _bad('JTAG gateway not found', 404)
+    try:
+        args = _jtag_gateway_body()
+    except LookupError as e:
+        return _bad(str(e), 404)
+    except ValueError as e:
+        return _bad(str(e))
+    if args[1] != old['cluster_id'] and catalog.boards_on_gateway(gid):
+        return _bad('Boards use this gateway - it stays on its cluster', 409)
+    if any(b.get('attached_desktop') for b in catalog.boards_on_gateway(gid)) and (args[3], args[4], args[5]) != (old['host'], old['hw_port'], old['jtagd_port']):
+        return _bad('Boards of this gateway are lent - change its address after they come back', 409)
+    g = catalog.save_jtag_gateway(gid, *args)
+    log_audit(_user(), 'vlab.jtag_gateway.update', f"JTAG gateway '{g['name']}'", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>', methods=['DELETE'])
+@require_auth(perms=['vlab.accel.manage'])
+def delete_jtag_gateway(gid):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    if catalog.boards_on_gateway(gid):
+        return _bad('Boards use this gateway - move or delete them first', 409)
+    catalog.delete_jtag_gateway(gid)
+    log_audit(_user(), 'vlab.jtag_gateway.delete', f"JTAG gateway '{g['name']}' (the VM and its passthrough are left as they are)", get_client_ip())
+    return jsonify({'success': True})
+
+
+def _jtag_err(e):
+    """(message, status, code) -> the JSON answer: {error, code}; the console maps the code to its text."""
+    return jsonify({'error': e[0], 'code': e[2]}), e[1]
+
+
+def _jtag_gateway_vm(g, running=False):
+    """(mgr, node, raw config) of the gateway VM, or (None, None, (message, status, code)).
+    running: the VM must be running too (the guest agent answers only then)."""
+    if not g.get('vmid'):
+        return None, None, ('The gateway has no VM id - say which VM it is first', 400, 'NO_VMID')
+    mgr = cluster_managers.get(g['cluster_id'])
+    if not mgr or not getattr(mgr, 'is_connected', False):
+        return None, None, ('Cluster not connected', 503, 'CLUSTER')
+    live = core._vm_states(g['cluster_id']).get(int(g['vmid'])) or {}
+    if not live:
+        return None, None, (f"VM {g['vmid']} not found on the cluster", 404, 'VM_MISSING')
+    if (live.get('type') or 'qemu') != 'qemu':
+        return None, None, ('The gateway must be a virtual machine (QEMU) to take USB / PCIe devices', 400, 'NOT_QEMU')
+    if running and live.get('status') != 'running':
+        return None, None, (f"The gateway VM {g['vmid']} is {live.get('status') or 'not running'} - start it to read its cables", 409, 'VM_STOPPED')
+    node = live.get('node')
+    r = mgr.get_vm_config(node, int(g['vmid']), 'qemu')
+    if not isinstance(r, dict) or not r.get('success'):
+        return None, None, (f"Could not read the VM config: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502, 'CONFIG')
+    return mgr, node, ((r.get('config') or {}).get('raw') or {})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/passthrough', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def add_gateway_passthrough(gid):
+    """Pass a JTAG cable {kind: 'usb', usb: '03fd:0008' | '1-4.2'} or a whole PCIe USB controller
+    {kind: 'pci', pci: '0000:05:00.0'} through to the gateway VM, on the first free usbN / hostpciN.
+    USB goes on while the VM runs; a PCIe controller needs a VM restart (needs_restart)."""
+    from pegaprox.vlab import jtag_gw
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    data = _body()
+    kind = str(data.get('kind') or 'usb')
+    if kind == 'usb':
+        value = str(data.get('usb') or '').strip().lower()
+        if not _USB_ID.match(value):
+            return _bad('usb: vendor:product (03fd:0008) or a port path (1-2.3)')
+    elif kind == 'pci':
+        value = str(data.get('pci') or '').strip().lower()
+        if not jtag_gw.valid_pci(value):
+            return _bad('pci: the USB controller address, e.g. 0000:05:00.0')
+    else:
+        return _bad("kind: 'usb' or 'pci'")
+    if any(p['kind'] == kind and p['value'] == value for p in g['passthrough']):
+        return _bad(f'{value} is passed through to this gateway already', 409)
+    mgr, node, raw = _jtag_gateway_vm(g)
+    if not mgr:
+        return _jtag_err(raw)
+    slot = jtag_gw.free_slot(raw, kind)
+    if not slot:
+        return _bad('No free slot left on the VM - pass a whole PCIe USB controller, or split the cables over another gateway', 409)
+    conf = f'host={value}' if kind == 'usb' else jtag_gw.pci_value(value, raw)
+    r = mgr.update_vm_config(node, int(g['vmid']), 'qemu', {slot: conf})
+    if not isinstance(r, dict) or not r.get('success'):
+        return _bad(f"Could not pass it through: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    g = catalog.set_jtag_gateway_passthrough(gid, g['passthrough'] + [{'slot': slot, 'kind': kind, 'value': value}])
+    log_audit(_user(), 'vlab.jtag_gateway.passthrough', f"JTAG gateway '{g['name']}' {slot} = {conf}", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g), 'slot': slot, 'needs_restart': kind == 'pci'})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/passthrough/<slot>', methods=['DELETE'])
+@require_auth(perms=['vlab.accel.manage'])
+def remove_gateway_passthrough(gid, slot):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    item = next((p for p in g['passthrough'] if p['slot'] == slot), None)
+    if not item:
+        return _bad('MOAVI Desk did not put that slot on the gateway', 404)
+    mgr, node, raw = _jtag_gateway_vm(g)
+    if not mgr:
+        return _jtag_err(raw)
+    if slot in raw:
+        r = mgr.update_vm_config(node, int(g['vmid']), 'qemu', {'delete': slot})
+        if not isinstance(r, dict) or not r.get('success'):
+            return _bad(f"Could not take it off: {str((r or {}).get('error') if isinstance(r, dict) else r)[:200]}", 502)
+    g = catalog.set_jtag_gateway_passthrough(gid, [p for p in g['passthrough'] if p['slot'] != slot])
+    log_audit(_user(), 'vlab.jtag_gateway.passthrough', f"JTAG gateway '{g['name']}' {slot} removed ({item['value']})", get_client_ip())
+    return jsonify({'gateway': _jtag_gateway_view(g)})
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/discover', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def discover_gateway_cables(gid):
+    """Read the USB devices the gateway sees (guest agent, sysfs) - JTAG cables with their serial
+    numbers, to map each cable to a board. Changes nothing on the gateway."""
+    from pegaprox.vlab import jtag_gw
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    mgr, node, raw = _jtag_gateway_vm(g, running=True)
+    if not mgr:
+        catalog.set_jtag_gateway_cables_error(gid, raw[2], raw[0])
+        return _jtag_err(raw)
+    code, out, err, why = _agent_run(mgr, node, int(g['vmid']), jtag_gw.LIST_CABLES, wait=15)
+    if why or code is None:
+        e = (f"The gateway's guest agent did not answer ({why or 'timed out'}) - install qemu-guest-agent in it and set agent: 1", 502, 'AGENT')
+    elif code != 0:
+        e = (f'Reading the cables failed: {(err or out)[:200]}', 502, 'READ_FAILED')
+    else:
+        g = catalog.set_jtag_gateway_cables(gid, jtag_gw.parse_cables(out))
+        return jsonify({'gateway': _jtag_gateway_view(g)})
+    catalog.set_jtag_gateway_cables_error(gid, e[2], e[0])
+    return _jtag_err(e)
+
+
+def _check_jtag_gateway(g, states):
+    """(ok, detail) of one gateway: the VM runs and hw_server (and jtagd when a Quartus board uses
+    it, and every XVC board's port) answers."""
+    detail = {'vm': None, 'ports': []}
+    if g.get('vmid'):
+        live = states.get(int(g['vmid'])) or {}
+        detail['vm'] = live.get('status') or 'missing'
+    protos = {b.get('protocol') for b in catalog.boards_on_gateway(g['id'])}
+    ports = [g['hw_port']] if (not protos or 'hw_server' in protos) else []
+    if 'quartus' in protos:
+        ports.append(g['jtagd_port'])
+    ports += sorted({b['port'] for b in catalog.boards_on_gateway(g['id']) if b.get('protocol') == 'xvc' and b.get('port')})
+    for port in ports:
+        ok, ms, err = _tcp_probe(g['host'], port)
+        detail['ports'].append({'port': port, 'ok': ok, 'ms': ms, 'error': err})
+    ok = (detail['vm'] in (None, 'running')) and all(p['ok'] for p in detail['ports'])
+    return ok, detail
+
+
+def gateway_tick(force=False):
+    """Check every JTAG gateway (every 2 minutes): VM running, hw_server / jtagd / XVC answering.
+    A down gateway's boards cannot be lent; alert once when one goes down and when it is back."""
+    if not force and time.time() - _gateway_last[0] < GATEWAY_EVERY:
+        return 0
+    _gateway_last[0] = time.time()
+    n, states = 0, {}
+    for g in catalog.list_jtag_gateways():
+        if g['cluster_id'] not in states:
+            states[g['cluster_id']] = core._vm_states(g['cluster_id'])
+        ok, detail = _check_jtag_gateway(g, states[g['cluster_id']])
+        catalog.mark_jtag_gateway(g['id'], ok, detail)
+        n += 1
+        if not ok and not g.get('alerted_at'):
+            why = ', '.join([f"VM {detail['vm']}"] if detail['vm'] not in (None, 'running') else []
+                            + [f"port {p['port']}" for p in detail['ports'] if not p['ok']])
+            _alert(f"JTAG 게이트웨이 응답 없음: {g['name']}", f"{g['name']} ({g['host']}): {why}. 이 게이트웨이의 보드는 대여할 수 없습니다.",
+                   {'kind': 'jtag_gateway_down', 'gateway': g['name'], 'host': g['host']})
+            catalog.mark_jtag_gateway_alerted(g['id'], store.now())
+            log_audit('system', 'vlab.jtag_gateway.down', f"JTAG gateway '{g['name']}' down: {why}", '')
+        elif ok and g.get('alerted_at'):
+            _alert(f"JTAG 게이트웨이 복구: {g['name']}", f"{g['name']} ({g['host']}) 가 다시 응답합니다.",
+                   {'kind': 'jtag_gateway_up', 'gateway': g['name'], 'host': g['host'], 'severity': 'info'})
+            catalog.mark_jtag_gateway_alerted(g['id'], None)
+            log_audit('system', 'vlab.jtag_gateway.up', f"JTAG gateway '{g['name']}' answers again", '')
+    return n
+
+
+@bp.route('/api/vlab/admin/jtag-gateways/<gid>/check', methods=['POST'])
+@require_auth(perms=['vlab.accel.manage'])
+def check_jtag_gateway(gid):
+    g = _jtag_gateway_or_404(gid)
+    if not g:
+        return _bad('JTAG gateway not found', 404)
+    states = core._vm_states(g['cluster_id'])
+    ok, detail = _check_jtag_gateway(g, states)
+    g = catalog.mark_jtag_gateway(gid, ok, detail)
+    return jsonify({'gateway': _jtag_gateway_view(g, states)})
 
 # --- build farm --------------------------------------------------------------------------
 
@@ -1463,7 +1974,6 @@ def check_license_server(lid):
 #   GET    /api/vlab/me/pools                           pools granted to the caller (claim / shared)    vlab.desk
 #   POST   /api/vlab/me/pools/<id>/claim                a free desktop of the pool, assigned to the caller
 #   POST   /api/vlab/me/pools/<id>/route                shared pool: the desktop to connect to now
-#   GET    /api/vlab/me/external/<id>/guac              browser RDP (Guacamole) link for an external desktop
 #   POST   /api/vlab/admin/golden-images/<id>/rollout   {pool_id, delete_old?} desktops of an older version -> current
 #   GET    /api/vlab/admin/build-jobs, POST .../<id>/cancel; GET/POST /api/vlab/me/build-jobs
 #   GET    /api/vlab/admin/reports/cards                ?days=30&format=csv card loans per card
@@ -1678,7 +2188,7 @@ def route_shared(pool_id):
     return jsonify(out)
 
 
-# --- RDP files and Guacamole -------------------------------------------------------------
+# --- RDP files ---------------------------------------------------------------------------
 
 def _guest_ipv4(mgr, node, vmid):
     try:
@@ -1692,66 +2202,6 @@ def _guest_ipv4(mgr, node, vmid):
     return None
 
 
-def _guac_gateway(pool=None):
-    gid = ((pool or {}).get('settings') or {}).get('guac_gateway_id')
-    for g in catalog.list_gateways(secret=True):
-        if g['kind'] == 'guacamole' and g['enabled'] and g['secret_key'] and (not gid or g['id'] == gid):
-            return g
-    return None
-
-
-def guac_params(pol):
-    """Browser RDP parameters a pool policy sets: the clipboard each way and printing (to a PDF
-    the browser downloads). No drive: Guacamole's drive is a folder on the gateway."""
-    if pol is None:
-        return {}
-    return {'disable-copy': 'false' if pol['clipboard'] in ('both', 'from_desktop') else 'true',
-            'disable-paste': 'false' if pol['clipboard'] in ('both', 'to_desktop') else 'true',
-            'enable-printing': 'true' if pol['client_printers'] else 'false'}
-
-
-def ssh_params(pol, host, port, username):
-    """Browser SSH (Guacamole terminal) parameters a pool policy sets: the SFTP file transfer
-    (none / download / upload / both). No password - Guacamole asks the user in the terminal."""
-    files = (pol or {}).get('ssh_files', 'off')
-    return {'hostname': host, 'port': str(port), 'username': username, 'color-scheme': 'green-black',
-            'enable-sftp': 'true' if files != 'off' else 'false',
-            'sftp-disable-download': 'false' if files in ('down', 'both') else 'true',
-            'sftp-disable-upload': 'false' if files in ('up', 'both') else 'true'}
-
-
-def guac_ssh_link(gw, username, name, host, port, pol=None, minutes=5):
-    """A browser SSH terminal link, same signed and encrypted guacamole-auth-json as guac_link."""
-    return _guac_link(gw, username, {name: {'protocol': 'ssh', 'parameters': ssh_params(pol, host, port, username)}}, minutes)
-
-
-def guac_link(gw, username, name, host, port, minutes=5, pol=None):
-    """A guacamole-auth-json link for one RDP connection (browser RDP)."""
-    return _guac_link(gw, username, {name: {'protocol': 'rdp', 'parameters': {
-        'hostname': host, 'port': str(port), 'username': username,
-        'ignore-cert': 'true', 'security': 'any', 'resize-method': 'display-update', **guac_params(pol)}}}, minutes)
-
-
-def _guac_link(gw, username, connections, minutes=5):
-    """A guacamole-auth-json login link: the connections signed with HMAC-SHA256 and encrypted
-    with AES-128-CBC (zero IV) under the gateway's 128-bit key, base64 in ?data=."""
-    from cryptography.hazmat.primitives import padding
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    key = bytes.fromhex(gw['secret_key'])
-    payload = _json.dumps({'username': username, 'expires': int((time.time() + minutes * 60) * 1000),
-                           'connections': connections}, separators=(',', ':')).encode()
-    signed = hmac.new(key, payload, hashlib.sha256).digest() + payload
-    padder = padding.PKCS7(128).padder()
-    enc = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).encryptor()
-    data = enc.update(padder.update(signed) + padder.finalize()) + enc.finalize()
-    q = _quote(base64.b64encode(data).decode())
-    if gw['id'] == catalog.BUILTIN_GUAC_ID and has_request_context():
-        # the bundled one sits behind the console's own address: use the name the user came in by
-        return f"https://{request.host}/guacamole/?data={q}"
-    scheme = 'http' if gw['port'] in (80, 8080) else 'https'
-    return f"{scheme}://{gw['address']}:{gw['port']}/guacamole/?data={q}"
-
-
 # Windows, as SYSTEM through the guest agent: RDP on (and its firewall rules, by their fixed
 # names - the display group is translated), and the RDS policies for H.264/AVC 444, hardware
 # encoding (a GPU / vGPU desktop), the GPU for every session, UDP and TCP; off a domain, the VM's
@@ -1761,6 +2211,25 @@ RDP_TUNE = (('AVC444ModePreferred', 1), ('AVCHardwareEncodePreferred', 1), ('bEn
 RDP_RULES = ('RemoteDesktop-UserMode-In-TCP', 'RemoteDesktop-UserMode-In-UDP')
 RDP_USERS, AUTH_USERS = 'S-1-5-32-555', 'S-1-5-11'   # Remote Desktop Users, Authenticated Users
 RDP_TUNE_EVERY = 6 * 3600
+# Windows' logon / lock screen shows nobody else (found on 192.168.0.9: a desktop several people use
+# listed the others' accounts): not the last signed-in user, not the locked user, no list of local or
+# connected users, no account details, no fast user switching - only empty name / password fields
+LOGON_PRIVACY = (
+    (r'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System',
+     (('DontDisplayLastUserName', 1), ('DontDisplayLockedUserId', 3), ('HideFastUserSwitching', 1))),
+    (r'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System',
+     (('DontEnumerateConnectedUsers', 1), ('EnumerateLocalUsers', 0), ('BlockUserFromShowingAccountDetailsOnSignin', 1))),
+)
+
+
+def logon_privacy_lines():
+    """PowerShell lines that set LOGON_PRIVACY (each value only when it differs; sets $changed)."""
+    out = []
+    for key, values in LOGON_PRIVACY:
+        out.append(f"$k = '{key}'; if (-not (Test-Path $k)) {{ New-Item -Path $k -Force | Out-Null }}")
+        out += [f"if ((Get-ItemProperty -Path $k -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
+                f"{{ Set-ItemProperty -Path $k -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in values]
+    return out
 _rdp_tuned = {}   # desktop id -> (vmid, when)
 
 
@@ -1776,6 +2245,7 @@ def rdp_prepare_script():
         f"foreach ($r in @({rules})) {{ $f = Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue; "
         "if ($f -and $f.Enabled -ne 'True') { Enable-NetFirewallRule -Name $r; $changed = 1 } }",
         f"$ts = '{RDP_TS}'", 'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+        *logon_privacy_lines(),
         # no AD: the VM's own accounts may sign in over RDP (Authenticated Users in Remote Desktop
         # Users); a domain member is left to its GPO - there that would be every domain account
         "try { if (-not (Get-CimInstance Win32_ComputerSystem).PartOfDomain) { "
@@ -1804,6 +2274,45 @@ def rdp_prepare(desk, mgr, node, wait=8):
     return code
 
 
+# the pool's device switches, kept by the desktop itself (Remote Desktop Services policy): the user
+# can edit an .rdp, not these - 1 = refused (drives, printers, plug-and-play / USB devices)
+_rdp_devices_set = {}   # desktop id -> (vmid, values)
+
+
+def rdp_device_values(pol):
+    return (('fDisableCdm', 0 if pol['client_drives'] else 1), ('fDisableCpm', 0 if pol['client_printers'] else 1),
+            ('fDisablePNPRedir', 0 if pol['usb_redirect'] else 1))
+
+
+def rdp_device_script(values):
+    sets = '; '.join(f"if ((Get-ItemProperty -Path $ts -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
+                     f"{{ Set-ItemProperty -Path $ts -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in values)
+    return '\n'.join(["$ErrorActionPreference = 'Stop'", '$changed = 0', f"$ts = '{RDP_TS}'",
+                      'if (-not (Test-Path $ts)) { New-Item -Path $ts -Force | Out-Null }', sets,
+                      '"changed=$changed"', 'exit 0']) + '\n'
+
+
+def rdp_device_policy(desk, mgr, node, pol, wait=8):
+    """Put the pool's drive / printer / USB switches into a Windows desktop (once per change).
+    Never raises."""
+    values = rdp_device_values(pol)
+    if _rdp_devices_set.get(desk['id']) == (desk['vmid'], values):
+        return None
+    try:
+        code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                        '-ExecutionPolicy', 'Bypass', '-Command', rdp_device_script(values)], wait=wait)
+    except Exception as ex:
+        code, out, e = None, '', str(ex)[:200]
+    if code == 0:
+        _rdp_devices_set[desk['id']] = (desk['vmid'], values)
+        if 'changed=1' in (out or ''):
+            log_audit('system', 'vlab.rdp.devices', f"{desk['name']}: RDP devices " +
+                      ', '.join(f'{n}={v}' for n, v in values), '')
+    elif e:
+        logging.info(f"[VLAB] RDP device policy on {desk.get('name')}: {e}")
+    return code
+
+
 def rdp_listening(ip, port=3389, timeout=1.5):
     """Does the desktop answer on its RDP port (a Linux desktop with xrdp / gnome-remote-desktop)?"""
     try:
@@ -1814,7 +2323,7 @@ def rdp_listening(ip, port=3389, timeout=1.5):
 
 
 def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
-    """The connect route's answer for rdp (an .rdp file) and guac (a browser RDP link).
+    """The connect route's answer for rdp: an .rdp file (through 보안 게이트웨이 when its RDP switch is on).
     Returns (answer, None) or (None, error response). Windows: made ready on the way (rdp_tune);
     Linux: only when something listens on 3389, else NO_RDP - the client then opens SPICE / VNC."""
     if desk['vm_type'] != 'qemu':
@@ -1824,68 +2333,60 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         return None, (jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409)
     port = 3389
     pol = core.pool_policy.effective((pool or {}).get('settings'))
+    # 장치 연결 허용 대상: this user takes the devices route though the pool's own route is another one
+    if pol['rdp_route'] != 'devices' and pol.get('device_route_for') and granted(None, username, grants=pol['device_route_for']):
+        pol = dict(pol, rdp_route='devices')
     os_kind = _guest_os(mgr, node, vmid)
-    if os_kind == 'windows' and pol['rdp_tune']:
-        rdp_prepare(desk, mgr, node)
+    if os_kind == 'windows':
+        if pol['rdp_tune']:
+            rdp_prepare(desk, mgr, node)
+        # Warpgate RDP (file or browser): the desktop's own NLA service account first
+        from pegaprox.api.vlab_warpgate import prepare_windows_nla, warpgate_serves_rdp
+        if warpgate_serves_rdp(protocol):
+            prepare_windows_nla(desk, mgr, node)
     elif os_kind == 'linux' and not rdp_listening(ip, port):
         return None, (jsonify({'error': 'This Linux desktop has no RDP server (xrdp) - open it with SPICE or VNC',
                                'code': 'NO_RDP'}), 409)
+    # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
+    username = directory.desktop_login(desk['id'], username)
+    if protocol == 'rdp' and os_kind == 'windows':
+        rdp_device_policy(desk, mgr, node, pol)
+    if protocol == 'rdp' and pol['rdp_route'] == 'devices':
+        # the pool's devices route: the .rdp through the bundled RD Gateway (rdpgw) with a token for
+        # this desktop only; drives, printers and USB as the policy says (pegaprox/api/vlab_warpgate.py)
+        from pegaprox.api.vlab_warpgate import rdp_answer_via_rdpgw
+        answer, err = rdp_answer_via_rdpgw(desk, username, ip, port, pol)
+        if err:
+            return None, err
+        if answer:
+            return answer, None
     if protocol == 'rdp':
-        ext = {'address': ip, 'port': port, 'gateway_id': ((pool or {}).get('settings') or {}).get('rdp_gateway_id')}
-        return {'type': 'rdp', 'rdp': rdp_file(ext, username, pol), 'filename': f"{desk['name']}.rdp"}, None
-    gw = _guac_gateway(pool)
-    if not gw:
-        return None, (jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409)
-    return {'type': 'guac', 'url': guac_link(gw, username, desk['name'], ip, port, pol=pol)}, None
+        # "RDP through Warpgate" on: an .rdp aimed at Warpgate with a single-use ticket
+        # (pegaprox/api/vlab_warpgate.py). Warpgate down: refused (WG_DOWN) unless the admin allowed
+        # the direct fallback. Switch off: the direct file as before
+        from pegaprox.api.vlab_warpgate import rdp_answer_via_warpgate
+        answer, err = rdp_answer_via_warpgate(desk, username, ip, pol)
+        if err:
+            return None, err
+        if answer:
+            return answer, None
+        return {'type': 'rdp', 'rdp': rdp_file({'address': ip, 'port': port}, username, pol), 'filename': f"{desk['name']}.rdp"}, None
+    return None, _bad('protocol must be rdp')
 
 
-@bp.route('/api/vlab/me/external/<eid>/guac', methods=['GET'])
+@bp.route('/api/vlab/me/external/<eid>/web', methods=['GET'])
 @require_auth(perms=['vlab.desk'])
-def my_external_guac(eid):
+def my_external_web(eid):
+    """Browser RDP to an external desktop: through 보안 게이트웨이 (its web UI opens the PC). There is no
+    other browser path: with Warpgate off, WG_OFF."""
     ext = catalog.get_external(eid)
     if not ext or ext['assigned_user'] != _user():
         return _bad('External desktop not found', 404)
-    gw = None
-    if ext.get('gateway_id'):
-        g = catalog.get_gateway(ext['gateway_id'], secret=True)
-        if g and g['kind'] == 'guacamole' and g['enabled'] and g['secret_key']:
-            gw = g
-    gw = gw or _guac_gateway()
-    if not gw:
-        return jsonify({'error': 'No browser RDP gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409
-    log_audit(_user(), 'vlab.external.connect', f"browser RDP to '{ext['name']}'", get_client_ip())
-    return jsonify({'url': guac_link(gw, _user(), ext['name'], ext['address'], ext['port'])})
-
-
-@bp.route('/api/vlab/desktops/<desktop_id>/ssh', methods=['GET'])
-@require_auth(perms=['vlab.desk'])
-def my_desktop_ssh(desktop_id):
-    """A browser SSH terminal (Guacamole) for the user's own Linux desktop, when the pool allows
-    it and the desktop answers on port 22. The user types their account password in the terminal;
-    file transfer (SFTP) follows the pool policy."""
-    desk = store.get_desktop(desktop_id)
-    if not desk or desk['assigned_user'] != _user():
-        return _bad('Desktop not found', 404)
-    pol = core.pool_policy.effective((store.get_pool(desk['pool_id']) or {}).get('settings'))
-    if not pol.get('browser_ssh'):
-        return jsonify({'error': 'Browser SSH is off for this pool', 'code': 'SSH_OFF'}), 403
-    gw = _guac_gateway(store.get_pool(desk['pool_id']))
-    if not gw:
-        return jsonify({'error': 'No browser gateway (Guacamole with a key) is set up', 'code': 'NO_GATEWAY'}), 409
-    mgr = cluster_managers.get(desk['cluster_id'])
-    if not mgr or not getattr(mgr, 'is_connected', False):
-        return _bad('Cluster not connected', 503)
-    live = core._vm_states(desk['cluster_id']).get(int(desk['vmid'])) or {}
-    if live.get('status') != 'running':
-        return jsonify({'error': 'The desktop is not running', 'code': 'VM_STOPPED'}), 409
-    node = live.get('node') or desk['node']
-    ip = _guest_ipv4(mgr, node, int(desk['vmid']))
-    if not ip:
-        return jsonify({'error': 'The desktop has no address yet - is its guest agent running?', 'code': 'NO_IP'}), 409
-    if not rdp_listening(ip, 22):
-        return jsonify({'error': 'This desktop has no SSH server on port 22', 'code': 'NO_SSH'}), 409
-    log_audit(_user(), 'vlab.desktop.connect', f"browser SSH to '{desk['name']}'", get_client_ip())
-    return jsonify({'url': guac_ssh_link(gw, _user(), desk['name'], ip, 22, pol=pol)})
+    from pegaprox.api.vlab_warpgate import external_web_via_warpgate
+    url, err = external_web_via_warpgate(ext, _user())
+    if err:
+        return err
+    return jsonify({'url': url, 'via': 'warpgate'})
 
 
 # --- golden image rollout ----------------------------------------------------------------
@@ -1975,7 +2476,7 @@ def rollout_golden(gid):
 def _detach_board(b):
     """Take the board off its desktop. Returns an error text or None."""
     desk = store.get_desktop(b['attached_desktop']) if b['attached_desktop'] else None
-    if desk:
+    if desk and (b.get('target') or 'usb') == 'usb':     # a network board: only the grant ends
         mgr = cluster_managers.get(desk['cluster_id'])
         if not mgr or not getattr(mgr, 'is_connected', False):
             return 'cluster not connected'
@@ -3189,8 +3690,15 @@ def desktop_vm(desktop_id):
                                 'maintenance': bool(s.get('maintenance_mode'))})
     except Exception as e:
         logging.debug(f'[VLAB] nodes of {desk["cluster_id"]}: {e}')
+    ips = []
+    if desk['vm_type'] == 'qemu' and vm.get('status') == 'running':
+        try:   # the guest agent's addresses (IPv4 first); none without an agent
+            got = mgr._fetch_qemu_ips(node, int(desk['vmid']))
+            ips = [str(x) for x in got][:8] if isinstance(got, list) else []
+        except Exception as e:
+            logging.debug(f'[VLAB] ips of {desk["vmid"]}: {e}')
     view.update({'desktop_id': desk['id'], 'pool_id': desk['pool_id'], 'base_snap': desk.get('base_snap') or '',
-                 'bridges': bridges, 'storages': storages, 'targets': targets})
+                 'bridges': bridges, 'storages': storages, 'targets': targets, 'ips': ips})
     return jsonify({'vm': view})
 
 
@@ -3200,15 +3708,23 @@ def _vm_change(desk, vm, what):
     return jsonify({'success': True, 'needs_restart': vm.get('status') == 'running'})
 
 
+_VM_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$')
+
+
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/vm/hardware', methods=['PUT'])
 @require_auth(perms=['vlab.pool.manage'])
 def desktop_vm_hardware(desktop_id):
-    """{cores?, sockets?, memory_mb?} - vCPUs and memory."""
+    """{cores?, sockets?, memory_mb?, name?} - vCPUs, memory, and the VM's name (the desktop takes it too)."""
     desk, mgr, vm, node, err = _desk_vm(desktop_id)
     if err:
         return err
     data = _body()
     upd = {}
+    name = str(data.get('name') or '').strip()
+    if name:
+        if not _VM_NAME.match(name):
+            return _bad('name: letters, digits, - and . only (at most 63, starting with a letter or digit)')
+        upd['name' if desk['vm_type'] == 'qemu' else 'hostname'] = name
     try:
         if data.get('cores') not in (None, ''):
             upd['cores'] = _int(data, 'cores', 1, 256)
@@ -3223,6 +3739,11 @@ def desktop_vm_hardware(desktop_id):
     e = _failed(mgr.update_vm_config(node, int(desk['vmid']), desk['vm_type'], upd), 'config update')
     if e:
         return e
+    if name:
+        store.set_name(desk['id'], name)
+        if len(upd) == 1:   # a new name needs no restart
+            log_audit(_user(), 'vlab.desktop.vm', f"{desk['vm_type']}/{desk['vmid']} '{desk['name']}': name={name}", get_client_ip())
+            return jsonify({'success': True, 'needs_restart': False})
     return _vm_change(desk, vm, ', '.join(f'{k}={v}' for k, v in upd.items()))
 
 
@@ -3320,15 +3841,17 @@ def desktop_snapshots(desktop_id):
     desk, mgr, vm, node, err = _desk_vm(desktop_id)
     if err:
         return err
-    out = []
+    out, current = [], ''
     for s in mgr.get_snapshots(node, int(desk['vmid']), desk['vm_type']) or []:
+        if isinstance(s, dict) and s.get('name') == 'current':
+            current = str(s.get('parent') or '')   # the snapshot the VM runs on from (현재 위치)
         if not isinstance(s, dict) or s.get('name') in (None, 'current'):
             continue
         out.append({'name': s['name'], 'description': str(s.get('description') or ''), 'time': s.get('snaptime'),
                     'vmstate': bool(s.get('vmstate')), 'parent': s.get('parent') or '',
                     'base': s['name'] == (desk.get('base_snap') or '')})
     out.sort(key=lambda s: s['time'] or 0, reverse=True)
-    return jsonify({'snapshots': out, 'running': vm.get('status') == 'running'})
+    return jsonify({'snapshots': out, 'running': vm.get('status') == 'running', 'current': current})
 
 
 @bp.route('/api/vlab/admin/desktops/<desktop_id>/snapshots', methods=['POST'])
@@ -4137,6 +4660,18 @@ def _guest_os(mgr, node, vmid):
     except Exception:
         return None
     return 'windows' if str(info.get('id') or '').lower().startswith('mswindows') else 'linux'
+
+
+# RHEL / Rocky / Alma ship qemu-guest-agent with guest-exec blocked (/etc/sysconfig/qemu-ga
+# --block-rpcs); every engine step that runs something inside the desktop then fails with this
+AGENT_EXEC_DISABLED_TEXT = ('이 데스크톱의 게스트 에이전트가 명령 실행(guest-exec)·파일 전송(guest-file)을 막고 있습니다. '
+                            '템플릿의 qemu-guest-agent에서 허용하세요.')
+
+
+def agent_exec_disabled(error_text):
+    """Is this guest agent error "guest-exec is blocked by the agent's own config"?"""
+    t = str(error_text or '').lower()
+    return ('guest-exec' in t or 'guest-file' in t) and ('disabled' in t or 'not allowed' in t)
 
 
 def _agent_run(mgr, node, vmid, command, stdin=None, wait=STORAGE_WAIT):

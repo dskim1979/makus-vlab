@@ -9,6 +9,7 @@ grants, loans and sessions; the other tables of the design arrive with their fea
 
 import json
 import threading
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -230,7 +231,11 @@ def add_desktop(pool, node, vmid, name, vm_type='qemu', state='ready'):
     }
     db().execute('''INSERT INTO vlab_desktops (id, pool_id, cluster_id, node, vmid, vm_type, name, state, created_at)
                     VALUES (:id, :pool_id, :cluster_id, :node, :vmid, :vm_type, :name, :state, :created_at)''', desk)
-    return get_desktop(desk['id'])
+    out = get_desktop(desk['id'])
+    # a pool with auto_domain_join: the new desktop joins the bundled directory once it runs
+    from pegaprox.vlab import directory
+    directory.queue_new(out)
+    return out
 
 
 def desktop_for_vm(cluster_id, vmid):
@@ -247,6 +252,11 @@ def set_node(desktop_id, node):
     db().execute('UPDATE vlab_desktops SET node = ? WHERE id = ?', (node, desktop_id))
 
 
+def set_name(desktop_id, name):
+    """the desktop follows its VM's new name (가상머신 > 데스크톱(VM) 상세)"""
+    db().execute('UPDATE vlab_desktops SET name = ? WHERE id = ?', (name, desktop_id))
+
+
 def set_base_snap(desktop_id, snap):
     db().execute('UPDATE vlab_desktops SET base_snap = ? WHERE id = ?', (snap or '', desktop_id))
 
@@ -258,11 +268,24 @@ def open_session_desktops():
 
 
 def set_assignment(desktop_id, username):
+    prev = db().query_one('SELECT assigned_user FROM vlab_desktops WHERE id = ?', (desktop_id,))
     db().execute('UPDATE vlab_desktops SET assigned_user = ? WHERE id = ?', (username, desktop_id))
+    if prev and prev['assigned_user'] and prev['assigned_user'] != username:
+        _forget_warpgate(desktop_id)   # the old user keeps no way in through Warpgate
 
 
 def remove_desktop(desktop_id):
     db().execute('DELETE FROM vlab_desktops WHERE id = ?', (desktop_id,))
+    _forget_warpgate(desktop_id)
+
+
+def _forget_warpgate(desktop_id):
+    """Remove the desktop's Warpgate targets (best effort, in the background; pegaprox/vlab/warpgate.py)."""
+    try:
+        from pegaprox.vlab.warpgate import forget_desktop
+        forget_desktop(desktop_id)
+    except Exception as e:
+        logging.warning(f'[VLAB] Warpgate cleanup for {desktop_id} skipped: {str(e)[:200]}')
 
 
 def desktops_of_user(username):
