@@ -1696,6 +1696,10 @@ def test_kiosk_hands_out_a_desktop_of_the_session(connectable, api, monkeypatch)
     descs = vlab_api.store.list_desktops(pool['id'])
     if not descs:   # vmid 301 sits in another pool of the fixture: give the session pool its own
         vlab_api.store.add_desktop(vlab_api.store.get_pool(pool['id']), 'pve1', 310, 'class-01')
+    # the class desktop is on the cluster (a kiosk never hands out one deleted in Proxmox)
+    real_states = vlab_api._vm_states
+    monkeypatch.setattr(vlab_api, '_vm_states', lambda cid: {**real_states(cid), 310: {
+        'vmid': 310, 'node': 'pve1', 'name': 'class-01', 'type': 'qemu', 'status': 'running'}})
     r = alice.post('/api/vlab/kiosk/start', headers=hdr)
     assert r.status_code == 200, r.get_json()
     got = r.get_json()['desktop']
@@ -1706,6 +1710,11 @@ def test_kiosk_hands_out_a_desktop_of_the_session(connectable, api, monkeypatch)
     # the clean-up after the session frees it
     vlab_api.lab_tick(datetime(2026, 10, 12, 12, 5))
     assert vlab_api.store.get_desktop(got['id'])['assigned_user'] is None
+    # deleted in Proxmox meanwhile: the kiosk does not hand it out again
+    monkeypatch.setattr(vlab_api, '_vm_states', real_states)
+    r = alice.post('/api/vlab/kiosk/start', headers=hdr)
+    if vlab_api.store.get_desktop(got['id'])['vmid'] not in real_states(CID):
+        assert r.status_code == 409 and r.get_json()['code'] == 'FULL', r.get_json()
 
 
 # --- MOAVI Desk Client ---------------------------------------------------------------------
