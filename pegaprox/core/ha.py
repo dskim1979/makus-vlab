@@ -363,6 +363,8 @@ SYNC_TABLES = (
     'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin',
     # 부하 분산 mode per cluster, the moves made, desktops waiting to go under Proxmox HA (pegaprox/vlab/hadrs.py)
     'vlab_balance', 'vlab_balance_moves', 'vlab_ha_queue',
+    # 네트워크 격리: the gateway's addresses per cluster, the desktops given the firewall (pegaprox/vlab/netiso.py)
+    'vlab_netiso', 'vlab_netiso_applied',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

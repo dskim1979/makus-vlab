@@ -120,12 +120,17 @@ def _side_ticks():
         from pegaprox.api.vlab_hadrs import ha_tick              # new desktops of 'HA 사용' pools go under HA
         ha_tick()
 
+    def pool_netiso():
+        from pegaprox.api.vlab_netiso import netiso_tick         # 네트워크 격리: pool policy -> Proxmox firewall
+        netiso_tick()
+
     for name, on, fn in (('operations notices', True, ops),
                          ('LAB booking reminders', features.enabled('lab'), bookings),
                          ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
                          ('growth forecast', True, forecast),
                          ('reclaim summary', True, reclaim),
-                         ('pool HA', True, pool_ha)):
+                         ('pool HA', True, pool_ha),
+                         ('network isolation', True, pool_netiso)):
         if not on:
             continue
         try:
