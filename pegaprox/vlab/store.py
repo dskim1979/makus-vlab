@@ -280,6 +280,16 @@ def set_assignment(desktop_id, username):
 def remove_desktop(desktop_id):
     db().execute('DELETE FROM vlab_desktops WHERE id = ?', (desktop_id,))
     _forget_warpgate(desktop_id)
+    _release_netiso(desktop_id)
+
+
+def _release_netiso(desktop_id):
+    """네트워크 격리 off the VM it was put on (best effort; the minute loop retries; pegaprox/api/vlab_netiso.py)."""
+    try:
+        from pegaprox.api.vlab_netiso import release_desktop
+        release_desktop(desktop_id)
+    except Exception as e:
+        logging.warning(f'[VLAB] network isolation release for {desktop_id} skipped: {str(e)[:200]}')
 
 
 def _forget_warpgate(desktop_id):

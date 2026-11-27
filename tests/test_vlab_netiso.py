@@ -216,6 +216,7 @@ def test_apply_and_take_back(iso):
 def test_the_tick_follows_a_policy_change(iso):
     from pegaprox.api import vlab_netiso
     admin, pve, pool = iso
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={'net_isolation': False})
     admin.put(f'/api/vlab/admin/clusters/{CID}/netiso', json={'gateway_sources': ['192.168.0.55']})
     vlab_netiso.netiso_tick()
     assert not pve.writes                               # isolation is off
@@ -225,3 +226,25 @@ def test_the_tick_follows_a_policy_change(iso):
     group = netiso.group_name(pool['id'])
     assert [r['type'] for r in pve.groups[group]] == ['in', 'out', 'out']
     assert pve.vms[301]['options']['policy_out'] == 'DROP'
+
+
+def test_a_new_pool_starts_isolated_and_registering_applies_it(iso, api):
+    admin, pve, pool = iso
+    assert admin.get(f"/api/vlab/admin/pools/{pool['id']}/policy").get_json()['policy']['net_isolation'] is True
+    admin.put(f'/api/vlab/admin/clusters/{CID}/netiso', json={'gateway_sources': ['192.168.0.55']})
+    pve.vms[302] = {'config': {'net0': 'virtio=CC,bridge=vmbr0'}, 'rules': [], 'options': {}, 'ips': ['192.168.0.24']}
+    from pegaprox.globals import cluster_managers
+    cluster_managers[CID].get_vm_resources.return_value = cluster_managers[CID].get_vm_resources.return_value + [
+        {'vmid': 302, 'node': 'pve1', 'name': 'win-03', 'type': 'qemu', 'status': 'running'}]
+    r = admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': 302})
+    assert r.status_code in (200, 201)
+    group = netiso.group_name(pool['id'])
+    assert pve.vms[302]['rules'][0]['action'] == group and pve.vms[302]['options']['policy_in'] == 'DROP'
+    assert pve.vms[300]['options']['policy_in'] == 'DROP'      # the whole pool on the same sync
+
+    # unregistering takes it off that VM at once
+    desk = r.get_json()['desktop']
+    assert admin.delete(f"/api/vlab/admin/desktops/{desk['id']}").status_code == 200
+    assert pve.vms[302]['rules'] == [] and pve.vms[302]['options']['policy_in'] == 'ACCEPT'
+    assert pve.vms[302]['options']['enable'] == 0
+    assert netiso.applied(desk['id']) is None

@@ -2425,8 +2425,11 @@ def create_pool():
     if not ok:
         return err
     tenant = (acting_user() or {}).get('tenant_id', '') or ''
+    # a new pool starts with 네트워크 격리 on (pools made before keep what they have; nothing is
+    # applied until the cluster has a gateway address - pegaprox/vlab/netiso.py)
     pool = store.create_pool(name, pool_type, cluster_id, tenant_id=tenant,
-                             description=str(data.get('description') or '')[:500], created_by=_user())
+                             description=str(data.get('description') or '')[:500], created_by=_user(),
+                             settings={'policy': {'net_isolation': True}})
     log_audit(_user(), 'vlab.pool.create', f"pool '{name}' ({pool_type}) on {cluster_id}", get_client_ip())
     return jsonify({'pool': pool}), 201
 
@@ -2579,6 +2582,8 @@ def add_desktop(pool_id):
     name = str(data.get('name') or (vm or {}).get('name') or f'vm-{vmid}')[:MAX_NAME]
     desk = store.add_desktop(pool, node, vmid, name, vm_type)
     log_audit(_user(), 'vlab.desktop.add', f"{vm_type}/{vmid} into pool '{pool['name']}'", get_client_ip())
+    from pegaprox.api.vlab_netiso import desktop_added
+    desktop_added(pool)                     # 네트워크 격리 on the new desktop at once
     return jsonify({'desktop': desk}), 201
 
 
