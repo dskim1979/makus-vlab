@@ -1,0 +1,3 @@
+LIBRARY moavi-logon-ksp
+EXPORTS
+    GetKeyStorageInterface

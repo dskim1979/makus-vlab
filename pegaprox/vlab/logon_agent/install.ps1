@@ -21,7 +21,10 @@ function Fail($m) { "error=$m"; exit 1 }
 if ($Uninstall) {
     if (Test-Path $cpKey) { Remove-Item -Recurse -Force $cpKey }
     if (Test-Path $clsKey) { Remove-Item -Recurse -Force $clsKey }
-    if (Test-Path (Join-Path $dest 'moavi-logon.exe')) { & (Join-Path $dest 'moavi-logon.exe') clear | Out-Null }
+    if (Test-Path (Join-Path $dest 'moavi-logon.exe')) {
+        & (Join-Path $dest 'moavi-logon.exe') clear | Out-Null
+        & (Join-Path $dest 'moavi-logon.exe') unregister-ksp | Out-Null
+    }
     'uninstall=ok'
     exit 0
 }
@@ -40,7 +43,7 @@ try {
             if ($got -ne $sha.ToLower()) { Fail "checksum $name" }
         }
     }
-    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ca.cer') {
+    foreach ($n in 'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'moavi-logon-ca.cer') {
         if (-not (Test-Path (Join-Path $Setup $n))) { Fail "missing $n" }
     }
 
@@ -58,6 +61,15 @@ try {
     }
     Get-ChildItem $dest -Filter '*.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
 
+    # 2b. the key storage provider: in System32 (CNG loads registered images from there), then registered
+    $ksp = Join-Path $env:SystemRoot 'System32\moavi-logon-ksp.dll'
+    if (Test-Path $ksp) {
+        $old = "$ksp.old-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+        try { Remove-Item -Force $ksp } catch { Move-Item -Force $ksp $old }   # LSASS may have it loaded
+    }
+    Copy-Item -Force (Join-Path $Setup 'moavi-logon-ksp.dll') $ksp
+    Get-ChildItem (Split-Path $ksp) -Filter 'moavi-logon-ksp.dll.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item -Force $_.FullName } catch {} }
+
     # 3. the data folder (pending logon, log): SYSTEM / Administrators only
     New-Item -ItemType Directory -Force $data | Out-Null
     icacls $data /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
@@ -71,6 +83,13 @@ try {
     Set-ItemProperty "$clsKey\InprocServer32" 'ThreadingModel' 'Apartment'
     New-Item -Force $cpKey | Out-Null
     Set-ItemProperty $cpKey '(default)' 'MOAVI Desk Logon'
+
+    $reg = & (Join-Path $dest 'moavi-logon.exe') register-ksp
+    if ($LASTEXITCODE -ne 0) { Fail "ksp: $reg" }
+    $reg
+    # the smart card logon path wants the Smart Card service
+    Set-Service SCardSvr -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service SCardSvr -ErrorAction SilentlyContinue
 
     # 5. trust the MOAVI Desk Logon CA: Root (chain) and NTAuth (smart card logon)
     $ca = Join-Path $Setup 'moavi-logon-ca.cer'

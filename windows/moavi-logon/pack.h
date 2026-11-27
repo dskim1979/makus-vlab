@@ -54,7 +54,9 @@ inline bool PackCertLogon(const KV& stc, bool unlock, std::vector<BYTE>& out) {
     if (cspMode) {
         std::wstring container = st[L"key"];
         std::wstring provider = !st[L"provider"].empty() ? st[L"provider"]
-                              : st[L"keyprov"] == L"ksp" ? std::wstring(MS_KEY_STORAGE_PROVIDER) : std::wstring(MS_ENH_RSA_AES_PROV_W);
+                              : st[L"keyprov"] == L"ksp" ? std::wstring(MS_KEY_STORAGE_PROVIDER)
+                              : st[L"keyprov"] == L"capi" ? std::wstring(MS_ENH_RSA_AES_PROV_W)
+                              : std::wstring(MOAVI_KSP_NAME);
         // bBuffer: card "", reader "", container, csp name (offsets in WCHARs)
         std::wstring payload;
         payload.assign(4, L'\0');                 // the first sizeof(DWORD) WCHARs of bBuffer stay unused

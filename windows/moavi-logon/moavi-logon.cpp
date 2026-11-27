@@ -79,7 +79,7 @@ static void ForgetPending() {
 static bool PublicKeyOf(const KV& stc, std::vector<BYTE>& out) {
     KV st = stc;
     DWORD len = 0;
-    if (st[L"keyprov"] == L"ksp") {
+    if (st[L"keyprov"] != L"capi") {
         NCRYPT_PROV_HANDLE prov = 0;
         NCRYPT_KEY_HANDLE key = 0;
         bool ok = false;
@@ -113,7 +113,7 @@ static bool MakeKeyAndCsr(const std::wstring& keyprov, const std::wstring& scope
     NCRYPT_KEY_HANDLE key = 0;
     HCRYPTPROV_OR_NCRYPT_KEY_HANDLE signer = 0;
     DWORD spec = AT_KEYEXCHANGE;
-    if (keyprov == L"ksp") {
+    if (keyprov != L"capi") {
         SECURITY_STATUS ss = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
         if (ss == ERROR_SUCCESS)
             ss = NCryptCreatePersistedKey(prov, &key, BCRYPT_RSA_ALGORITHM, keyName.c_str(), AT_KEYEXCHANGE,
@@ -190,7 +190,9 @@ static int Prepare() {
 
     // keyprov capi (default): Microsoft Enhanced RSA and AES CSP, the provider the Kerberos smart card
     // logon path opens a container with; ksp: Microsoft Software KSP (LSA does not find it there)
-    std::wstring keyprov = opt[L"keyprov"] == L"ksp" ? L"ksp" : L"capi";
+    // keyprov moavi (default): a Software KSP key that LSA reaches through the MOAVI Logon KSP (a smart
+    // card provider to it); ksp / capi: the bare software key (LSA refuses both - kept as switches)
+    std::wstring keyprov = opt[L"keyprov"] == L"ksp" ? L"ksp" : opt[L"keyprov"] == L"capi" ? L"capi" : L"moavi";
     std::vector<BYTE> csr;
     std::string err;
     if (!MakeKeyAndCsr(keyprov, scope, keyName, csr, err)) {
@@ -257,8 +259,8 @@ static int Arm() {
 
     CRYPT_KEY_PROV_INFO kpi = {};
     kpi.pwszContainerName = (LPWSTR)st[L"key"].c_str();
-    bool ksp = st[L"keyprov"] == L"ksp";
-    kpi.pwszProvName = (LPWSTR)(ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
+    bool ksp = st[L"keyprov"] != L"capi";
+    kpi.pwszProvName = (LPWSTR)(st[L"keyprov"] == L"moavi" ? MOAVI_KSP_NAME : ksp ? MS_KEY_STORAGE_PROVIDER : MS_ENH_RSA_AES_PROV_W);
     kpi.dwProvType = ksp ? 0 : PROV_RSA_AES;  // 0 = CNG
     kpi.dwFlags = (ksp ? KeyScopeFlags(st[L"keyscope"]) | NCRYPT_SILENT_FLAG
                        : (st[L"keyscope"] == L"machine" ? CRYPT_MACHINE_KEYSET : 0) | CRYPT_SILENT);
@@ -364,7 +366,7 @@ static int Selftest(bool all) {
         for (auto& o : opt) st[o.first] = o.second;
     // csp with a PIN is the form LSA takes (hash and an empty PIN: STATUS_INVALID_PARAMETER); what varies
     // is how the key is named to it and the outer structure
-    const wchar_t* providers[] = { MS_ENH_RSA_AES_PROV_W, MS_ENHANCED_PROV_W, MS_STRONG_PROV_W, MS_KEY_STORAGE_PROVIDER };
+    const wchar_t* providers[] = { MOAVI_KSP_NAME, MS_KEY_STORAGE_PROVIDER, MS_ENH_RSA_AES_PROV_W };
     const wchar_t* names[] = { L"upn", L"on", L"off" };
     const wchar_t* structs[] = { L"plain", L"unlock" };
     const wchar_t* pkgs[] = { L"Negotiate", L"Kerberos" };
@@ -389,12 +391,56 @@ done:
     return rc;
 }
 
+// The CNG provider registration calls (bcrypt.dll; declared only in the CPDK's bcrypt_provider.h)
+typedef NTSTATUS (WINAPI* RegisterProviderFn)(LPCWSTR, ULONG, PCRYPT_PROVIDER_REG);
+typedef NTSTATUS (WINAPI* UnregisterProviderFn)(LPCWSTR);
+typedef NTSTATUS (WINAPI* AddContextFunctionProviderFn)(ULONG, LPCWSTR, ULONG, LPCWSTR, LPCWSTR, ULONG);
+typedef NTSTATUS (WINAPI* RemoveContextFunctionProviderFn)(ULONG, LPCWSTR, ULONG, LPCWSTR, LPCWSTR);
+
+static int RegisterKsp(bool on) {
+    NTSTATUS r;
+    HMODULE bc = LoadLibraryExW(L"bcrypt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto BCryptRegisterProvider = bc ? (RegisterProviderFn)GetProcAddress(bc, "BCryptRegisterProvider") : nullptr;
+    auto BCryptUnregisterProvider = bc ? (UnregisterProviderFn)GetProcAddress(bc, "BCryptUnregisterProvider") : nullptr;
+    auto BCryptAddContextFunctionProvider = bc ? (AddContextFunctionProviderFn)GetProcAddress(bc, "BCryptAddContextFunctionProvider") : nullptr;
+    auto BCryptRemoveContextFunctionProvider = bc ? (RemoveContextFunctionProviderFn)GetProcAddress(bc, "BCryptRemoveContextFunctionProvider") : nullptr;
+    if (!BCryptRegisterProvider || !BCryptUnregisterProvider || !BCryptAddContextFunctionProvider || !BCryptRemoveContextFunctionProvider) {
+        Out("error=bcrypt registration functions missing\n");
+        return 4;
+    }
+    if (!on) {
+        BCryptRemoveContextFunctionProvider(CRYPT_LOCAL, nullptr, NCRYPT_KEY_STORAGE_INTERFACE, NCRYPT_KEY_STORAGE_ALGORITHM, MOAVI_KSP_NAME);
+        r = BCryptUnregisterProvider(MOAVI_KSP_NAME);
+        char m[64]; sprintf_s(m, "ksp=unregistered 0x%08lx\n", (unsigned long)r); Out(m);
+        return 0;
+    }
+    PWSTR functions[] = { (PWSTR)NCRYPT_KEY_STORAGE_ALGORITHM };
+    CRYPT_INTERFACE_REG iface = { NCRYPT_KEY_STORAGE_INTERFACE, CRYPT_LOCAL, 1, functions };
+    PCRYPT_INTERFACE_REG ifaces[] = { &iface };
+    CRYPT_IMAGE_REG image = { (PWSTR)MOAVI_KSP_IMAGE, 1, ifaces };
+    CRYPT_PROVIDER_REG reg = { 0, nullptr, &image, nullptr };
+    r = BCryptRegisterProvider(MOAVI_KSP_NAME, CRYPT_OVERWRITE, &reg);
+    if (r != 0) { char m[64]; sprintf_s(m, "error=register 0x%08lx\n", (unsigned long)r); Out(m); return 4; }
+    r = BCryptAddContextFunctionProvider(CRYPT_LOCAL, nullptr, NCRYPT_KEY_STORAGE_INTERFACE, NCRYPT_KEY_STORAGE_ALGORITHM,
+                                         MOAVI_KSP_NAME, CRYPT_PRIORITY_BOTTOM);
+    if (r != 0 && r != (NTSTATUS)0xC0000035L /* already there */) {
+        char m[64]; sprintf_s(m, "error=context 0x%08lx\n", (unsigned long)r); Out(m); return 4;
+    }
+    NCRYPT_PROV_HANDLE p = 0;
+    SECURITY_STATUS ss = NCryptOpenStorageProvider(&p, MOAVI_KSP_NAME, 0);
+    if (p) NCryptFreeObject(p);
+    char m[64]; sprintf_s(m, "ksp=registered open=0x%08lx\n", (unsigned long)ss); Out(m);
+    return ss == ERROR_SUCCESS ? 0 : 4;
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) { Out("usage: moavi-logon prepare|arm|status|clear\n"); return 2; }
     std::wstring cmd = argv[1];
     if (cmd == L"prepare") return Prepare();
     if (cmd == L"arm") return Arm();
     if (cmd == L"status") return Status();
+    if (cmd == L"register-ksp") return RegisterKsp(true);
+    if (cmd == L"unregister-ksp") return RegisterKsp(false);
     if (cmd == L"selftest") return Selftest(argc > 2 && std::wstring(argv[2]) == L"all");
     if (cmd == L"clear") { ForgetPending(); Log(L"clear"); Out("cleared=ok\n"); return 0; }
     Out("usage: moavi-logon prepare|arm|status|clear\n");

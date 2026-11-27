@@ -37,7 +37,7 @@ _user = core._user
 
 EXE = r'C:\Program Files\MOAVI\Logon\moavi-logon.exe'
 AGENT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'vlab', 'logon_agent')
-AGENT_FILES = ('moavi-logon.exe', 'moavi-logon-cp.dll', 'install.ps1')
+AGENT_FILES = ('moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-ksp.dll', 'install.ps1')
 SETUP_DIR = r'C:\Windows\Temp\moavi-logon-setup'
 PIECE = 46080                  # bytes per guest agent file-write (Proxmox takes 61440 base64 characters)
 PREPARE_WAIT = 20
