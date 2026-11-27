@@ -534,9 +534,11 @@ def test_the_inventory_counts_what_the_report_says():
     # (+1 since: the licence seats' lmstat, an external read)
     # (+2 since: the Warpgate bastion admin API, an external http; the desktop RDP/SSH/VNC
     #  port probe on connect, a socket read)
-    assert sum(n for n, _v in EXITS.values()) == 265 and len(EXITS) == 160
-    assert len({(f, q) for f, q, _k in EXITS}) == 145
-    assert by['guard'] == 46 and by['client'] == 85
+    # (+4 since: 템플릿 만들기' node SSH and SFTP, two execs on a client from a guarded factory; the MCP
+    #  stdio bridge, an external http; the RD gateway container check, a socket read)
+    assert sum(n for n, _v in EXITS.values()) == 269 and len(EXITS) == 164
+    assert len({(f, q) for f, q, _k in EXITS}) == 149
+    assert by['guard'] == 46 and by['client'] == 87
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
