@@ -70,6 +70,11 @@ def _portal_session():
 
 _arm_locks = {}                    # desktop id -> lock: one arm at a time per desktop
 _arm_locks_guard = threading.Lock()
+# arms at once over the whole engine: each is a few guest agent calls through the node's API. Sized
+# for up to 200 desktops on a handful of nodes - a morning rush queues here a few seconds instead of
+# piling onto Proxmox
+ARMS_AT_ONCE = 8
+_arms = threading.BoundedSemaphore(ARMS_AT_ONCE)
 
 
 def _arm_lock(desktop_id):
@@ -86,6 +91,11 @@ def arm(desk, mgr, node, username, portal_session='', client_ip=''):
 
 
 def _arm(desk, mgr, node, username, portal_session='', client_ip=''):
+    with _arms:
+        return _arm_now(desk, mgr, node, username, portal_session, client_ip)
+
+
+def _arm_now(desk, mgr, node, username, portal_session='', client_ip=''):
     from pegaprox.api.vlab_next import _agent_run, agent_exec_disabled
     ok, code = logon_ca.eligible(username, desk['id'])
     if not ok:
@@ -625,12 +635,19 @@ def install_round(limit=AUTO_PER_ROUND):
     return done
 
 
+PRUNE_EVERY = 3600
+
+
 def _install_loop():
+    pruned = 0.0
     while True:
         try:
             from pegaprox.core import ha
             if ha.is_active():
                 install_round()
+                if time.time() - pruned > PRUNE_EVERY:
+                    pruned = time.time()
+                    logon_ca.prune()
         except Exception as e:
             logging.error(f'[VLAB] desktop sign-in automatic install: {e}')
         time.sleep(AUTO_EVERY)

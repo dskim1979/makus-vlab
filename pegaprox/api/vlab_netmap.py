@@ -31,7 +31,10 @@ from pegaprox.vlab import netiso, netseg, policy, store
 
 bp = Blueprint('vlab_netmap', __name__)
 
-DESKTOPS_READ = 60          # desktops per pool whose VM settings are read (the rest are counted, not read)
+DESKTOPS_READ = 200         # desktops per pool whose VM settings are read (the rest are counted, not read)
+READ_AT_ONCE = 16           # Proxmox reads in flight for one map: 200 desktops = about 400 reads, a few seconds
+CACHE_FOR = 60              # seconds a map is answered again from memory (다시 점검 reads afresh)
+_cache = {}                 # cluster id -> (when, map)
 LEVELS = ('critical', 'warning', 'info')
 FINDINGS = (
     # critical: isolation or the users' connection does not work as the console says
@@ -160,23 +163,29 @@ def cluster_map(cluster_id):
     def find(level, code, pool=None, segment=None, detail=''):
         findings.append({'level': level, 'code': code, 'pool': pool or '', 'segment': segment or '', 'detail': str(detail)[:300]})
 
-    out_pools = []
+    # every pool's desktops read at once (READ_AT_ONCE calls in flight over the cluster, not pool by pool)
+    plan = []
     for p in pools:
         pol = policy.effective(p.get('settings'), p.get('type'))
-        iso = bool(pol.get('net_isolation'))
-        sid = pol.get('net_segment') or ''
         moved = {r['desktop_id']: r for r in netseg.moved_rows(pool_id=p['id'])}
         desks = [d for d in store.list_desktops(p['id']) if d.get('vmid')]
-        read = desks[:DESKTOPS_READ]
-        info = {}
-        if mgr and read:
-            def one(d):
-                vm = vms.get(int(d['vmid'])) or {}
-                node = vm.get('node') or d['node']
-                return d['id'], _desktop(mgr, d, node, iso, pol.get('net_segment_from') or '', (moved.get(d['id']) or {}).get('nic'),
-                                         vm.get('status') == 'running')
-            with ThreadPoolExecutor(max_workers=min(8, len(read))) as ex:
-                info = dict(ex.map(one, read))
+        plan.append((p, pol, moved, desks, desks[:DESKTOPS_READ]))
+    jobs = [(d, pol, moved) for _p, pol, moved, _desks, read in plan for d in read]
+    info_all = {}
+    if mgr and jobs:
+        def one(job):
+            d, pol, moved = job
+            vm = vms.get(int(d['vmid'])) or {}
+            return d['id'], _desktop(mgr, d, vm.get('node') or d['node'], bool(pol.get('net_isolation')),
+                                     pol.get('net_segment_from') or '', (moved.get(d['id']) or {}).get('nic'),
+                                     vm.get('status') == 'running')
+        with ThreadPoolExecutor(max_workers=min(READ_AT_ONCE, len(jobs))) as ex:
+            info_all = dict(ex.map(one, jobs))
+    out_pools = []
+    for p, pol, moved, desks, read in plan:
+        iso = bool(pol.get('net_isolation'))
+        sid = pol.get('net_segment') or ''
+        info = {d['id']: info_all[d['id']] for d in read if d['id'] in info_all}
         applied = {r['desktop_id'] for r in netiso.applied_rows(pool_id=p['id'])}
         live = (_live_group(mgr, p['id'], pol, groups) if iso and mgr else 'off' if not iso else 'unknown')
         seg = segs.get(sid)
@@ -284,4 +293,11 @@ def get_cluster_netmap(cluster_id):
     """네트워크 구성도: segments, pools, their firewall rules and what is set up wrong (read only)."""
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'unknown cluster'}), 404
-    return jsonify(cluster_map(cluster_id))
+    import time
+    from flask import request
+    hit = _cache.get(cluster_id)
+    if hit and request.args.get('fresh') != '1' and time.time() - hit[0] < CACHE_FOR:
+        return jsonify(dict(hit[1], cached_at=hit[0]))
+    m = cluster_map(cluster_id)
+    _cache[cluster_id] = (time.time(), m)
+    return jsonify(dict(m, cached_at=None))

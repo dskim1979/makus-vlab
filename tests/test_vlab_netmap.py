@@ -59,7 +59,7 @@ def nm(api, seed, monkeypatch):
 
 
 def _map(admin):
-    r = admin.get(f'/api/vlab/admin/clusters/{CID}/netmap')
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/netmap?fresh=1')
     assert r.status_code == 200
     return r.get_json()
 
@@ -173,3 +173,17 @@ def test_pool_to_pool_rules_drops_first_and_the_desktops(nm):
     assert [v['vmid'] for v in p['vms']] == [400, 401] and p['vms'][0]['bridge'] == 'vmbr0'
     f = next(x for x in m['findings'] if x['code'] == 'peer_out_missing')            # 연구소 sends only its list
     assert f['pool'] == other['id'] and '445' in f['detail']
+
+
+def test_the_map_is_answered_from_memory_for_a_minute(nm):
+    """Up to 200 desktops: about 400 Proxmox reads per map - a reload within a minute does not repeat
+    them; 다시 점검 (?fresh=1) does."""
+    admin, fw, pool = nm
+    from pegaprox.api import vlab_netmap
+    vlab_netmap._cache.clear()
+    first = admin.get(f'/api/vlab/admin/clusters/{CID}/netmap').get_json()
+    assert first['cached_at'] is None
+    calls = len(fw.writes)
+    again = admin.get(f'/api/vlab/admin/clusters/{CID}/netmap').get_json()
+    assert again['cached_at'] and again['pools'] == first['pools']
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/netmap?fresh=1').get_json()['cached_at'] is None

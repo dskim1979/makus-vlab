@@ -439,6 +439,18 @@ def mark(serial, state, detail=''):
     db().execute('UPDATE vlab_logon_issued SET state = ?, detail = ? WHERE serial = ?', (state, (detail or '')[:300], serial))
 
 
+KEEP_DAYS = 30        # issued-certificate rows are kept this long after they expired
+
+
+def prune(days=KEEP_DAYS):
+    """Forget certificates that expired more than `days` ago (each arm, ahead or at connect, adds a
+    row). Returns how many went."""
+    cut = _iso(_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days))
+    n = db().query_one('SELECT COUNT(*) AS n FROM vlab_logon_issued WHERE not_after < ?', (cut,))
+    db().execute('DELETE FROM vlab_logon_issued WHERE not_after < ?', (cut,))
+    return int(n['n'] or 0) if n else 0
+
+
 def issued(limit=100, username=None, desktop_id=None):
     q, args = 'SELECT * FROM vlab_logon_issued', []
     cond = []
