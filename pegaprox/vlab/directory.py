@@ -1133,6 +1133,10 @@ def windows_join_script(name, restart=False, taken_sids=(), lsa_off=False):
     c, s = config(), settings()
     dns = desktop_dns() if s['set_dns'] else []
     dns_ps = '@(' + ','.join(_ps_str(x) for x in dns) + ')'
+    # moavi-users in Remote Desktop Users (S-1-5-32-555), once: already there counts as done
+    rdp_group_ps = ("try { $g = \"$netbios\\" + ALL_GROUP + "\"; "
+                    "if (@(Get-LocalGroupMember -SID 'S-1-5-32-555' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $g }).Count -eq 0) "
+                    "{ Add-LocalGroupMember -SID 'S-1-5-32-555' -Member $g -ErrorAction Stop }; 'rdp_group=1' } catch { 'rdp_group=0' }")
     taken_ps = '@(' + ','.join(_ps_str(x) for x in taken_sids if x) + ')'
     return '\n'.join([
         "$ErrorActionPreference = 'Stop'",
@@ -1147,7 +1151,12 @@ def windows_join_script(name, restart=False, taken_sids=(), lsa_off=False):
         "}",
         "if ($cs.PartOfDomain) {",
         "  \"domain=$($cs.Domain)\"; \"computer=$env:COMPUTERNAME\"",
-        "  if ($cs.Domain -ieq $domain) { 'joined=1'; exit 0 } else { exit 21 }",
+        "  if ($cs.Domain -ine $domain) { exit 21 }",
+        "  'joined=1'",
+        # joined some other way (a template build, by hand): its users may still not be let in over RDP
+        # (4625 0xc000015b, 'the requested logon type has not been granted') - the group goes in here too
+        ("  " + rdp_group_ps) if s['rdp_group'] else "  'rdp_group=skipped'",
+        "  exit 0",
         "}",
         "if ($dns.Count -gt 0) {",
         "  Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {",
@@ -1163,8 +1172,7 @@ def windows_join_script(name, restart=False, taken_sids=(), lsa_off=False):
         "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 23 }",
         "\"domain=$domain\"; \"computer=$name\"; 'joined=1'; 'reboot=1'",
         ("try { " + LSA_OFF_PS + " } catch { 'lsa_ppl_off=0' }") if lsa_off else "'lsa_ppl_off=skipped'",
-        ("try { Add-LocalGroupMember -SID 'S-1-5-32-555' -Member \"$netbios\\" + ALL_GROUP + "\" -ErrorAction Stop; 'rdp_group=1' }"
-         " catch { 'rdp_group=0' }") if s['rdp_group'] else "'rdp_group=skipped'",
+        rdp_group_ps if s['rdp_group'] else "'rdp_group=skipped'",
         "shutdown.exe /r /t 15 /c 'MOAVI Desk: domain join' | Out-Null; 'restarting=1'" if restart else "'restarting=0'",
         "exit 0",
     ])

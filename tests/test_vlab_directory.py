@@ -479,3 +479,12 @@ def test_tables_are_synced_and_the_secret_column_sealed():
     with open('version.json', encoding='utf-8') as f:
         files = json.load(f)['update_files']
     assert 'pegaprox/vlab/directory.py' in files and 'pegaprox/api/vlab_directory.py' in files
+
+
+def test_a_desktop_joined_some_other_way_still_lets_the_users_in():
+    """VM 113: joined by its template build, Remote Desktop Users without moavi-users - test got 4625
+    0xc000015b ('the requested logon type has not been granted'). Joining it again adds the group."""
+    from pegaprox.vlab import directory
+    script = directory.windows_join_script('MD-113')
+    joined = script.split('if ($cs.PartOfDomain) {', 1)[1].split('exit 0', 1)[0]
+    assert "S-1-5-32-555" in joined and directory.ALL_GROUP in joined and 'Get-LocalGroupMember' in joined
