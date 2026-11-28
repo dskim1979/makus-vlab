@@ -70,7 +70,7 @@ NODE = re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
 STORAGE = re.compile(r'^[A-Za-z][A-Za-z0-9_.\-]{0,99}$')
 BRIDGE = re.compile(r'^[A-Za-z][A-Za-z0-9_.\-]{0,15}$')
 POLL = 30                      # seconds between looks into the building guest
-LINUX_HOURS, WINDOWS_HOURS, VIVADO_HOURS = 3, 3, 8
+LINUX_HOURS, WINDOWS_HOURS, VIVADO_HOURS = 4, 6, 8   # a slow cluster took just over 3 h for a Windows install (2026-11-28)
 
 _lock = threading.Lock()
 _live = set()                  # build ids with a thread in this process
