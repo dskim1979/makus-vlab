@@ -67,6 +67,8 @@ takes effect:
                                desktops are moved onto, '' = their own bridge (pegaprox/vlab/netseg.py)
   net_egress, net_allow_out    outbound: 'any' (as before) or 'list' = only the gateway, the pool's own
                                desktops when net_peers, and net_allow_out (DNS, AD, file servers ...)
+  desktop_sso                  데스크톱 자동 로그인: a Windows desktop's RDP session signs the portal user in
+                               with a certificate of a few minutes, no password (pegaprox/api/vlab_logon.py)
   auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
                                (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
                                bundled directory is in use
@@ -138,6 +140,7 @@ DEFAULTS = {
     'researcher_ssh': False,    # researchers' own SSH tools (PuTTY/scp/WinSCP/VS Code) through Warpgate
     'screen_thumbnail': True,   # the portal card shows the running desktop's screen
     'auto_domain_join': None,
+    'desktop_sso': False,       # Windows RDP sign-in with the portal session (MOAVI Desk Logon), no second password
     'desktop_files': 'off',     # the portal's 파일 panel: off / up (to the desktop) / down / both (pegaprox/api/vlab_desk_files.py)
     'desktop_files_max_mb': 500,   # largest single file
     'desktop_files_day_mb': 0,     # per user per day, both ways; 0 = no limit
@@ -157,7 +160,7 @@ MAX_DEVICE_ROUTE_FOR = 200
 
 _BOOLS = ('spice_fullscreen', 'usb_redirect', 'usb_autoshare', 'client_drives', 'client_printers', 'rdp_tune', 'start_on_connect',
           'reset_on_logout', 'allow_power', 'defer_when_busy', 'browser_ssh', 'researcher_ssh', 'screen_thumbnail',
-          'net_isolation', 'net_peers')
+          'net_isolation', 'net_peers', 'desktop_sso')
 _LIMITS = {'idle_shutdown_min': (0, 10080), 'max_session_hours': (0, 720),   # a week, a month
            'busy_gpu_pct': (1, 100), 'busy_cpu_pct': (0, 100), 'defer_max_hours': (1, 168),
            'web_ide_idle_min': (10, 10080), 'desktop_files_max_mb': (1, 10240), 'desktop_files_day_mb': (0, 1048576)}

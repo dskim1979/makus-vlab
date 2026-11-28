@@ -1,0 +1,4 @@
+LIBRARY moavi-logon-cp
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

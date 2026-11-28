@@ -503,6 +503,9 @@ def my_desktop_warpgate(desktop_id):
             if pol['rdp_tune']:
                 rdp_prepare(desk, mgr, node, ip=ip)
             prepare_windows_nla(desk, mgr, node)
+            # 데스크톱 자동 로그인 (pool desktop_sso): browser RDP signs the user in too (pegaprox/api/vlab_logon.py)
+            from pegaprox.api.vlab_logon import arm_for_connect
+            arm_for_connect(desk, mgr, node, username, pool)
         elif os_kind == 'linux' and not rdp_listening(ip, 3389):
             return jsonify({'error': 'This Linux desktop has no RDP server (xrdp)', 'code': 'NO_RDP'}), 409
     elif proto == 'ssh' and not rdp_listening(ip, 22):
@@ -653,7 +656,7 @@ def oidc_userinfo():
 RDPGW_OFF_TEXT = '장치 연결 방식(보안 게이트웨이)이 켜져 있지 않습니다. 관리자에게 문의하세요.'
 
 
-def rdp_answer_via_rdpgw(desk, username, ip, port, pol):
+def rdp_answer_via_rdpgw(desk, username, ip, port, pol, sso=False):
     """The connect route's .rdp for a pool on the devices route: through the bundled RD Gateway with a
     token for this user, this desktop and this client address (pegaprox/vlab/rdpgw.py). (answer, None);
     (None, None) when neither gateway is on - the caller writes the direct file, devices and all;
@@ -670,4 +673,4 @@ def rdp_answer_via_rdpgw(desk, username, ip, port, pol):
     token = rdpgw.paa_token(cfg['key'], username, f'{ip}:{int(port)}', client_ip)
     log_audit(username, 'vlab.rdpgw.connect', f"RDP file to '{desk['name']}' via 보안 게이트웨이 (devices)", client_ip)
     return {'type': 'rdp', 'via': 'rdpgw', 'filename': f"{desk['name']}.rdp", 'cert_url': '/moavi-gateway.crt',
-            'rdp': rdpgw.rdp_file_text(cfg, token, ip, port, username, rdp_redirects(pol), RDP_NETWORK)}, None
+            'rdp': rdpgw.rdp_file_text(cfg, token, ip, port, username, rdp_redirects(pol), RDP_NETWORK, sso=sso)}, None

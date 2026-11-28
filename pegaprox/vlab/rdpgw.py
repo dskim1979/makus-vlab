@@ -93,10 +93,12 @@ def paa_token(key, username, server, client_ip, now=None):
     return f'{signing_input}.{_b64(sig)}'
 
 
-def rdp_file_text(cfg, token, address, port, username, redirect_lines=(), network_lines=()):
+def rdp_file_text(cfg, token, address, port, username, redirect_lines=(), network_lines=(), sso=False):
     """An .rdp aimed at the desktop through the gateway: the user signs in to the desktop itself
-    (Windows asks), the gateway lets this client through with the token."""
-    lines = [f'full address:s:{address}:{int(port)}', f'username:s:{username}', 'prompt for credentials:i:1',
+    (Windows asks), the gateway lets this client through with the token. sso (desktop sign-in): no
+    CredSSP and no prompt - the desktop's own logon screen signs the user in with a certificate."""
+    ask = ['prompt for credentials:i:0', 'enablecredsspsupport:i:0'] if sso else ['prompt for credentials:i:1']
+    lines = [f'full address:s:{address}:{int(port)}', f'username:s:{username}', *ask,
              f"gatewayhostname:s:{cfg['host']}", 'gatewayusagemethod:i:1', 'gatewayprofileusagemethod:i:1',
              'gatewaycredentialssource:i:5', 'gatewaybrokeringtype:i:0', f'gatewayaccesstoken:s:{token}',
              'screen mode id:i:2', 'use multimon:i:1', *redirect_lines, 'audiomode:i:0', 'authentication level:i:2',
