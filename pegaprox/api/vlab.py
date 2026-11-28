@@ -371,7 +371,10 @@ def my_desktops():
         pol = pool_policy.effective(_settings_of(d), d.get('pool_type'))
         v['policy'] = {'clipboard': pol['clipboard'], 'allow_power': pol['allow_power'],
                        'start_on_connect': pol['start_on_connect'], 'web_ide': pol['web_ide'],
-                       'screen_thumbnail': pol['screen_thumbnail'], 'desktop_files': pol['desktop_files']}
+                       'screen_thumbnail': pol['screen_thumbnail'], 'desktop_files': pol['desktop_files'],
+                       # what the client may offer to pass over (its 장치 boxes; the desktop itself enforces the pool's)
+                       'client_drives': pol['client_drives'], 'client_printers': pol['client_printers'],
+                       'usb_redirect': pol['usb_redirect']}
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:
