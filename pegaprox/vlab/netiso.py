@@ -135,8 +135,8 @@ def suggested_sources(hosts):
 
 # --- what the pool's group holds -----------------------------------------------------------------
 
-def _rule(direction, peer_field, peer, proto='any', port='', note=''):
-    r = {'type': direction, 'action': 'ACCEPT', 'enable': 1, peer_field: peer}
+def _rule(direction, peer_field, peer, proto='any', port='', note='', action='ACCEPT'):
+    r = {'type': direction, 'action': action, 'enable': 1, peer_field: peer}
     if proto != 'any':
         r['proto'] = proto
     if port:
@@ -145,18 +145,36 @@ def _rule(direction, peer_field, peer, proto='any', port='', note=''):
     return r
 
 
+def peer_of(r):
+    """A policy rule's other side as Proxmox names it: another pool's ipset, or the address."""
+    return f"+{ipset_name(r['pool'])}" if r.get('pool') else r['cidr']
+
+
+def peer_pools(pol):
+    """The pool ids the pool's rules name (their ipsets must exist in the cluster)."""
+    return sorted({r['pool'] for k in ('net_allow_in', 'net_allow_out') for r in pol.get(k) or [] if r.get('pool')})
+
+
 def group_rules(pool_id, pol):
-    """The group's rules, top first, as Proxmox takes them (POST .../groups/<group>)."""
+    """The group's rules, top first, as Proxmox takes them (POST .../groups/<group>): the gateway
+    first (nothing a rule says cuts the users off), then the drop rules (차단), then the accepts."""
     peers = f'+{ipset_name(pool_id)}'
+
+    def own(direction, key, drop):
+        field = 'source' if direction == 'in' else 'dest'
+        return [_rule(direction, field, peer_of(r), r['proto'], r['port'], r.get('note', ''), 'DROP' if drop else 'ACCEPT')
+                for r in pol.get(key) or [] if (r.get('action') == 'drop') == drop]
     rules = [_rule('in', 'source', f'+{GW_IPSET}', note='MOAVI gateway')]
+    rules += own('in', 'net_allow_in', True)
     if pol.get('net_peers'):
         rules.append(_rule('in', 'source', peers, note='same pool'))
-    rules += [_rule('in', 'source', r['cidr'], r['proto'], r['port'], r.get('note', '')) for r in pol.get('net_allow_in') or []]
+    rules += own('in', 'net_allow_in', False)
+    rules += own('out', 'net_allow_out', True)          # with egress 'any' these are what stops traffic out
     if pol.get('net_egress') == 'list':
         rules.append(_rule('out', 'dest', f'+{GW_IPSET}', note='MOAVI gateway'))
         if pol.get('net_peers'):
             rules.append(_rule('out', 'dest', peers, note='same pool'))
-        rules += [_rule('out', 'dest', r['cidr'], r['proto'], r['port'], r.get('note', '')) for r in pol.get('net_allow_out') or []]
+        rules += own('out', 'net_allow_out', False)
     return rules
 
 

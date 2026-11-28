@@ -1861,6 +1861,13 @@ def set_pool_policy(pool_id):
             if len(nodes) > 1:
                 return _bad(f"net_segment: '{seg['name']}' is in a single-node zone but this pool's desktops are on "
                             f"{', '.join(sorted(nodes))} - use a VLAN or VXLAN zone")
+    for k in ('net_allow_in', 'net_allow_out'):
+        for r in pol.get(k) or []:
+            other = store.get_pool(r['pool']) if r.get('pool') else None
+            if r.get('pool') and (not other or other.get('cluster_id') != pool.get('cluster_id')):
+                return _bad(f"{k}: pool {r['pool']} is not a pool of this pool's cluster")
+            if r.get('pool') == pool['id']:
+                return _bad(f'{k}: the pool itself - use net_peers (같은 풀끼리) for that')
     old = pool_policy.effective(pool.get('settings'))
     was = old.get('ssh_files', 'off') != 'off'
     from pegaprox.vlab import directory

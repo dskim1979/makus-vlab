@@ -180,6 +180,31 @@ def _fingerprint(pol, desks, sources):
     return repr(([pol.get(k) for k in keys], sorted((d['id'], d.get('vmid')) for d in desks), sorted(sources)))
 
 
+def _known_peers(pool, pol):
+    """The policy without rules naming a pool that is gone or in another cluster (its ipset would
+    not exist): those rules are left out, the rest applies."""
+    def ok(r):
+        p = store.get_pool(r['pool']) if r.get('pool') else None
+        return not r.get('pool') or (p and p.get('cluster_id') == pool.get('cluster_id') and p['id'] != pool['id'])
+    return dict(pol, **{k: [r for r in pol.get(k) or [] if ok(r)] for k in ('net_allow_in', 'net_allow_out')})
+
+
+def _ensure_peer_ipset(mgr, other, vms):
+    """Another pool's ipset vlabd-<h> (its running desktops' addresses), for the rules naming it -
+    kept here too, so it is there even when that pool itself is not isolated."""
+    addrs, running = {}, set()
+    desks = [d for d in store.list_desktops(other['id']) if d.get('vmid')]
+    for d in desks:
+        vm = vms.get(int(d['vmid'])) or {}
+        if vm.get('status') == 'running' and d.get('vm_type', 'qemu') == 'qemu':
+            running.add(d['id'])
+            for ip in netiso.ipv4s(mgr._fetch_qemu_ips(vm.get('node') or d['node'], int(d['vmid']))):
+                addrs[ip] = d['id']
+    ids = {d['id'] for d in desks}
+    _ensure_ipset(mgr, netiso.ipset_name(other['id']), addrs, f"MOAVI Desk pool {other['name']} (vlab-netiso)"[:100],
+                  keep=lambda e: e.get('comment') in ids and e.get('comment') not in running)
+
+
 def sync_pool(pool, force=False, confirm=True):
     """Bring the pool's desktops in line with its net_* policy. Returns the pool's state."""
     pol = policy.effective(pool.get('settings'), pool.get('type'))
@@ -229,6 +254,9 @@ def sync_pool(pool, force=False, confirm=True):
         ids = {d['id'] for d in desks}
         _ensure_ipset(mgr, ipset, addrs, f"MOAVI Desk pool {pool['name']} (vlab-netiso)"[:100],
                       keep=lambda e: e.get('comment') in ids and e.get('comment') not in running)
+        pol = _known_peers(pool, pol)
+        for other in netiso.peer_pools(pol):
+            _ensure_peer_ipset(mgr, store.get_pool(other), vms)
         _ensure_group(mgr, group, netiso.group_rules(pool['id'], pol), f"MOAVI Desk pool {pool['name']} (vlab-netiso)")
     except Exception as e:
         st.update(problem=f'cluster firewall objects: {str(e)[:200]}', at=time.time(), fp=None)

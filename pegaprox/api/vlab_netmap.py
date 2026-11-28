@@ -42,10 +42,12 @@ FINDINGS = (
     'allow_in_wide', 'segment_pending', 'pool_problem',
     # info: as designed, worth knowing
     'egress_open', 'peers_open', 'segment_shared', 'segment_unused',
+    # pool to pool (마이크로 세그먼트)
+    'peer_out_missing', 'rule_pool_missing',
 )
 
 
-def _peer(v, pool_ipset):
+def _peer(v, pool_ipset, others=None):
     v = str(v or '')
     if v.startswith('+dc/'):
         v = '+' + v[4:]
@@ -53,6 +55,8 @@ def _peer(v, pool_ipset):
         return 'gateway', ''
     if v == f'+{pool_ipset}':
         return 'pool', ''
+    if others and v in others:
+        return 'other', others[v]
     return 'cidr', v
 
 
@@ -60,14 +64,19 @@ def rule_view(pool_id, pol):
     """The pool's firewall rules as the console draws them: [{dir, peer gateway|pool|cidr, cidr,
     proto, port, note}]. With net_egress 'any' everything goes out (one 'any' rule says so)."""
     ipset = netiso.ipset_name(pool_id)
+    others = {f'+{netiso.ipset_name(p)}': p for p in netiso.peer_pools(pol)}
     out = []
     for r in netiso.group_rules(pool_id, pol):
-        kind, cidr = _peer(r.get('source') if r['type'] == 'in' else r.get('dest'), ipset)
+        kind, cidr = _peer(r.get('source') if r['type'] == 'in' else r.get('dest'), ipset, others)
         note = (r.get('comment') or '').replace(netiso.TAG, '').lstrip(': ')
-        out.append({'dir': r['type'], 'peer': kind, 'cidr': cidr, 'proto': r.get('proto') or 'any',
-                    'port': r.get('dport') or '', 'note': note})
+        rule = {'dir': r['type'], 'peer': 'pool_other' if kind == 'other' else kind, 'cidr': '' if kind == 'other' else cidr,
+                'proto': r.get('proto') or 'any', 'port': r.get('dport') or '', 'note': note,
+                'action': 'drop' if r.get('action') == 'DROP' else 'accept'}
+        if kind == 'other':
+            rule['pool'] = cidr
+        out.append(rule)
     if pol.get('net_egress') != 'list':
-        out.append({'dir': 'out', 'peer': 'any', 'cidr': '', 'proto': 'any', 'port': '', 'note': ''})
+        out.append({'dir': 'out', 'peer': 'any', 'cidr': '', 'proto': 'any', 'port': '', 'note': '', 'action': 'accept'})
     return out
 
 
@@ -89,11 +98,16 @@ def _live_group(mgr, pool_id, pol, groups):
     return 'match' if [netiso.rule_key(r) for r in have] == [netiso.rule_key(r) for r in want] else 'differ'
 
 
-def _desktop(mgr, d, node, isolated, from_bridge, recorded_nic):
+def _desktop(mgr, d, node, isolated, from_bridge, recorded_nic, running=False):
     """{bridge, nic, nic_fw, vm_fw, policy_in, error} of one desktop, as Proxmox has it."""
-    out = {'bridge': '', 'nic': '', 'nic_fw': None, 'vm_fw': None, 'policy_in': '', 'error': ''}
+    out = {'bridge': '', 'nic': '', 'nic_fw': None, 'vm_fw': None, 'policy_in': '', 'error': '', 'ips': []}
     path = _vm_path(node, d.get('vm_type'), d['vmid'])
     try:
+        if running and d.get('vm_type', 'qemu') == 'qemu':
+            try:
+                out['ips'] = netiso.ipv4s(mgr._fetch_qemu_ips(node, int(d['vmid'])))
+            except Exception:
+                pass
         cfg = _data(mgr._api_get(_fw(mgr, f'{path}/config'), timeout=8))
         if not isinstance(cfg, dict):
             out['error'] = 'settings unreadable'
@@ -157,8 +171,10 @@ def cluster_map(cluster_id):
         info = {}
         if mgr and read:
             def one(d):
-                node = (vms.get(int(d['vmid'])) or {}).get('node') or d['node']
-                return d['id'], _desktop(mgr, d, node, iso, pol.get('net_segment_from') or '', (moved.get(d['id']) or {}).get('nic'))
+                vm = vms.get(int(d['vmid'])) or {}
+                node = vm.get('node') or d['node']
+                return d['id'], _desktop(mgr, d, node, iso, pol.get('net_segment_from') or '', (moved.get(d['id']) or {}).get('nic'),
+                                         vm.get('status') == 'running')
             with ThreadPoolExecutor(max_workers=min(8, len(read))) as ex:
                 info = dict(ex.map(one, read))
         applied = {r['desktop_id'] for r in netiso.applied_rows(pool_id=p['id'])}
@@ -181,6 +197,12 @@ def cluster_map(cluster_id):
                          'fw_off': len(fw_off), 'on_segment': len(on_seg),
                          'errors': len([i for i in info.values() if i['error']])},
             'problem': iso_st.get('problem') or seg_st.get('problem') or '',
+            'vms': [dict({k: (info.get(d['id']) or {}).get(k) for k in ('bridge', 'nic_fw', 'vm_fw', 'policy_in', 'ips', 'error')},
+                         id=d['id'], name=d['name'], vmid=d['vmid'],
+                         node=(vms.get(int(d['vmid'])) or {}).get('node') or d['node'],
+                         status=(vms.get(int(d['vmid'])) or {}).get('status') or 'unknown',
+                         isolated=d['id'] in applied, read=d['id'] in info) for d in desks],
+            '_pol': pol,
         })
         # --- findings of the pool
         if not iso:
@@ -210,6 +232,29 @@ def cluster_map(cluster_id):
             find('warning', 'segment_pending', p['id'], sid, f'{len(on_seg)}/{len(desks)}')
         if out_pools[-1]['problem']:
             find('warning', 'pool_problem', p['id'], detail=out_pools[-1]['problem'])
+    # --- pool to pool: a rule naming a pool that is gone; an inbound allow the other side cannot send
+    by_id = {x['id']: x for x in out_pools}
+    for x in out_pools:
+        pol = x.pop('_pol')
+        if not x['isolation']:
+            continue
+        for r in pol.get('net_allow_in') or []:
+            if not r.get('pool'):
+                continue
+            other = by_id.get(r['pool'])
+            if not other:
+                find('warning', 'rule_pool_missing', x['id'], detail=r['pool'])
+                continue
+            if r.get('action') == 'drop' or not other['isolation'] or other['egress'] != 'list':
+                continue
+            if not any(o['dir'] == 'out' and o['action'] == 'accept' and o.get('pool') == x['id'] for o in other['rules']):
+                find('warning', 'peer_out_missing', other['id'],
+                     detail=f"{x['name']} {r['proto']}{(' ' + r['port']) if r['port'] else ''}")
+        for r in pol.get('net_allow_out') or []:
+            if r.get('pool') and r['pool'] not in by_id:
+                find('warning', 'rule_pool_missing', x['id'], detail=r['pool'])
+    for x in out_pools:
+        x.pop('_pol', None)
     # --- the cluster and the segments
     if any(x['isolation'] for x in out_pools):
         if fw is None:
