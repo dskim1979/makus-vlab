@@ -1278,3 +1278,13 @@ def test_a_desktop_whose_rdp_answers_is_not_waited_for(env, monkeypatch):
             break
         threading.Event().wait(0.05)
     assert len(ran) == 1 and d['id'] in nxt._rdp_tuned and d['id'] not in nxt._rdp_tuning
+
+
+def test_the_connect_steps_side_by_side_keep_the_request(api):
+    """Arming the sign-in reads the portal session and the client address from the request: the
+    steps run side by side must still see it (without, no certificate was issued and nothing said so)."""
+    import pegaprox.api.vlab_next as nxt
+    from flask import request
+    with api.app.test_request_context('/api/vlab/desktops/d1/connect', environ_base={'REMOTE_ADDR': '10.8.0.2'}):
+        got = nxt._side_by_side({'a': lambda: request.path, 'b': lambda: request.remote_addr})
+    assert got == {'a': '/api/vlab/desktops/d1/connect', 'b': '10.8.0.2'}
