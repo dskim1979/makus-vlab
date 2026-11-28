@@ -606,3 +606,16 @@ def test_the_connect_waits_for_an_arm_on_its_way_and_uses_it(sso):
         ahead.join(5)
     assert sum(1 for d in g.execs() if d['command'][-1] == 'prepare') == 1
     assert len(logon_ca.issued(desktop_id=desk['id'])) == 1
+
+
+def test_expired_certificates_are_forgotten_after_a_month(sso):
+    import datetime as dt
+    desk = sso['desk']
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=40)).isoformat()
+    logon_ca.db().execute("INSERT INTO vlab_logon_issued (serial, username, upn, desktop_id, vmid, issued_at, not_after, state) "
+                          "VALUES ('old1', 'alice', 'alice@moavi.lan', ?, 300, ?, ?, 'used')", (desk['id'], old, old))
+    with sso['api'].app.test_request_context('/'):
+        assert vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')[0]
+    assert logon_ca.prune() == 1
+    assert [r['serial'] for r in logon_ca.issued(desktop_id=desk['id'])] != ['old1'] and len(logon_ca.issued(desktop_id=desk['id'])) == 1
+    assert vlab_logon.ARMS_AT_ONCE == 8
