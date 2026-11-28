@@ -2347,6 +2347,25 @@ def rdp_listening(ip, port=3389, timeout=1.5):
         return False
 
 
+def _side_by_side(steps):
+    """{name: result} of independent steps run at once (each on the caller's HA token). A step that
+    raises gives None, as the steps themselves never raise."""
+    from concurrent.futures import ThreadPoolExecutor
+    if len(steps) == 1:
+        (k, fn), = steps.items()
+        return {k: fn()}
+    with ThreadPoolExecutor(max_workers=len(steps)) as ex:
+        futs = {k: ex.submit(ha.carry(fn)) for k, fn in steps.items()}
+        out = {}
+        for k, f in futs.items():
+            try:
+                out[k] = f.result()
+            except Exception as e:
+                logging.info(f'[VLAB] connect step {k}: {str(e)[:200]}')
+                out[k] = None
+        return out
+
+
 def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     """The connect route's answer for rdp: an .rdp file (through 보안 게이트웨이 when its RDP switch is on).
     Returns (answer, None) or (None, error response). Windows: made ready on the way (rdp_tune);
@@ -2377,7 +2396,6 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     # a desktop joined to the bundled directory: the sign-in is the directory's (MOAVI\alice)
     username = directory.desktop_login(desk['id'], username)
     if protocol == 'rdp' and os_kind == 'windows':
-        rdp_device_policy(desk, mgr, node, pol)
         # 데스크톱 자동 로그인 (pool desktop_sso): the RDP session signs this user in with a certificate
         # of a few minutes, no password (pegaprox/api/vlab_logon.py). Through Warpgate as it is; on the
         # devices route (RD Gateway) the desktop takes RDP without NLA and the .rdp asks for nothing
@@ -2385,11 +2403,16 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
         from pegaprox.vlab import rdpgw
         from pegaprox.api.vlab_logon import arm_for_connect, rdp_nla_off, sso_on
         devices = pol['rdp_route'] == 'devices' and rdpgw.is_enabled()
+        # the guest agent steps run side by side: each is a few guest round trips (seconds on a busy
+        # desktop), one after the other they added up before the client got its .rdp
+        steps = {'devices': lambda: rdp_device_policy(desk, mgr, node, pol)}
         if devices and sso_on(pool):
-            sso_rdp = rdp_nla_off(desk, mgr, node)
-            arm_for_connect(desk, mgr, node, portal_user, pool)
+            steps['nla'] = lambda: rdp_nla_off(desk, mgr, node)
+            steps['arm'] = lambda: arm_for_connect(desk, mgr, node, portal_user, pool)
         elif warpgate_serves_rdp(protocol) and not devices:
-            arm_for_connect(desk, mgr, node, portal_user, pool)
+            steps['arm'] = lambda: arm_for_connect(desk, mgr, node, portal_user, pool)
+        done = _side_by_side(steps)
+        sso_rdp = bool(done.get('nla'))
     if protocol == 'rdp' and pol['rdp_route'] == 'devices':
         # the pool's devices route: the .rdp through the bundled RD Gateway (rdpgw) with a token for
         # this desktop only; drives, printers and USB as the policy says (pegaprox/api/vlab_warpgate.py)
