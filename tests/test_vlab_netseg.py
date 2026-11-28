@@ -305,3 +305,18 @@ def test_the_zone_can_be_deleted_once_empty(seg):
     r = admin.delete(f'/api/vlab/admin/clusters/{CID}/netseg/zone')
     assert r.status_code == 200 and r.get_json()['removed_from_sdn'] is True
     assert 'moavi' not in sdn.zones and netseg.zone(CID) is None
+
+
+def test_a_guest_keeping_its_old_address_is_reported(seg):
+    from pegaprox.api import vlab_netseg
+    admin, sdn, pool, res = seg
+    s = _make_segment(admin)
+    admin.post(f"/api/vlab/admin/clusters/{CID}/netseg/sdn")
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={"net_segment": s["id"]})
+    admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply", json={"restart": True})
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply").get_json()     # 401 still on 192.168.0.30
+    d = next(x for x in st["desktops"] if x["vmid"] == 401)
+    assert d["state"] == "on" and d["old_ips"] == ["192.168.0.30"] and "fixed address" in st["problem"]
+    sdn.vms[401]["ips"] = ["10.20.1.40"]
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply").get_json()
+    assert st["problem"] == "" and all(not x["old_ips"] for x in st["desktops"])

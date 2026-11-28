@@ -249,6 +249,18 @@ def _restore(mgr, row, node, running, restart):
     return 'restored'
 
 
+def _old_address(mgr, node, desk, seg):
+    """The guest's IPv4 addresses when none is in the segment's subnet (a fixed address in the
+    guest, or a lease not renewed yet); [] when it has one of the subnet or reports nothing."""
+    from pegaprox.vlab import netiso
+    try:
+        ips = netiso.ipv4s(mgr._fetch_qemu_ips(node, int(desk['vmid'])) or [])
+    except Exception:
+        return []
+    net = ipaddress.ip_network(seg['subnet'])
+    return [] if not ips or any(ipaddress.ip_address(ip) in net for ip in ips) else ips
+
+
 def _fingerprint(seg, desks, vms, rows):
     return repr((seg and (seg['id'], seg['vnet']), sorted((d['id'], d.get('vmid'), (vms.get(int(d['vmid'])) or {}).get('status'))
                                                           for d in desks),
@@ -306,6 +318,12 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
             elif seg:
                 if kv.get('bridge') == seg['vnet']:
                     info['state'] = 'on'          # (put there by hand: no record, so nothing to put back later)
+                    if running:                   # on the VNet - but does the guest use an address of it?
+                        old_ips = _old_address(mgr, node, d, seg)
+                        if old_ips:
+                            info['old_ips'] = old_ips
+                            problem = problem or (f"{d['name']} is on the segment but still uses {', '.join(old_ips)} - its network "
+                                                  f"card has a fixed address; set it to DHCP (or an address of {seg['subnet']})")
                 elif not live or (node_ok and node_ok.get(node) != 'available'):
                     info['state'] = 'waiting_sdn'      # the VNet's bridge is not on that node: the VM would not start
                 elif running and not restart:
@@ -728,7 +746,7 @@ def _answer(pool, st):
         desks.append({'id': d['id'], 'name': d['name'], 'vmid': d.get('vmid'),
                       'state': info.get('state') or ('on' if row and seg and row['segment_id'] == seg['id'] else 'off'),
                       'bridge': info.get('bridge') or (row['vnet'] if row else ''),
-                      'orig_bridge': row['orig_bridge'] if row else '', 'running': bool(info.get('running')),
+                      'orig_bridge': row['orig_bridge'] if row else '', 'running': bool(info.get('running')), 'old_ips': info.get('old_ips') or [],
                       'error': info.get('error') or ''})
     return {'segment': seg, 'problem': (st or {}).get('problem') or '', 'checked_at': (st or {}).get('at') or None,
             'desktops': desks}
