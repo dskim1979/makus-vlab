@@ -17,18 +17,18 @@
 
 **MOAVI Desk** 은 Proxmox VE 위에서 동작하는 VDI 플랫폼입니다. 연구원·개발자·교육생·직원에게 데스크톱을 나눠 주고,
 GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 저장소는 vLAB 의 **엔진(API 서버)** 입니다.
-관리 콘솔과 사용자 작업 공간은 [makus-vlab-console](https://github.com/dskim1979/makus-vlab-console), Windows 클라이언트는 [moavi-desk](https://github.com/dskim1979/moavi-desk) 입니다.
+관리 콘솔과 사용자 작업 공간은 [makus-vlab-console](https://github.com/dskim1979/makus-vlab-console), Windows 클라이언트는 [moavi-desk](https://github.com/dskim1979/moavi-desk) ([v1.1.2](https://github.com/dskim1979/moavi-desk/releases/latest): RDP 를 자체 창으로, 장치 선택 · **장치** 메뉴) 입니다.
 
 <p align="center"><img src="docs/images/portal.png" alt="사용자 작업 공간" width="900"></p>
 
 | 관리 콘솔 대시보드 | GPU·가속 카드 재고 |
 |---|---|
 | ![대시보드](docs/images/admin-dashboard.png) | ![GPU·가속 카드](docs/images/accel-inventory.png) |
-| **풀 이용 권한** (사용자 · 부서 · AD 그룹) | **접속 메뉴** (SPICE · RDP · 브라우저 RDP) |
+| **풀 이용 권한** (사용자 · 부서 · AD 그룹) | **접속 ▾** (RDP · 콘솔 · SPICE, 고른 방식이 기본) |
 | ![풀 이용 권한](docs/images/pool-grants.png) | ![접속 메뉴](docs/images/portal-rdp.png) |
-| **골든 이미지 일괄 교체** | **빌드 작업 큐** |
+| **골든 이미지 새 버전 적용** | **빌드 작업 큐** |
 | ![골든 롤아웃](docs/images/golden-rollout.png) | ![빌드 작업 큐](docs/images/build-jobs.png) |
-| **VM 관리 창** | **서포트 번들 (기간 지정)** |
+| **VM 상세** | **서포트 번들 (기간 지정)** |
 | ![VM 관리](docs/images/vm-manage.png) | ![서포트 번들](docs/images/support-bundle.png) |
 | **LAB 예약** | **단말 관리 (MOAVI Desk Agent)** |
 | ![LAB 예약](docs/images/reservations.png) | ![단말 관리](docs/images/terminals.png) |
@@ -36,6 +36,8 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | ![첫 설정](docs/images/setup-profile.png) | ![GPU 작업 큐](docs/images/gpu-queue.png) |
 | **환경 카탈로그** | **연구 데이터셋** |
 | ![환경 카탈로그](docs/images/env-catalog.png) | ![데이터셋](docs/images/datasets.png) |
+| **네트워크 구성도** (세그먼트 · 풀 · 열린 포트 · 점검) | **증설 예측** |
+| ![네트워크 구성도](docs/images/net-map.png) | ![증설 예측](docs/images/forecast.png) |
 
 화면 전체는 [콘솔 저장소](https://github.com/dskim1979/makus-vlab-console#화면)에 있습니다.
 사이트 종류별 안내: [일반 업무 VDI](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/general.md) · [대학교 실습실](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/university.md) · [연구소 · 기업 R&D](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/research.md) · [FPGA · AI 연구실](https://github.com/dskim1979/makus-vlab-console/blob/main/docs/sites/fpgaai.md).
@@ -55,16 +57,19 @@ GPU·vGPU·FPGA 가속 카드를 필요한 만큼 빌려 쓰게 합니다. 이 �
 | 추가 묶음 | `fpga` FPGA 개발, `gpuai` GPU · AI 연구 |
 
 아직 고르지 않았으면 모든 기능이 켜져 있습니다. 무인 설치는 환경 변수 `VLAB_PROFILE=university`, `VLAB_FEATURES=gpuai,fpga`로
-처음 값을 정합니다(한 번만 적용, 이후는 콘솔 **운영 > 플랫폼 설정 > 기능**).
+처음 값을 정합니다(한 번만 적용, 이후는 콘솔 **설정 > 플랫폼 설정 > 기능**).
 
 | 영역 | 내용 |
 |---|---|
 | 데스크톱 풀 | 전용·초기화·공유·일정형·빌드 팜 풀, 템플릿 일괄 복제(VMID·이름 자동), 풀 편집, 사용자 할당과 VM 권한 연동 |
 | VM 관리 | VM 만들기(ISO · Windows 11은 UEFI/TPM 자동), ISO 업로드 · URL로 받기, 설정 · 디스크 · 네트워크 변경, 스냅샷, 노드 이동, 템플릿 변환, 삭제, 관리자 화면 열기(감사 기록) — 모두 VM별 권한(ACL) 검사 |
 | 풀 권한 | 사용자 · 부서(하위 포함) · AD/LDAP 그룹 단위 이용 권한, 권한이 있으면 포털에서 직접 받기(전용 · 초기화 · 빌드 팜) |
-| 초기화 · 골든 이미지 | 기준 스냅숏 자동 생성, 데스크톱·풀 단위 초기화(접속 중인 데스크톱은 건너뜀), 골든 이미지 버전 · 배포, 새 버전으로 일괄 교체(할당 · 권한 이전) |
+| 초기화 · 이미지 | 기준 스냅숏 자동 생성, 데스크톱·풀 단위 초기화(접속 중인 데스크톱은 건너뜀), 골든 이미지 버전 · 배포, 새 버전으로 일괄 교체(할당 · 권한 이전), **템플릿 만들기**(일반 업무 · 연구원 · GPU · NPU · FPGA 무인 설치, Windows 6시간 · Linux 4시간 제한, 설치 화면 보기, `desktpl.py`) |
 | 접속 | RDP 우선(새 풀 기본: RDP · SPICE · 브라우저, `.rdp`는 H.264 · UDP를 mstsc가 고름, Windows는 첫 RDP 접속 때 원격 데스크톱 · 방화벽 · AVC444 · UDP를 게스트 에이전트로 설정, Linux는 xrdp가 3389에 있을 때만 — 없으면 NO_RDP로 SPICE · VNC), 브라우저(noVNC), SPICE(`.vv`), RDP 파일(`.rdp`, 게스트 에이전트로 주소 조회), 브라우저 RDP(Guacamole · guacamole-auth-json 서명 링크), 공유 풀 접속 라우팅(가장 덜 붐비는 데스크톱 · 최대 접속), 접속 기록, 사용자 전원 제어 |
-| 게이트웨이 · 외부 데스크톱 | RDP 게이트웨이 · MS RD 게이트웨이 · Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 실제 PC를 사용자에게 배정 |
+| 보안 게이트웨이 | 풀마다 두 경로 중 하나: **녹화 방식**(번들 Warpgate — 브라우저 RDP · SSH, RDP 파일, 세션 녹화, 1회용 티켓)과 **장치 연결 방식**(번들 RD 게이트웨이 rdpgw, 콘솔 443 `/remoteDesktopGateway/` — 내 PC 드라이브 · 프린터 · USB, 5분 1회용 토큰, 녹화 없음). 비밀번호는 저장 · 전달하지 않음(`pegaprox/vlab/warpgate.py`, `rdpgw.py`) |
+| 외부 데스크톱 | Guacamole 등록과 포트 확인(내장 Guacamole 자동 등록), 가상화하지 않는 실제 PC를 사용자에게 배정 |
+| 네트워크 | **격리**: 풀마다 Proxmox 방화벽, MOAVI 게이트웨이만 들어옴, 같은 풀 통신 · 추가 포트 · 나가는 통신(`netiso.py`). **분리**: Proxmox SDN VLAN · VXLAN 세그먼트와 IPAM, 노드 점검, 브리지로 NIC 고르기(`netseg.py`). **구성도**: 세그먼트 · 풀 · 데스크톱 · 열린 포트 · 점검 결과(심각한 것부터), 풀 간 통신 표, 풀별 규칙(다른 풀 지정 · 차단 — 마이크로 세그먼트, `api/vlab_netmap.py`) |
+| Windows 자동 로그인 | Moavi Logon: 포털 로그인 → RDP → 바로 바탕 화면(두 번째 비밀번호 없음). 모듈은 데스크톱에 스스로 설치, 도메인 조인 때 LSA 보호를 끄고 재시작(`logon_ca.py`, `logon_agent/`) |
 | GPU·vGPU | GPU 재고, NVIDIA vGPU 프로필, PCI 리소스 매핑, 풀 단위 GPU 정책(전체 GPU / vGPU), 머신 종류에 맞춘 슬롯(q35가 아니면 pcie=1 빼기), 카드 · 패스스루 점검(i440fx · SeaBIOS BAR · 벌루닝 · 자동 시작 · HA · AMD GPU 리셋 · vGPU 라이선스 · 같은 매핑 두 번), 카드가 있으면 메모리 포함 스냅샷 거부 |
 | FPGA | AMD Xilinx·Intel FPGA 카드 인식, 카드 대여·연장·반납·자동 반납, 보드 LAB(JTAG USB 연결, 또는 네트워크 JTAG — Xilinx hw_server · XVC · Intel Quartus jtagd를 host:port로 공유해 VM 설정 변경 없이 대여, RDP · Warpgate · SPICE 어느 화면 프로토콜에서나 사용([docs/board-lab-network-jtag.md](docs/board-lab-network-jtag.md)) · 대여 기간 · 자동 분리, Platform Cable USB II 펌웨어 전 ID 경고), Alveo 점검(PF0/PF1 기능 하나만 넘김 · 리셋 때 xclbin 지워짐), 빌드 작업 큐(빈 빌드 VM에서 차례로 실행), 카드별 사용 보고서(CSV) |
 | 빌드 결과물 · CI | 작업이 끝나면 비트스트림 · 리포트 · 로그를 NAS `artifacts/<사용자>/<작업>`에 보관 · 내려받기(반출 규칙 적용), GitLab CI · Jenkins 연결(토큰 · `POST /api/vlab/ci/jobs` · 상태 · 결과물) |
