@@ -294,7 +294,9 @@ def test_install_pushes_checked_files_and_the_ca(sso):
     assert names == {'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-csp.dll', 'install.ps1', 'moavi-logon-ca.cer'}
     ca = b''.join(v for k, v in sorted(g.files.items()) if 'moavi-logon-ca.cer' in k)
     assert x509.load_der_x509_certificate(ca).subject == sso['ca'].subject
-    manifest = g.execs()[-1]['input-data']
+    manifest = next(d['input-data'] for d in reversed(g.execs()) if d.get('input-data'))
+    dirs = {f.rsplit('\\', 1)[0] for f in g.files}
+    assert len(dirs) == 1 and next(iter(dirs)).startswith(vlab_logon.SETUP_DIR + '-')   # a folder of its own
     import hashlib
     exe = b''.join(v for k, v in sorted(g.files.items()) if 'moavi-logon.exe.part' in k)
     assert f"moavi-logon.exe|{-(-len(exe) // vlab_logon.PIECE)}|{hashlib.sha256(exe).hexdigest()}" in manifest

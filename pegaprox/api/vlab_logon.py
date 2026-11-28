@@ -308,7 +308,13 @@ def install(desk, mgr, node):
     from pegaprox.api.vlab_next import _agent_run, agent_exec_disabled
     vmid = int(desk['vmid'])
     files = install_payload()
-    mk = ("$d='" + SETUP_DIR + "'; if (Test-Path $d) { Remove-Item -Recurse -Force $d }; "
+    # a folder of its own each time: a part the guest agent still holds open from an earlier try that
+    # timed out (a busy guest right after an update restart) can be neither removed nor written again,
+    # and failed every install after it. Earlier folders go when they can.
+    setup = f"{SETUP_DIR}-{os.urandom(4).hex()}"
+    mk = ("Get-ChildItem 'C:\\Windows\\Temp' -Directory -Filter 'moavi-logon-setup*' -ErrorAction SilentlyContinue | "
+          "ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }; "
+          "$d='" + setup + "'; "
           "New-Item -ItemType Directory -Force $d | Out-Null; "
           "icacls $d /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null; 'dir=ok'")
     rc, out, err, e = _agent_run(mgr, node, vmid, ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
@@ -319,10 +325,10 @@ def install(desk, mgr, node):
         return False, e or (err or out or f'exit {rc}')[:300]
     manifest = []
     for name, data in files.items():
-        parts = _write_file(mgr, node, vmid, SETUP_DIR + '\\' + name, data)
+        parts = _write_file(mgr, node, vmid, setup + '\\' + name, data)
         manifest.append(f"{name}|{parts}|{hashlib.sha256(data).hexdigest()}")
     run = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-           "$d='" + SETUP_DIR + "'; "
+           "$d='" + setup + "'; "
            "Get-ChildItem $d -Filter '*.part*' | Group-Object { $_.Name -replace '\\.part\\d{3}$','' } | ForEach-Object { "
            "$o=[IO.File]::Create((Join-Path $d $_.Name)); "
            "foreach ($p in ($_.Group | Sort-Object Name)) { $b=[IO.File]::ReadAllBytes($p.FullName); $o.Write($b,0,$b.Length); "
@@ -330,6 +336,11 @@ def install(desk, mgr, node):
            "& (Join-Path $d 'install.ps1') -Setup $d"]
     rc, out, err, e = _agent_run(mgr, node, vmid, run, stdin='\n'.join(manifest) + '\n', wait=90)
     got = _kv(out)
+    try:      # the setup folder is not needed once the installer ran (best effort; the next install clears it too)
+        _agent_run(mgr, node, vmid, ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                                     f"Remove-Item -Recurse -Force '{setup}' -ErrorAction SilentlyContinue"], wait=10)
+    except Exception:
+        pass
     if rc == 0 and got.get('install') == 'ok':
         return True, got
     return False, e or got.get('error') or (err or out or f'exit {rc}').strip()[-400:]
