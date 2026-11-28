@@ -294,7 +294,9 @@ def test_install_pushes_checked_files_and_the_ca(sso):
     assert names == {'moavi-logon.exe', 'moavi-logon-cp.dll', 'moavi-logon-csp.dll', 'install.ps1', 'moavi-logon-ca.cer'}
     ca = b''.join(v for k, v in sorted(g.files.items()) if 'moavi-logon-ca.cer' in k)
     assert x509.load_der_x509_certificate(ca).subject == sso['ca'].subject
-    manifest = g.execs()[-1]['input-data']
+    manifest = next(d['input-data'] for d in reversed(g.execs()) if d.get('input-data'))
+    dirs = {f.rsplit('\\', 1)[0] for f in g.files}
+    assert len(dirs) == 1 and next(iter(dirs)).startswith(vlab_logon.SETUP_DIR + '-')   # a folder of its own
     import hashlib
     exe = b''.join(v for k, v in sorted(g.files.items()) if 'moavi-logon.exe.part' in k)
     assert f"moavi-logon.exe|{-(-len(exe) // vlab_logon.PIECE)}|{hashlib.sha256(exe).hexdigest()}" in manifest
@@ -537,3 +539,16 @@ def test_nla_goes_off_once_for_the_devices_route(sso):
     assert "@('192.168.0.55','192.168.0.56')" in scopes()[-1]
     acts = [r[0] for r in sso['seed'].db.conn.execute("SELECT details FROM audit_log WHERE action = 'vlab.logon.nla' ORDER BY id")]
     assert len(acts) == 3 and 'NLA stays on' in acts[0] and 'only from 192.168.0.55' in acts[1]
+
+
+def test_one_install_at_a_time_per_desktop(sso):
+    """The automatic round and a 다시 설치 click at once: the second one waits its turn, it does not
+    empty the setup folder under the first one."""
+    desk = sso['desk']
+    vlab_logon._installing.add(desk['id'])
+    try:
+        ok, got = vlab_logon.install_and_record(desk, sso['mgr'], 'pve1')
+        assert not ok and str(got).startswith('INSTALL_RUNNING') and sso['g'].execs() == []
+    finally:
+        vlab_logon._installing.discard(desk['id'])
+    assert vlab_logon.install_and_record(desk, sso['mgr'], 'pve1')[0]
