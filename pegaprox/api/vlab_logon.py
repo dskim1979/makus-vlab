@@ -68,9 +68,24 @@ def _portal_session():
 
 # --- arming one RDP sign-in ------------------------------------------------------------------
 
+_arm_locks = {}                    # desktop id -> lock: one arm at a time per desktop
+_arm_locks_guard = threading.Lock()
+
+
+def _arm_lock(desktop_id):
+    with _arm_locks_guard:
+        return _arm_locks.setdefault(desktop_id, threading.Lock())
+
+
 def arm(desk, mgr, node, username, portal_session='', client_ip=''):
     """prepare -> sign -> arm for this user's next RDP session on this Windows desktop.
-    (True, '', info) or (False, code, detail). Never raises."""
+    (True, '', info) or (False, code, detail). Never raises. One at a time per desktop: two at once
+    (the client arming ahead and the connect right behind it) overwrote each other in the VM."""
+    with _arm_lock(desk['id']):
+        return _arm(desk, mgr, node, username, portal_session, client_ip)
+
+
+def _arm(desk, mgr, node, username, portal_session='', client_ip=''):
     from pegaprox.api.vlab_next import _agent_run, agent_exec_disabled
     ok, code = logon_ca.eligible(username, desk['id'])
     if not ok:
@@ -226,12 +241,14 @@ def arm_for_connect(desk, mgr, node, username, pool):
     pool has desktop_sso on. Failures are logged, never shown - the sign-in screen is the fallback."""
     if not sso_on(pool):
         return None
-    if _still_armed(desk, mgr, node, username):
-        return True                 # armed a moment ago (the client asks when the desktop is picked)
-    try:
-        ok, code, info = arm(desk, mgr, node, username, _portal_session(), get_client_ip())
-    except Exception as e:      # never in the way of the connect
-        ok, code, info = False, 'ERROR', str(e)[:200]
+    # an arm already on its way for this desktop (the client's, ahead) finishes first, then is used
+    with _arm_lock(desk['id']):
+        if _still_armed(desk, mgr, node, username):
+            return True             # armed a moment ago (the client asks when the desktop is picked)
+        try:
+            ok, code, info = _arm(desk, mgr, node, username, _portal_session(), get_client_ip())
+        except Exception as e:      # never in the way of the connect
+            ok, code, info = False, 'ERROR', str(e)[:200]
     if not ok:
         logging.info(f"[VLAB] desktop sign-in on {desk.get('name')} for {username} not armed: {code} {str(info)[:200]}")
         if code not in ('NOT_DIRECTORY_ACCOUNT', 'NOT_JOINED', 'ADMIN_REFUSED', 'NO_DIRECTORY'):
@@ -425,6 +442,7 @@ def my_desktop_logon(desktop_id):
         return err
     ok, code, info = arm(desk, mgr, node, username, _portal_session(), get_client_ip())
     if not ok:
+        logging.warning(f"[VLAB] desktop sign-in on {desk.get('name')} for {username} not armed ahead: {code} {str(info)[:200]}")
         return jsonify({'error': '자동 로그인을 준비하지 못했습니다. 로그온 화면에서 로그인하세요.', 'code': code}), 409
     return jsonify({'armed': True, **info})
 
