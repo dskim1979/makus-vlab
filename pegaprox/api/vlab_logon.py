@@ -429,12 +429,7 @@ def install_and_record(desk, mgr, node, who='system', ip=''):
     except Exception as e:
         ok, got = False, str(e)[:300]
     if ok and got.get('lsa_ppl') == 'on':
-        # LSA protection (RunAsPPL): LSASS loads no unsigned CSP - the CP stays quiet, the desktop keeps its sign-in screen
-        logon_ca.record_install(desk['id'], desk['vmid'], got.get('version') or MODULE_VERSION, 'unsupported', 'LSA_PPL',
-                                'LSA protection (RunAsPPL) is on: the logon module needs a signed CSP')
-        log_audit(who, 'vlab.logon.install', f"desktop sign-in on '{desk['name']}' (qemu/{desk['vmid']}): not supported, "
-                  "LSA protection is on", ip)
-        return True, got
+        return _lsa_off_and_restart(desk, mgr, node, prev, got, who, ip)
     if ok:
         logon_ca.record_install(desk['id'], desk['vmid'], got.get('version') or MODULE_VERSION, 'installed', 'OK',
                                 f"cp={got.get('cp', '')} csp={got.get('csp', '')}")
@@ -451,10 +446,59 @@ def install_and_record(desk, mgr, node, who='system', ip=''):
     return False, got
 
 
+LSA_RESTART_WAIT = 180      # seconds a desktop gets to restart before the module is installed again
+LSA_BUSY_WAIT = 300         # someone is on it: looked at again in 5 minutes
+
+
+def _lsa_off_and_restart(desk, mgr, node, prev, got, who, ip):
+    """LSA protection (RunAsPPL) is on: LSASS loads no unsigned CSP, so the module is installed but
+    quiet. Turn it off and restart the desktop - only when nobody is signed in on it; else again in
+    5 minutes. Still on after that restart: set with a UEFI lock, which only the desktop's own
+    administrator can clear (unsupported, LSA_PPL_LOCKED; its normal sign-in screen stays)."""
+    from pegaprox.api.vlab_next import _agent_run
+    from pegaprox.vlab.directory import LSA_OFF_PS
+    version = got.get('version') or MODULE_VERSION
+    if prev.get('code') == 'LSA_PPL_RESTART':
+        logon_ca.record_install(desk['id'], desk['vmid'], version, 'unsupported', 'LSA_PPL_LOCKED',
+                                'LSA protection is still on after it was turned off and the desktop restarted '
+                                '(UEFI lock): turn it off on the desktop itself')
+        log_audit(who, 'vlab.logon.install', f"desktop sign-in on '{desk['name']}' (qemu/{desk['vmid']}): LSA protection "
+                  "stays on after a restart (UEFI lock)", ip)
+        return True, got
+    try:
+        rc, out, err, e = _agent_run(mgr, node, int(desk['vmid']), ['powershell.exe', '-NoProfile', '-NonInteractive',
+                                     '-ExecutionPolicy', 'Bypass', '-Command', LSA_OFF_PS], wait=20)
+    except Exception as ex:
+        rc, out, err, e = None, '', '', str(ex)[:200]
+    if rc != 0 or 'lsa_ppl_off=1' not in (out or ''):
+        logon_ca.record_install(desk['id'], desk['vmid'], version, 'failed', 'LSA_PPL',
+                                f"LSA protection could not be turned off: {(e or err or out or '')[:200]}", 1,
+                                time.time() + LSA_BUSY_WAIT)
+        return False, got
+    if any(s.get('desktop_id') == desk['id'] for s in store.open_sessions()):
+        logon_ca.record_install(desk['id'], desk['vmid'], version, 'pending', 'LSA_PPL_WAIT',
+                                'LSA protection turned off; the desktop restarts once nobody is signed in', 0,
+                                time.time() + LSA_BUSY_WAIT)
+        return True, got
+    try:
+        rc, out, err, e = _agent_run(mgr, node, int(desk['vmid']), ['shutdown.exe', '/r', '/t', '15', '/c',
+                                     'MOAVI Desk: desktop sign-in (LSA protection off)'], wait=10)
+    except Exception as ex:
+        rc, e = None, str(ex)[:200]
+    logon_ca.record_install(desk['id'], desk['vmid'], version, 'pending', 'LSA_PPL_RESTART',
+                            'LSA protection turned off; restarting the desktop' + ('' if rc == 0 else f' (restart: {e or rc})'),
+                            0, time.time() + LSA_RESTART_WAIT)
+    log_audit(who, 'vlab.logon.install', f"desktop sign-in on '{desk['name']}' (qemu/{desk['vmid']}): LSA protection off, "
+              "restarting", ip)
+    return True, got
+
+
 def _install_due(desk):
     r = logon_ca.install_of(desk['id'])
     if not r or int(r['vmid']) != int(desk['vmid']):
         return True                                    # new, or a recreated VM
+    if r['state'] == 'unsupported' and r['code'] == 'LSA_PPL':
+        return True                                    # from before LSA protection was turned off by the engine
     if r['state'] in ('installed', 'unsupported'):
         return r['version'] != MODULE_VERSION          # the engine carries a newer module
     if r['state'] == 'skipped':

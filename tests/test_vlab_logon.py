@@ -60,6 +60,7 @@ class Guest:
         self.os_id = 'mswindows'
         self.prev = ''
         self.ppl = 'off'
+        self.ppl_off_set, self.locked, self.restarts = False, False, 0
         self.runs, self.armed, self._pids, self.files = [], None, {}, {}
         mgr._api_get.side_effect = self.get
         mgr._api_post.side_effect = self.post
@@ -98,8 +99,16 @@ class Guest:
             return {'exitcode': 0, 'out-data': 'armed=ok\nthumb=00\n'}
         if cmd[-1] in ('clear', 'status'):
             return {'exitcode': 0, 'out-data': 'version=1.0.0\ncp=registered\nlsa_ppl=off\nstate=none\n'}
+        if cmd[0] == 'shutdown.exe':
+            self.restarts += 1
+            if not self.locked:
+                self.ppl = 'off' if self.ppl_off_set else self.ppl
+            return {'exitcode': 0, 'out-data': ''}
         if cmd[0] == 'powershell.exe':
             script = cmd[-1]
+            if 'RunAsPPL' in script:
+                self.ppl_off_set = True
+                return {'exitcode': 0, 'out-data': 'lsa_ppl_off=1\n'}
             if 'install.ps1' in script:
                 return {'exitcode': 0, 'out-data': f'version={vlab_logon.MODULE_VERSION}\ncp=registered\nlsa_ppl={self.ppl}\nca=AB\ninstall=ok\n'}
             return {'exitcode': 0, 'out-data': 'dir=ok\n'}
@@ -443,17 +452,52 @@ def test_the_next_prepare_reports_what_became_of_the_last_certificate(sso):
     assert {r['serial']: r for r in logon_ca.issued(desktop_id=desk['id'])}[first['serial']]['state'] == 'used'   # final once reported
 
 
-def test_lsa_protection_makes_the_desktop_unsupported(sso):
+def _due_now(desk):
+    r = logon_ca.install_of(desk['id'])
+    logon_ca.record_install(desk['id'], desk['vmid'], r['version'], r['state'], r['code'], r['detail'], r['attempts'], 0)
+
+
+def test_lsa_protection_is_turned_off_and_the_desktop_restarted(sso, monkeypatch):
     _sso_on(sso)
-    sso['g'].ppl = 'on'
+    g, desk = sso['g'], sso['desk']
+    g.ppl = 'on'
+    monkeypatch.setattr(store, 'open_sessions', lambda: [{'desktop_id': desk['id']}])     # alice is on it
     with sso['api'].app.app_context():
         vlab_logon.install_round()
-    r = logon_ca.install_of(sso['desk']['id'])
-    assert r['state'] == 'unsupported' and r['code'] == 'LSA_PPL'
-    ok, code, _ = vlab_logon.arm(sso['desk'], sso['mgr'], 'pve1', 'alice')
-    assert not ok and code == 'LSA_PPL' and logon_ca.issued() == []                 # no certificate for it
+    r = logon_ca.install_of(desk['id'])
+    assert r['state'] == 'pending' and r['code'] == 'LSA_PPL_WAIT' and g.ppl_off_set and g.restarts == 0
+    monkeypatch.setattr(store, 'open_sessions', lambda: [])
+    _due_now(desk)
+    with sso['api'].app.app_context():
+        vlab_logon.install_round()
+    r = logon_ca.install_of(desk['id'])
+    assert r['state'] == 'pending' and r['code'] == 'LSA_PPL_RESTART' and g.restarts == 1
+    _due_now(desk)
+    with sso['api'].app.app_context():
+        vlab_logon.install_round()
+    assert logon_ca.install_of(desk['id'])['state'] == 'installed'                 # back up without LSA protection
+
+
+def test_lsa_protection_under_a_uefi_lock_stays_unsupported(sso, monkeypatch):
+    _sso_on(sso)
+    g, desk = sso['g'], sso['desk']
+    g.ppl, g.locked = 'on', True
+    monkeypatch.setattr(store, 'open_sessions', lambda: [])
+    with sso['api'].app.app_context():
+        vlab_logon.install_round()
+        _due_now(desk)
+        vlab_logon.install_round()
+    r = logon_ca.install_of(desk['id'])
+    assert r['state'] == 'unsupported' and r['code'] == 'LSA_PPL_LOCKED' and g.restarts == 1
+    ok, code, _ = vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')
+    assert not ok and logon_ca.issued() == []                                       # no certificate for it
     with sso['api'].app.app_context():
         assert vlab_logon.install_round()['installed'] == 0                         # not tried again for this version
+
+
+def test_the_join_turns_lsa_protection_off_for_desktop_sign_in():
+    assert 'RunAsPPL' in directory.windows_join_script('MD-300', True, lsa_off=True)
+    assert 'RunAsPPL' not in directory.windows_join_script('MD-300', True)
 
 
 def test_the_devices_route_rdp_asks_for_nothing_with_desktop_sign_in():

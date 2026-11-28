@@ -215,8 +215,10 @@ def join_desktop(desk, restart=False, check_only=False):
             secret = directory.join_password()
         except directory.DirectoryError as e:
             return directory.record_join(desk['id'], 'failed', e.code, e.detail, os_kind=os_kind)
-        script = (directory.windows_join_script(name, restart, directory.taken_sids(desk['id'])) if os_kind == 'windows'
-                  else directory.linux_join_script(name))
+        from pegaprox.api.vlab_logon import sso_on
+        script = (directory.windows_join_script(name, restart, directory.taken_sids(desk['id']),
+                                                lsa_off=sso_on(store.get_pool(desk['pool_id'])))
+                  if os_kind == 'windows' else directory.linux_join_script(name))
     if os_kind == 'windows':
         command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]
     else:

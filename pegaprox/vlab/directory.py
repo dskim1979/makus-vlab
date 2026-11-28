@@ -1118,10 +1118,18 @@ _WIN_SID = ("$sid = ''; try { $sid = (Get-LocalUser | Select-Object -First 1).SI
 _WIN_UTF8 = '[Console]::OutputEncoding = [Text.Encoding]::UTF8'
 
 
-def windows_join_script(name, restart=False, taken_sids=()):
+LSA_OFF_PS = ("$k = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa'; "
+             "Set-ItemProperty -Path $k -Name RunAsPPL -Value 0 -Type DWord; "
+             "Set-ItemProperty -Path $k -Name RunAsPPLBoot -Value 0 -Type DWord; 'lsa_ppl_off=1'")
+
+
+def windows_join_script(name, restart=False, taken_sids=(), lsa_off=False):
     """PowerShell for the guest agent (as SYSTEM). The join account's password comes on stdin.
     taken_sids: the machine SIDs other desktops reported - a clone with one of them was not
-    generalized (sysprep) and is not joined (exit 26, NOT_SYSPREPPED)."""
+    generalized (sysprep) and is not joined (exit 26, NOT_SYSPREPPED).
+    lsa_off: the pool uses desktop sign-in (Moavi Logon), whose module LSASS does not load under LSA
+    protection (RunAsPPL, on by default since Windows 11 22H2) - turned off here, so the join's own
+    restart applies both."""
     c, s = config(), settings()
     dns = desktop_dns() if s['set_dns'] else []
     dns_ps = '@(' + ','.join(_ps_str(x) for x in dns) + ')'
@@ -1154,6 +1162,7 @@ def windows_join_script(name, restart=False, taken_sids=()):
         "try { Add-Computer @p -ErrorAction Stop }",
         "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 23 }",
         "\"domain=$domain\"; \"computer=$name\"; 'joined=1'; 'reboot=1'",
+        ("try { " + LSA_OFF_PS + " } catch { 'lsa_ppl_off=0' }") if lsa_off else "'lsa_ppl_off=skipped'",
         ("try { Add-LocalGroupMember -SID 'S-1-5-32-555' -Member \"$netbios\\" + ALL_GROUP + "\" -ErrorAction Stop; 'rdp_group=1' }"
          " catch { 'rdp_group=0' }") if s['rdp_group'] else "'rdp_group=skipped'",
         "shutdown.exe /r /t 15 /c 'MOAVI Desk: domain join' | Out-Null; 'restarting=1'" if restart else "'restarting=0'",
