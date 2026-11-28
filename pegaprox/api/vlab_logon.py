@@ -143,7 +143,8 @@ def _arm(desk, mgr, node, username, portal_session='', client_ip=''):
     return True, '', {'serial': cert['serial'], 'not_after': logon_ca._iso(cert['not_after']), 'upn': cert['upn']}
 
 
-_nla_off = {}     # desktop id -> (vmid, gateway ips): RDP scoped to the gateways and NLA off
+from pegaprox.vlab.rdp_done import Done as _Done
+_nla_off = _Done('nla_off')     # desktop id -> (vmid, gateway ips): RDP scoped to the gateways and NLA off (kept over a restart)
 
 # The desktop's own "Remote Desktop" inbound rules (the group, by its resource name, so any Windows
 # language) take RDP only from the gateways. Fails - and NLA stays on - when the Windows firewall is
