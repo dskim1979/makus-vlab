@@ -742,6 +742,8 @@ AUTOMATIONS = {
     ('pegaprox/vlab/warpgate.py', 'start_auto_connect'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'forget_desktop'): (1, 'read'),
     ('pegaprox/vlab/warpgate.py', 'resync_targets'): (1, 'read'),
+    # MOAVI Desk: a desktop's RDP setup (guest agent) behind a connect whose RDP port already answers
+    ('pegaprox/api/vlab_next.py', 'rdp_prepare'): (1, 'carry'),
     # MOAVI Desk: the portal card's screen picture refreshed off the request (a screendump, read only)
     ('pegaprox/api/vms.py', '_grab_in_background'): (1, 'read'),
     # MOAVI Desk: new, cloned and reset desktops join the bundled directory by themselves

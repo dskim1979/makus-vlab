@@ -1243,3 +1243,38 @@ def test_proxmox_ha_resources_and_groups(env, monkeypatch):
     body = {'group': 'lab2', 'nodes': 'pve1:2,pve2', 'restricted': True, 'resources': 'vm:300,vm:301'}
     assert admin.post(f'{base}/groups', json=body).status_code == 200 and seen['g'] == body
     assert admin.delete(f'{base}/groups/lab2').get_json()['g'] == 'lab2'
+
+
+def test_a_desktop_whose_rdp_answers_is_not_waited_for(env, monkeypatch):
+    """The first connect after an engine restart: RDP already on, so the setup runs on behind it."""
+    import threading
+    import pegaprox.api.vlab as core
+    import pegaprox.api.vlab_next as nxt
+    import pegaprox.utils.rbac as rbac
+    _, mgr, _, alice, _, _ = env
+    monkeypatch.setattr(core, '_acl_set', lambda *a: True)
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda *a, **k: True)
+    pool = store.create_pool('빠른 접속', 'dedicated', CID)
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'office-02')
+    store.set_assignment(d['id'], 'alice')
+    mgr._fetch_qemu_ips.return_value = ['10.0.0.32']
+    go, ran = threading.Event(), []
+
+    def slow(m, n, v, cmd, **k):
+        if 'fDisableCdm' in cmd[-1]:
+            return (0, '', '', '')
+        go.wait(5)                                                 # Windows still starting PowerShell
+        ran.append(cmd[-1])
+        return (0, 'changed=0', '', '')
+    monkeypatch.setattr(nxt, '_agent_run', slow)
+    monkeypatch.setattr(nxt, '_guest_os', lambda *a: 'windows')
+    monkeypatch.setattr(nxt, 'rdp_listening', lambda ip, port=3389, timeout=1.5: True)
+    nxt._rdp_tuned.clear()
+    r = alice.post(f"/api/vlab/desktops/{d['id']}/connect", json={'protocol': 'rdp'})
+    assert r.status_code == 200 and not ran                        # answered before the setup finished
+    go.set()
+    for _ in range(50):
+        if d['id'] in nxt._rdp_tuned:
+            break
+        threading.Event().wait(0.05)
+    assert len(ran) == 1 and d['id'] in nxt._rdp_tuned and d['id'] not in nxt._rdp_tuning
