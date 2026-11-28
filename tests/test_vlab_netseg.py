@@ -59,6 +59,7 @@ class FakeSDN:
         self.vms = vms           # vmid -> {'config', 'ips'}
         self.applied, self.reboots, self.writes = 0, [], []
         self.node_status = 'available'      # what each node says of an applied zone
+        self.other_node = False             # a second node, pve2, that never builds the zone
 
     def _path(self, url):
         return unquote(url.split('/api2/json', 1)[1]).split('?')[0]
@@ -66,7 +67,9 @@ class FakeSDN:
     def get(self, url, **k):
         p = self._path(url)
         if p == '/nodes':
-            return Resp([{'node': 'pve1', 'status': 'online'}])
+            return Resp([{'node': n, 'status': 'online'} for n in ['pve1'] + (['pve2'] if self.other_node else [])])
+        if p == '/nodes/pve2/sdn/zones':
+            return Resp([{'zone': z, 'status': 'error'} for z, o in self.zones.items() if not o.get('state')])
         if p == '/nodes/pve1/sdn/zones':
             return Resp([{'zone': z, 'status': self.node_status} for z, o in self.zones.items() if not o.get('state')])
         if p == '/cluster/sdn/zones':
@@ -320,3 +323,14 @@ def test_a_guest_keeping_its_old_address_is_reported(seg):
     sdn.vms[401]["ips"] = ["10.20.1.40"]
     st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply").get_json()
     assert st["problem"] == "" and all(not x["old_ips"] for x in st["desktops"])
+
+
+def test_a_node_without_the_zone_is_not_the_problem_of_a_pool_elsewhere(seg):
+    admin, sdn, pool, _ = seg
+    sdn.other_node = True
+    s = _make_segment(admin)
+    r = admin.post(f"/api/vlab/admin/clusters/{CID}/netseg/sdn").get_json()
+    assert r["nodes"] == {"pve1": "available", "pve2": "error"} and "pve2" in r["node_problem"]
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={"net_segment": s["id"]})
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply", json={"restart": True}).get_json()
+    assert all(d["state"] == "on" for d in st["desktops"]) and "pve2" not in st["problem"]

@@ -302,7 +302,10 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
     elif seg:
         z = netseg.zone(pool['cluster_id'])
         node_ok = node_zone_status(mgr, z['zone'] if z else '')
-        problem = node_problem(node_ok)
+        # only the nodes this pool's desktops are on: another node without the zone is the
+        # cluster page's warning, not this pool's problem
+        mine = {(vms.get(int(d['vmid'])) or {}).get('node') or d['node'] for d in desks}
+        problem = node_problem({n: s for n, s in node_ok.items() if n in mine})
     for d in desks:
         vm = vms.get(int(d['vmid'])) or {}
         node = vm.get('node') or d['node']
