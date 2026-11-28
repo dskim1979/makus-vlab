@@ -2351,17 +2351,21 @@ def _side_by_side(steps):
     """{name: result} of independent steps run at once (each on the caller's HA token). A step that
     raises gives None, as the steps themselves never raise."""
     from concurrent.futures import ThreadPoolExecutor
+    from flask import copy_current_request_context, has_request_context
     if len(steps) == 1:
         (k, fn), = steps.items()
         return {k: fn()}
+    # each step keeps the request it serves: arming the sign-in reads the portal session and the
+    # client's address from it (without, it failed quietly and no certificate was issued)
+    wrap = copy_current_request_context if has_request_context() else (lambda f: f)
     with ThreadPoolExecutor(max_workers=len(steps)) as ex:
-        futs = {k: ex.submit(ha.carry(fn)) for k, fn in steps.items()}
+        futs = {k: ex.submit(ha.carry(wrap(fn))) for k, fn in steps.items()}
         out = {}
         for k, f in futs.items():
             try:
                 out[k] = f.result()
             except Exception as e:
-                logging.info(f'[VLAB] connect step {k}: {str(e)[:200]}')
+                logging.warning(f'[VLAB] connect step {k}: {str(e)[:200]}')
                 out[k] = None
         return out
 
