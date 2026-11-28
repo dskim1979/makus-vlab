@@ -374,7 +374,8 @@ def my_desktops():
                        'screen_thumbnail': pol['screen_thumbnail'], 'desktop_files': pol['desktop_files'],
                        # what the client may offer to pass over (its 장치 boxes; the desktop itself enforces the pool's)
                        'client_drives': pol['client_drives'], 'client_printers': pol['client_printers'],
-                       'usb_redirect': pol['usb_redirect']}
+                       'usb_redirect': pol['usb_redirect'],
+                       'desktop_sso': bool(pol.get('desktop_sso'))}   # the client arms the sign-in when the desktop is picked
         pool = pools.setdefault(d['pool_id'], store.get_pool(d['pool_id']))
         paths = storage_paths(pool, _user()) if pool else None
         if paths:

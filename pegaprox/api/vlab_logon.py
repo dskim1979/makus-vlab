@@ -193,11 +193,41 @@ def sso_on(pool):
     return bool(pool_policy.effective((pool or {}).get('settings')).get('desktop_sso'))
 
 
+REUSE_MARGIN = 90           # seconds an armed certificate must still have to be used again
+
+
+def _still_armed(desk, mgr, node, username):
+    """True when this desktop's newest certificate is this user's, armed, good for REUSE_MARGIN more
+    and the VM still holds it (moavi-logon status: state=armed - the newest arm is the one it holds,
+    a logon or an expiry clears it). One guest round trip instead of prepare, sign and arm."""
+    import datetime as _dt
+    from pegaprox.api.vlab_next import _agent_run
+    rows = logon_ca.issued(1, desktop_id=desk['id'])
+    if not rows:
+        return False
+    r = rows[0]
+    if r['username'] != username or r['state'] != 'armed' or int(r['vmid'] or 0) != int(desk['vmid']):
+        return False
+    try:
+        left = (_dt.datetime.fromisoformat(r['not_after']) - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    if left < REUSE_MARGIN:
+        return False
+    try:
+        rc, out, _err, _e = _agent_run(mgr, node, int(desk['vmid']), [EXE, 'status'], wait=8)
+    except Exception:
+        return False
+    return rc == 0 and _kv(out).get('state') == 'armed'
+
+
 def arm_for_connect(desk, mgr, node, username, pool):
     """The connect routes (RDP file, browser RDP) on a Windows desktop: arm its next sign-in when the
     pool has desktop_sso on. Failures are logged, never shown - the sign-in screen is the fallback."""
     if not sso_on(pool):
         return None
+    if _still_armed(desk, mgr, node, username):
+        return True                 # armed a moment ago (the client asks when the desktop is picked)
     try:
         ok, code, info = arm(desk, mgr, node, username, _portal_session(), get_client_ip())
     except Exception as e:      # never in the way of the connect

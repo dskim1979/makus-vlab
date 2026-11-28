@@ -552,3 +552,26 @@ def test_one_install_at_a_time_per_desktop(sso):
     finally:
         vlab_logon._installing.discard(desk['id'])
     assert vlab_logon.install_and_record(desk, sso['mgr'], 'pve1')[0]
+
+
+def test_a_certificate_armed_a_moment_ago_is_used_again(sso, monkeypatch):
+    """The client arms the sign-in when the desktop is picked; the connect then only asks the VM
+    whether it still holds it (one round trip) instead of prepare, sign and arm again."""
+    _sso_on(sso)
+    g, desk = sso['g'], sso['desk']
+    from pegaprox.vlab import store
+    pool = store.get_pool(desk['pool_id'])
+    with sso['api'].app.test_request_context('/'):
+        assert vlab_logon.arm(desk, sso['mgr'], 'pve1', 'alice')[0]
+        orig = g._answer
+        held = {'state': 'armed'}
+        g._answer = lambda cmd, stdin: ({'exitcode': 0, 'out-data': f"version=1.3.4\ncp=registered\nlsa_ppl=off\nstate={held['state']}\n"}
+                                        if cmd[-1] == 'status' else orig(cmd, stdin))
+        prepares = lambda: sum(1 for d in g.execs() if d['command'][-1] == 'prepare')
+        before = prepares()
+        assert vlab_logon.arm_for_connect(desk, sso['mgr'], 'pve1', 'alice', pool) is True
+        assert prepares() == before and len(logon_ca.issued(desktop_id=desk['id'])) == 1
+        held['state'] = 'none'                         # used by a logon: armed afresh
+        g.key, g.csr = _csr()
+        assert vlab_logon.arm_for_connect(desk, sso['mgr'], 'pve1', 'alice', pool) is True
+        assert prepares() == before + 1 and len(logon_ca.issued(desktop_id=desk['id'])) == 2
