@@ -3946,6 +3946,10 @@ def desktop_migrate(desktop_id):
         return _bad('target is required')
     if target == node:
         return _bad('The VM is already on that node')
+    from pegaprox.api.vlab_netseg import migrate_block
+    why = migrate_block(desk, target)       # 네트워크 분리: not to a node without the desktop's network
+    if why:
+        return _bad(why, 409)
     if vm.get('lock'):
         return _bad(f"The VM is busy ({vm['lock']}) - try again shortly", 409)
     raw = _raw_config(mgr, node, desk)
