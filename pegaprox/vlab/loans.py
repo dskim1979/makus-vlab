@@ -116,11 +116,16 @@ def _side_ticks():
         from pegaprox.api.vlab_netiso import netiso_tick         # 네트워크 격리: pool policy -> Proxmox firewall
         netiso_tick()
 
+    def pool_netseg():
+        from pegaprox.api.vlab_netseg import netseg_tick         # 네트워크 분리: desktops onto their segment's VNet
+        netseg_tick()
+
     for name, on, fn in (('operations notices', True, ops),
                          ('LAB booking reminders', features.enabled('lab'), bookings),
                          ('card / board bookings', features.enabled('gpuai') or features.enabled('fpga'), cards),
                          ('growth forecast', True, forecast),
-                         ('network isolation', True, pool_netiso)):
+                         ('network isolation', True, pool_netiso),
+                         ('network segments', True, pool_netseg)):
         if not on:
             continue
         try:

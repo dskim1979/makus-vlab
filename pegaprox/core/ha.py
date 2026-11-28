@@ -361,6 +361,8 @@ SYNC_TABLES = (
     'vlab_directory_secrets', 'vlab_directory_accounts', 'vlab_directory_joins', 'vlab_directory_autojoin',
     # 네트워크 격리: the gateway's addresses per cluster, the desktops given the firewall (pegaprox/vlab/netiso.py)
     'vlab_netiso', 'vlab_netiso_applied',
+    # 네트워크 분리: the SDN zone per cluster, the segments, the desktops moved onto one (pegaprox/vlab/netseg.py)
+    'vlab_netseg_zone', 'vlab_netseg', 'vlab_netseg_moved',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

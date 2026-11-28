@@ -58,6 +58,8 @@ takes effect:
                                DROP), so nothing inside the desktop can take it back
   net_peers                    with isolation on, the pool's own desktops may still reach each other
   net_allow_in                 more sources let in: [{cidr, proto any|tcp|udp|icmp, port, note}]
+  net_segment                  2단계: the segment (Proxmox SDN VNet, its subnet in the PVE IPAM) the pool's
+                               desktops are moved onto, '' = their own bridge (pegaprox/vlab/netseg.py)
   net_egress, net_allow_out    outbound: 'any' (as before) or 'list' = only the gateway, the pool's own
                                desktops when net_peers, and net_allow_out (DNS, AD, file servers ...)
   auto_domain_join             new, cloned and reset desktops join the bundled directory by themselves
@@ -137,6 +139,7 @@ DEFAULTS = {
     'net_allow_in': [],
     'net_egress': 'any',
     'net_allow_out': [],
+    'net_segment': '',          # 네트워크 분리 2단계: a segment (VNet) id of pegaprox/vlab/netseg.py, '' = the VM's own bridge
 }
 SUBJECT_TYPES = ('user', 'department', 'group')
 MAX_DEVICE_ROUTE_FOR = 200
@@ -342,6 +345,10 @@ def validate(data, pool_type):
             if err:
                 return None, err
             out[k] = rules
+        elif k == 'net_segment':
+            if not isinstance(v, str) or len(v) > 40:
+                return None, 'net_segment: a segment id or an empty string'
+            out[k] = v.strip()
         elif k == 'net_egress':
             if v not in NET_EGRESS:
                 return None, f"net_egress must be one of {', '.join(NET_EGRESS)}"

@@ -1844,6 +1844,11 @@ def set_pool_policy(pool_id):
     pol, e = pool_policy.validate(request.get_json(silent=True), pool.get('type'))
     if e:
         return _bad(e)
+    if pol.get('net_segment'):
+        from pegaprox.vlab import netseg
+        seg = netseg.segment(pol['net_segment'])
+        if not seg or seg['cluster_id'] != pool.get('cluster_id'):
+            return _bad("net_segment: not a segment of this pool's cluster")
     old = pool_policy.effective(pool.get('settings'))
     was = old.get('ssh_files', 'off') != 'off'
     from pegaprox.vlab import directory
@@ -1868,6 +1873,8 @@ def set_pool_policy(pool_id):
     pool = store.get_pool(pool['id']) or pool
     from pegaprox.api.vlab_netiso import kick
     kick(pool['id'])                        # 네트워크 격리 follows at the next minute
+    from pegaprox.api.vlab_netseg import kick as kick_netseg
+    kick_netseg(pool['id'])                 # 네트워크 분리: the desktops move onto (or off) the segment
     if not joined_before and directory.auto_join_on(pool):
         directory.queue_pool(pool)          # the switch turned on: the desktops not joined yet
     log_audit(_user(), 'vlab.pool.policy', f"pool '{pool['name']}': " + ', '.join(f'{k}={v}' for k, v in pol.items()),
@@ -2552,6 +2559,8 @@ def add_desktop(pool_id):
     log_audit(_user(), 'vlab.desktop.add', f"{vm_type}/{vmid} into pool '{pool['name']}'", get_client_ip())
     from pegaprox.api.vlab_netiso import desktop_added
     desktop_added(pool)                     # 네트워크 격리 on the new desktop at once
+    from pegaprox.api.vlab_netseg import desktop_added as netseg_added
+    netseg_added(pool)                      # 네트워크 분리: onto the pool's segment (now if it is off)
     return jsonify({'desktop': desk}), 201
 
 
