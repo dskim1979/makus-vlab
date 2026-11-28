@@ -266,8 +266,14 @@ def _port_ok(port):
     return True
 
 
+NET_ACTIONS = ('accept', 'drop')
+_POOL_ID = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+
+
 def net_rules(v, key):
-    """([{'cidr', 'proto', 'port', 'note'}], None) or (None, error) for net_allow_in / net_allow_out."""
+    """([{'cidr', 'proto', 'port', 'note'}], None) or (None, error) for net_allow_in / net_allow_out.
+    A rule names either an address (cidr) or another pool (pool: its id - its desktops' addresses,
+    cidr then ''); action 'drop' (차단) is kept only when given - drops go before the accepts."""
     import ipaddress
     if not isinstance(v, list) or len(v) > NET_RULES_MAX:
         return None, f'{key}: a list of at most {NET_RULES_MAX}'
@@ -275,10 +281,19 @@ def net_rules(v, key):
     for r in v:
         if not isinstance(r, dict):
             return None, f'{key}: each entry is {{cidr, proto, port, note}}'
-        try:
-            cidr = str(ipaddress.ip_network(str(r.get('cidr', '')).strip(), strict=False))
-        except ValueError:
-            return None, f"{key}: '{r.get('cidr')}' is not an address or network (e.g. 10.0.0.5, 10.0.0.0/24)"
+        action = r.get('action') or 'accept'
+        if action not in NET_ACTIONS:
+            return None, f"{key}: action must be one of {', '.join(NET_ACTIONS)}"
+        peer_pool = str(r.get('pool') or '').strip()
+        if peer_pool and not _POOL_ID.match(peer_pool):
+            return None, f"{key}: pool must be a pool id"
+        if peer_pool:
+            cidr = ''
+        else:
+            try:
+                cidr = str(ipaddress.ip_network(str(r.get('cidr', '')).strip(), strict=False))
+            except ValueError:
+                return None, f"{key}: '{r.get('cidr')}' is not an address or network (e.g. 10.0.0.5, 10.0.0.0/24)"
         proto = r.get('proto') or 'any'
         if proto not in NET_PROTOS:
             return None, f"{key}: proto must be one of {', '.join(NET_PROTOS)}"
@@ -287,7 +302,12 @@ def net_rules(v, key):
             return None, f'{key}: a port needs proto tcp or udp'
         if not _port_ok(port):
             return None, f"{key}: port '{port}' - e.g. 22, 80,443 or 5000:5100"
-        out.append({'cidr': cidr, 'proto': proto, 'port': port, 'note': str(r.get('note') or '').strip()[:40]})
+        rule = {'cidr': cidr, 'proto': proto, 'port': port, 'note': str(r.get('note') or '').strip()[:40]}
+        if peer_pool:
+            rule['pool'] = peer_pool
+        if action == 'drop':
+            rule['action'] = 'drop'
+        out.append(rule)
     return out, None
 
 

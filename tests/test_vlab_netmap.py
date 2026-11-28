@@ -94,8 +94,8 @@ def test_isolation_that_does_not_filter_is_critical_until_it_does(nm):
     assert {'dc_firewall_off', 'rules_missing', 'vm_firewall_off'} <= _codes(m, 'critical')
     assert 'allow_in_wide' in _codes(m, 'warning') and 'egress_open' in _codes(m, 'info')
     rules = m['pools'][0]['rules']
-    assert rules[0] == {'dir': 'in', 'peer': 'gateway', 'cidr': '', 'proto': 'any', 'port': '', 'note': 'MOAVI gateway'}
-    assert {'dir': 'in', 'peer': 'cidr', 'cidr': '0.0.0.0/0', 'proto': 'tcp', 'port': '22', 'note': 'ssh'} in rules
+    assert rules[0] == {'dir': 'in', 'peer': 'gateway', 'cidr': '', 'proto': 'any', 'port': '', 'note': 'MOAVI gateway', 'action': 'accept'}
+    assert {'dir': 'in', 'peer': 'cidr', 'cidr': '0.0.0.0/0', 'proto': 'tcp', 'port': '22', 'note': 'ssh', 'action': 'accept'} in rules
     assert rules[-1]['dir'] == 'out' and rules[-1]['peer'] == 'any'
     # as 네트워크 격리 sets it up
     from pegaprox.vlab import policy, store
@@ -144,3 +144,32 @@ def test_a_segment_gateway_the_moavi_server_cannot_reach(nm, monkeypatch):
 def test_unknown_cluster(nm):
     admin, fw, pool = nm
     assert admin.get('/api/vlab/admin/clusters/nope/netmap').status_code == 404
+
+
+# --- 마이크로 세그먼트: pool to pool, drop rules, the desktops in the map ---------------------------
+
+def test_pool_to_pool_rules_drops_first_and_the_desktops(nm):
+    admin, fw, pool = nm
+    other = admin.post('/api/vlab/admin/pools', json={'name': '연구소', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy",
+                     json={'net_allow_in': [{'pool': pool['id'], 'proto': 'tcp', 'port': '445'}]}).status_code == 400   # itself
+    assert admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy",
+                     json={'net_allow_in': [{'pool': 'pool_nope', 'proto': 'tcp', 'port': '445'}]}).status_code == 400
+    _isolate(admin, pool, net_allow_in=[{'pool': other['id'], 'proto': 'tcp', 'port': '445', 'note': 'smb'},
+                                        {'cidr': '10.0.0.0/8', 'proto': 'tcp', 'port': '22'},
+                                        {'cidr': '10.9.0.0/16', 'proto': 'any', 'action': 'drop'}],
+             net_allow_out=[{'cidr': '0.0.0.0/0', 'proto': 'tcp', 'port': '25', 'action': 'drop', 'note': 'no mail'}])
+    _isolate(admin, other, net_egress='list')
+    from pegaprox.vlab import policy, store
+    pol = policy.effective(store.get_pool(pool['id']).get('settings'), 'dedicated')
+    g = netiso.group_rules(pool['id'], pol)
+    assert [(r['type'], r['action']) for r in g][:2] == [('in', 'ACCEPT'), ('in', 'DROP')]        # gateway, then the drop
+    assert any(r.get('source') == f"+{netiso.ipset_name(other['id'])}" and r.get('dport') == '445' for r in g)
+    assert any(r['type'] == 'out' and r['action'] == 'DROP' and r.get('dport') == '25' for r in g)
+    m = _map(admin)
+    p = next(x for x in m['pools'] if x['id'] == pool['id'])
+    assert {'dir': 'in', 'peer': 'pool_other', 'cidr': '', 'proto': 'tcp', 'port': '445', 'note': 'smb', 'action': 'accept',
+            'pool': other['id']} in p['rules']
+    assert [v['vmid'] for v in p['vms']] == [400, 401] and p['vms'][0]['bridge'] == 'vmbr0'
+    f = next(x for x in m['findings'] if x['code'] == 'peer_out_missing')            # 연구소 sends only its list
+    assert f['pool'] == other['id'] and '445' in f['detail']

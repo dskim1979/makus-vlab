@@ -248,3 +248,22 @@ def test_a_new_pool_starts_isolated_and_registering_applies_it(iso, api):
     assert pve.vms[302]['rules'] == [] and pve.vms[302]['options']['policy_in'] == 'ACCEPT'
     assert pve.vms[302]['options']['enable'] == 0
     assert netiso.applied(desk['id']) is None
+
+
+def test_a_rule_naming_another_pool_keeps_that_pools_addresses(iso):
+    """마이크로 세그먼트: 설계팀 takes SMB from 연구소's desktops - 연구소's ipset is kept for the rule,
+    though 연구소 itself is not isolated."""
+    admin, pve, pool = iso
+    admin.put(f'/api/vlab/admin/clusters/{CID}/netiso', json={'gateway_sources': ['192.168.0.55']})
+    other = admin.post('/api/vlab/admin/pools', json={'name': '연구소', 'type': 'dedicated', 'cluster_id': CID}).get_json()['pool']
+    admin.put(f"/api/vlab/admin/pools/{other['id']}/policy", json={'net_isolation': False})
+    from pegaprox.vlab import store
+    store.remove_desktop(next(d['id'] for d in store.list_desktops(pool['id']) if d['vmid'] == 301))
+    assert admin.post(f"/api/vlab/admin/pools/{other['id']}/desktops", json={'vmid': 301}).status_code in (200, 201)
+    admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy",
+              json={'net_isolation': True, 'net_allow_in': [{'pool': other['id'], 'proto': 'tcp', 'port': '445'}]})
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netiso/apply").get_json()
+    assert st['problem'] == '', st
+    peer = netiso.ipset_name(other['id'])
+    assert [e['cidr'] for e in pve.ipsets[peer]] == ['192.168.0.23']
+    assert any(r.get('source') == f'+{peer}' and r.get('dport') == '445' for r in pve.groups[netiso.group_name(pool['id'])])
