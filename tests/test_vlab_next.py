@@ -1288,3 +1288,22 @@ def test_the_connect_steps_side_by_side_keep_the_request(api):
     with api.app.test_request_context('/api/vlab/desktops/d1/connect', environ_base={'REMOTE_ADDR': '10.8.0.2'}):
         got = nxt._side_by_side({'a': lambda: request.path, 'b': lambda: request.remote_addr})
     assert got == {'a': '/api/vlab/desktops/d1/connect', 'b': '10.8.0.2'}
+
+
+def test_what_a_connect_did_in_a_desktop_is_kept_over_an_engine_restart(env, monkeypatch):
+    """After an update or a recreate the first connect to each desktop ran the device policy, RDP
+    setup and NLA steps again (seconds each); now they are remembered in the database."""
+    import pegaprox.api.vlab_next as nxt
+    pool = store.create_pool('재시작', 'dedicated', CID)
+    d = store.add_desktop(store.get_pool(pool['id']), 'pve1', 300, 'office-09')
+    ran = []
+    monkeypatch.setattr(nxt, '_agent_run', lambda m, n, v, cmd, **k: ran.append(cmd[-1]) or (0, 'changed=0', '', ''))
+    pol = {'client_drives': True, 'client_printers': False, 'usb_redirect': True}
+    nxt._rdp_devices_set.clear()
+    nxt.rdp_device_policy(d, None, 'pve1', pol)
+    assert len(ran) == 1
+    nxt._rdp_devices_set.forget_memory()                     # the engine restarts
+    nxt.rdp_device_policy(d, None, 'pve1', pol)
+    assert len(ran) == 1                                     # not again
+    nxt.rdp_device_policy(d, None, 'pve1', dict(pol, client_printers=True))
+    assert len(ran) == 2                                     # the pool changed: again

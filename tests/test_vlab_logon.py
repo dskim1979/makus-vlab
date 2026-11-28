@@ -575,3 +575,34 @@ def test_a_certificate_armed_a_moment_ago_is_used_again(sso, monkeypatch):
         g.key, g.csr = _csr()
         assert vlab_logon.arm_for_connect(desk, sso['mgr'], 'pve1', 'alice', pool) is True
         assert prepares() == before + 1 and len(logon_ca.issued(desktop_id=desk['id'])) == 2
+
+
+def test_the_connect_waits_for_an_arm_on_its_way_and_uses_it(sso):
+    """The client arms ahead and connects 0.1 s later: the connect waits for that arm and uses it
+    (no second prepare, no two arms overwriting each other in the VM)."""
+    import threading
+    _sso_on(sso)
+    g, desk = sso['g'], sso['desk']
+    from pegaprox.vlab import store
+    pool = store.get_pool(desk['pool_id'])
+    orig = g._answer
+    held = {'state': 'none'}
+    go = threading.Event()
+
+    def answer(cmd, stdin):
+        if cmd[-1] == 'status':
+            return {'exitcode': 0, 'out-data': f"version=1.3.4\ncp=registered\nlsa_ppl=off\nstate={held['state']}\n"}
+        if cmd[-1] == 'arm':
+            go.wait(5)                                   # the ahead arm is slow in the VM
+            held['state'] = 'armed'
+        return orig(cmd, stdin)
+    g._answer = answer
+    with sso['api'].app.test_request_context('/'):
+        ahead = threading.Thread(target=vlab_logon.arm, args=(desk, sso['mgr'], 'pve1', 'alice'))
+        ahead.start()
+        threading.Event().wait(0.3)
+        threading.Timer(0.3, go.set).start()
+        assert vlab_logon.arm_for_connect(desk, sso['mgr'], 'pve1', 'alice', pool) is True
+        ahead.join(5)
+    assert sum(1 for d in g.execs() if d['command'][-1] == 'prepare') == 1
+    assert len(logon_ca.issued(desktop_id=desk['id'])) == 1

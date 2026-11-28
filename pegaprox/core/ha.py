@@ -388,6 +388,8 @@ LOCAL_TABLES = (
     'vlab_accel_samples',
     # desktop template builds this instance runs in its own thread (pegaprox/api/vlab_desktpl.py)
     'vlab_desktpl_builds',
+    # what the RDP connect already did inside each desktop (pegaprox/vlab/rdp_done.py): this engine's cache
+    'vlab_rdp_done',
 )
 
 # server_settings keys that describe this host, not the deployment

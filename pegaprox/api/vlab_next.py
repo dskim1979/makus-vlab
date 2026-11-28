@@ -2232,7 +2232,8 @@ def logon_privacy_lines():
         out += [f"if ((Get-ItemProperty -Path $k -Name '{n}' -ErrorAction SilentlyContinue).'{n}' -ne {v}) "
                 f"{{ Set-ItemProperty -Path $k -Name '{n}' -Value {v} -Type DWord; $changed = 1 }}" for n, v in values]
     return out
-_rdp_tuned = {}   # desktop id -> (vmid, when)
+from pegaprox.vlab.rdp_done import Done as _Done
+_rdp_tuned = _Done('rdp_tuned')   # desktop id -> (vmid, when); kept over a restart (pegaprox/vlab/rdp_done.py)
 
 
 def rdp_prepare_script():
@@ -2301,7 +2302,7 @@ def _rdp_prepare_now(desk, mgr, node, wait):
 
 # the pool's device switches, kept by the desktop itself (Remote Desktop Services policy): the user
 # can edit an .rdp, not these - 1 = refused (drives, printers, plug-and-play / USB devices)
-_rdp_devices_set = {}   # desktop id -> (vmid, values)
+_rdp_devices_set = _Done('rdp_devices')   # desktop id -> (vmid, values)
 
 
 def rdp_device_values(pol):
