@@ -537,3 +537,16 @@ def test_nla_goes_off_once_for_the_devices_route(sso):
     assert "@('192.168.0.55','192.168.0.56')" in scopes()[-1]
     acts = [r[0] for r in sso['seed'].db.conn.execute("SELECT details FROM audit_log WHERE action = 'vlab.logon.nla' ORDER BY id")]
     assert len(acts) == 3 and 'NLA stays on' in acts[0] and 'only from 192.168.0.55' in acts[1]
+
+
+def test_one_install_at_a_time_per_desktop(sso):
+    """The automatic round and a 다시 설치 click at once: the second one waits its turn, it does not
+    empty the setup folder under the first one."""
+    desk = sso['desk']
+    vlab_logon._installing.add(desk['id'])
+    try:
+        ok, got = vlab_logon.install_and_record(desk, sso['mgr'], 'pve1')
+        assert not ok and str(got).startswith('INSTALL_RUNNING') and sso['g'].execs() == []
+    finally:
+        vlab_logon._installing.discard(desk['id'])
+    assert vlab_logon.install_and_record(desk, sso['mgr'], 'pve1')[0]

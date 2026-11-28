@@ -282,7 +282,8 @@ def _write_file(mgr, node, vmid, path, data):
                              data={'file': f'{path}.part{n:03d}', 'content': base64.b64encode(data[i:i + PIECE]).decode('ascii'),
                                    'encode': 0})
         if getattr(resp, 'status_code', 0) != 200:
-            raise RuntimeError(f"file-write {os.path.basename(path)}: {(getattr(resp, 'text', '') or '')[:200]}")
+            why = (getattr(resp, 'text', '') or '').strip()[:200] or (f"HTTP {resp.status_code}" if resp is not None else 'no answer from the node')
+            raise RuntimeError(f"file-write {os.path.basename(path)} part {n}: {why}")
         n += 1
     return n
 
@@ -343,6 +344,8 @@ def install_desktop_logon(desktop_id):
     if not logon_ca.ca_info():
         return jsonify({'error': 'no logon CA in the engine', 'code': 'CA_MISSING'}), 409
     ok, got = install_and_record(desk, mgr, node, who=_user(), ip=get_client_ip())   # the console's "다시 설치" too
+    if not ok and str(got).startswith('INSTALL_RUNNING'):
+        return jsonify({'error': '이 데스크톱에 설치가 이미 진행 중입니다. 잠시 뒤에 상태를 보세요.', 'code': 'INSTALL_RUNNING'}), 409
     if not ok:
         return jsonify({'error': str(got)[:400], 'code': 'INSTALL_FAILED'}), 502
     return jsonify({'installed': True, 'module': got})
@@ -419,8 +422,26 @@ def _windows_running(desk):
     return mgr, node, None
 
 
+_installing = set()            # desktop ids an install runs on now
+_installing_lock = threading.Lock()
+
+
 def install_and_record(desk, mgr, node, who='system', ip=''):
-    """Install now and write the outcome (state, version, next try). (ok, info)."""
+    """Install now and write the outcome (state, version, next try). (ok, info). One install per
+    desktop at a time: each one empties the VM's setup folder, so a second one (the automatic
+    round and a 다시 설치 click) would break the first one's file writes."""
+    with _installing_lock:
+        if desk['id'] in _installing:
+            return False, 'INSTALL_RUNNING: an install runs on this desktop now'
+        _installing.add(desk['id'])
+    try:
+        return _install_and_record(desk, mgr, node, who, ip)
+    finally:
+        with _installing_lock:
+            _installing.discard(desk['id'])
+
+
+def _install_and_record(desk, mgr, node, who, ip):
     prev = logon_ca.install_of(desk['id']) or {}
     try:
         ok, got = install(desk, mgr, node)
