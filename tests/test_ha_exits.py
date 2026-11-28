@@ -341,6 +341,10 @@ EXITS = {
     # manager's guarded _ssh_connect, and the answer files written there by SFTP on that client
     ('pegaprox/api/vlab_desktpl.py', '_Node.run', 'ssh-exec'): (1, 'client'),
     ('pegaprox/api/vlab_desktpl.py', '_Node.write', 'ssh-exec'): (1, 'client'),
+    # MOAVI Desk: 네트워크 분리 - the read-only node check (grep / dpkg-query / sysctl -n over the guarded
+    # _ssh_connect) and the TCP reachability probe of a segment from this server
+    ('pegaprox/api/vlab_netseg.py', '_ssh_run', 'ssh-exec'): (1, 'client'),
+    ('pegaprox/api/vlab_netseg.py', 'probe', 'socket'): (1, 'read'),
     # MOAVI Desk: the stdio bridge of the MCP server (a separate process on an admin's PC, calls this server's /mcp)
     ('pegaprox/vlab/mcp_stdio.py', 'main', 'http-urllib'): (1, 'external'),
     # MOAVI Desk: is the RD gateway container up (TCP connect inside the compose network)
@@ -536,9 +540,11 @@ def test_the_inventory_counts_what_the_report_says():
     #  port probe on connect, a socket read)
     # (+4 since: 템플릿 만들기' node SSH and SFTP, two execs on a client from a guarded factory; the MCP
     #  stdio bridge, an external http; the RD gateway container check, a socket read)
-    assert sum(n for n, _v in EXITS.values()) == 269 and len(EXITS) == 164
-    assert len({(f, q) for f, q, _k in EXITS}) == 149
-    assert by['guard'] == 46 and by['client'] == 87
+    # (+2 since: 네트워크 분리' node check, an exec on a client from a guarded factory; its segment
+    #  reachability probe, a socket read)
+    assert sum(n for n, _v in EXITS.values()) == 271 and len(EXITS) == 166
+    assert len({(f, q) for f, q, _k in EXITS}) == 151
+    assert by['guard'] == 46 and by['client'] == 88
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),

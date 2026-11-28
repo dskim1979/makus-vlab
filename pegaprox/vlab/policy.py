@@ -58,6 +58,11 @@ takes effect:
                                DROP), so nothing inside the desktop can take it back
   net_peers                    with isolation on, the pool's own desktops may still reach each other
   net_allow_in                 more sources let in: [{cidr, proto any|tcp|udp|icmp, port, note}]
+  net_segment_from             the bridge whose NIC is moved ('' = the VM's first NIC): a VM with a
+                               management NIC and a desktop NIC moves only the desktop one
+  net_segment_move             running desktops: 'off' = when next off; 'idle' = restart the ones
+                               nobody is connected to; 'window' = restart idle ones inside
+                               net_segment_window ('HH:MM-HH:MM', local time)
   net_segment                  2단계: the segment (Proxmox SDN VNet, its subnet in the PVE IPAM) the pool's
                                desktops are moved onto, '' = their own bridge (pegaprox/vlab/netseg.py)
   net_egress, net_allow_out    outbound: 'any' (as before) or 'list' = only the gateway, the pool's own
@@ -66,6 +71,8 @@ takes effect:
                                (pegaprox/api/vlab_directory.py autojoin_round); None = on while the
                                bundled directory is in use
 """
+
+import re
 
 # browser RDP is no protocol of its own: with 보안 게이트웨이 (Warpgate) on, an 'rdp' pool opens in the browser too
 PROTOCOLS = ('vnc', 'spice', 'rdp')
@@ -79,6 +86,7 @@ RESET_TYPES = ('reset', 'classroom')
 SHARED_SCREEN_TYPES = ('reset', 'shared', 'classroom', 'buildfarm')
 RDP_ROUTES = ('record', 'devices')
 NET_EGRESS = ('any', 'list')
+NET_SEGMENT_MOVE = ('off', 'idle', 'window')
 NET_PROTOS = ('any', 'tcp', 'udp', 'icmp')
 NET_RULES_MAX = 30
 USB_MODES = ('deny', 'allow')
@@ -140,6 +148,9 @@ DEFAULTS = {
     'net_egress': 'any',
     'net_allow_out': [],
     'net_segment': '',          # 네트워크 분리 2단계: a segment (VNet) id of pegaprox/vlab/netseg.py, '' = the VM's own bridge
+    'net_segment_from': '',     # the bridge whose NIC moves ('' = the first NIC)
+    'net_segment_move': 'off',  # running desktops: off (when next off) | idle (restart if nobody is on it) | window
+    'net_segment_window': '',   # 'HH:MM-HH:MM' for net_segment_move 'window'
 }
 SUBJECT_TYPES = ('user', 'department', 'group')
 MAX_DEVICE_ROUTE_FOR = 200
@@ -345,6 +356,18 @@ def validate(data, pool_type):
             if err:
                 return None, err
             out[k] = rules
+        elif k == 'net_segment_from':
+            if not isinstance(v, str) or (v and not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,15}', v)):
+                return None, 'net_segment_from: a bridge name such as vmbr1, or empty for the first NIC'
+            out[k] = v
+        elif k == 'net_segment_move':
+            if v not in NET_SEGMENT_MOVE:
+                return None, f"net_segment_move must be one of {', '.join(NET_SEGMENT_MOVE)}"
+            out[k] = v
+        elif k == 'net_segment_window':
+            if not isinstance(v, str) or (v and not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d', v)):
+                return None, "net_segment_window: 'HH:MM-HH:MM' (e.g. 22:00-06:00)"
+            out[k] = v
         elif k == 'net_segment':
             if not isinstance(v, str) or len(v) > 40:
                 return None, 'net_segment: a segment id or an empty string'

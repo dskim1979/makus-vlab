@@ -68,6 +68,9 @@ class FakeSDN:
         p = self._path(url)
         if p == '/nodes':
             return Resp([{'node': n, 'status': 'online'} for n in ['pve1'] + (['pve2'] if self.other_node else [])])
+        if p in ('/nodes/pve1/network', '/nodes/pve2/network'):
+            return Resp([{'iface': 'vmbr0', 'type': 'bridge', 'cidr': '192.168.0.100/24'},
+                         {'iface': 'vmbr1', 'type': 'bridge', 'bridge_vlan_aware': 1}, {'iface': 'nic0', 'type': 'eth'}])
         if p == '/nodes/pve2/sdn/zones':
             return Resp([{'zone': z, 'status': 'error'} for z, o in self.zones.items() if not o.get('state')])
         if p == '/nodes/pve1/sdn/zones':
@@ -137,7 +140,7 @@ class FakeSDN:
 
 
 @pytest.fixture
-def seg(api, seed):
+def seg(api, seed, monkeypatch):
     from pegaprox.api import vlab_netseg
     admin = api.as_user(seed.user('root', role='admin'))
     sdn = FakeSDN({400: {'config': {'net0': 'virtio=BC:24:11:00:00:01,bridge=vmbr0,tag=5'}, 'ips': ['10.20.1.21']},
@@ -157,6 +160,7 @@ def seg(api, seed):
     for vmid in (400, 401):
         assert admin.post(f"/api/vlab/admin/pools/{pool['id']}/desktops", json={'vmid': vmid}).status_code in (200, 201)
     vlab_netseg._state.clear()
+    monkeypatch.setattr(vlab_netseg, 'probe', lambda ip, port=3389, timeout=1.5: 'open')   # no real network in the tests
     return admin, sdn, pool, res
 
 
@@ -334,3 +338,127 @@ def test_a_node_without_the_zone_is_not_the_problem_of_a_pool_elsewhere(seg):
     admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json={"net_segment": s["id"]})
     st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply", json={"restart": True}).get_json()
     assert all(d["state"] == "on" for d in st["desktops"]) and "pve2" not in st["problem"]
+
+
+# --- 1순위: real VDI networks ----------------------------------------------------------------------
+
+def _policy(admin, pool, **kw):
+    return admin.put(f"/api/vlab/admin/pools/{pool['id']}/policy", json=kw)
+
+
+def test_the_nic_on_the_chosen_bridge_moves_and_the_management_nic_stays(seg):
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    sdn.vms[400]['config'] = {'net0': 'virtio=BC:24:11:00:00:01,bridge=vmbr0', 'net1': 'virtio=BC:24:11:00:00:11,bridge=vmbr1,tag=30'}
+    assert _policy(admin, pool, net_segment=s['id'], net_segment_from='vmbr1').status_code == 200
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply").get_json()
+    cfg = sdn.vms[400]['config']
+    assert cfg['net0'] == 'virtio=BC:24:11:00:00:01,bridge=vmbr0' and cfg['net1'] == f"virtio=BC:24:11:00:00:11,bridge={s['vnet']}"
+    d = next(x for x in st['desktops'] if x['vmid'] == 400)
+    assert d['state'] == 'on' and d['nic'] == 'net1'
+    d401 = next(x for x in st['desktops'] if x['vmid'] == 401)          # no NIC on vmbr1
+    assert d401['state'] == 'error' and 'vmbr1' in d401['error']
+    _policy(admin, pool, net_segment='', net_segment_from='vmbr1')
+    admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply")
+    assert sdn.vms[400]['config']['net1'] == 'virtio=BC:24:11:00:00:11,bridge=vmbr1,tag=30'
+
+
+def test_a_locked_clone_waits_and_moves_once_free(seg):
+    from pegaprox.api import vlab_netseg
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    sdn.vms[400]['config']['lock'] = 'clone'
+    _policy(admin, pool, net_segment=s['id'])
+    st = admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply").get_json()
+    assert next(x for x in st['desktops'] if x['vmid'] == 400)['state'] == 'waiting_lock'
+    assert 'bridge=vmbr0' in sdn.vms[400]['config']['net0']
+    del sdn.vms[400]['config']['lock']
+    vlab_netseg.netseg_tick()
+    assert f"bridge={s['vnet']}" in sdn.vms[400]['config']['net0']
+
+
+def test_running_desktops_move_by_policy_and_never_under_a_user(seg, monkeypatch):
+    from pegaprox.api import vlab_netseg
+    from pegaprox.vlab import store
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    d401 = next(d for d in store.list_desktops(pool['id']) if d['vmid'] == 401)
+    monkeypatch.setattr(store, 'open_session_desktops', lambda: {d401['id']})
+    _policy(admin, pool, net_segment=s['id'], net_segment_move='idle')
+    vlab_netseg.netseg_tick()
+    st = admin.get(f"/api/vlab/admin/pools/{pool['id']}/netseg").get_json()
+    assert next(x for x in st['desktops'] if x['vmid'] == 401)['state'] == 'waiting_busy' and not sdn.reboots
+    admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply", json={'restart': 'idle'})
+    assert not sdn.reboots                                       # idle-only restart leaves the busy one
+    monkeypatch.setattr(store, 'open_session_desktops', lambda: set())
+    vlab_netseg.netseg_tick()
+    assert sdn.reboots == [401] and f"bridge={s['vnet']}" in sdn.vms[401]['config']['net0']
+
+
+def test_the_move_window():
+    from datetime import datetime
+    from pegaprox.api import vlab_netseg as v
+    assert v._in_window('22:00-06:00', datetime(2026, 1, 1, 23, 0)) and v._in_window('22:00-06:00', datetime(2026, 1, 1, 5, 59))
+    assert not v._in_window('22:00-06:00', datetime(2026, 1, 1, 12, 0)) and v._in_window('09:00-10:00', datetime(2026, 1, 1, 9, 30))
+    pol = {'net_segment_move': 'window', 'net_segment_window': '00:00-23:59'}
+    assert v._may_restart(pol, False, False) and not v._may_restart(pol, False, True) and v._may_restart({}, True, True)
+
+
+def test_a_stopped_desktop_is_put_on_its_network_before_it_starts(seg):
+    from pegaprox.api import vlab_netseg
+    from pegaprox.vlab import store
+    admin, sdn, pool, _ = seg
+    s = _make_segment(admin)
+    _policy(admin, pool, net_segment=s['id'])
+    d400 = next(d for d in store.list_desktops(pool['id']) if d['vmid'] == 400)
+    assert 'not ready' in vlab_netseg.before_start(d400)          # SDN not applied: do not start it
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    assert vlab_netseg.before_start(d400) == '' and f"bridge={s['vnet']}" in sdn.vms[400]['config']['net0']
+
+
+def test_migration_only_to_a_node_with_the_network(seg):
+    from pegaprox.api import vlab_netseg
+    from pegaprox.vlab import store
+    admin, sdn, pool, _ = seg
+    sdn.other_node = True                                         # pve2 never builds the zone
+    s = _make_segment(admin)
+    admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/sdn')
+    _policy(admin, pool, net_segment=s['id'])
+    admin.post(f"/api/vlab/admin/pools/{pool['id']}/netseg/apply")
+    d400 = next(d for d in store.list_desktops(pool['id']) if d['vmid'] == 400)
+    assert 'pve2' in vlab_netseg.migrate_block(d400, 'pve2')
+    assert vlab_netseg.migrate_block(d400, 'pve1') == ''
+
+
+def test_bridges_and_the_vlan_bridge_must_be_on_every_node(seg):
+    admin, sdn, pool, _ = seg
+    b = admin.get(f'/api/vlab/admin/clusters/{CID}/netseg/bridges').get_json()
+    by = {x['name']: x for x in b['bridges']}
+    assert by['vmbr0']['addressed'] == ['pve1'] and by['vmbr1']['vlan_aware'] == ['pve1'] and 'nic0' not in by
+    r = admin.put(f'/api/vlab/admin/clusters/{CID}/netseg/zone', json={'type': 'vlan', 'bridge': 'vmbr9'})
+    assert r.status_code == 400 and 'vmbr9' in r.get_json()['error']
+    assert admin.put(f'/api/vlab/admin/clusters/{CID}/netseg/zone', json={'type': 'vlan', 'bridge': 'vmbr1'}).status_code == 200
+
+
+def test_readiness_reports_each_node(seg, monkeypatch):
+    from pegaprox.api import vlab_netseg
+    admin, sdn, pool, _ = seg
+    assert admin.get(f'/api/vlab/admin/clusters/{CID}/netseg/readiness').status_code == 409   # no zone yet
+    admin.put(f'/api/vlab/admin/clusters/{CID}/netseg/zone', json={'type': 'simple'})
+    monkeypatch.setattr(vlab_netseg, '_ssh_run', lambda mgr, node, cmd: 'SRC=0\nDNSMASQ=1\nFWD=0\nMTU=1500\n')
+    r = admin.get(f'/api/vlab/admin/clusters/{CID}/netseg/readiness').get_json()
+    checks = {c['id']: c['ok'] for c in r['nodes'][0]['checks']}
+    assert r['zone_type'] == 'simple' and checks == {'source': False, 'dnsmasq': True, 'forward': False} and not r['nodes'][0]['ok']
+
+
+def test_a_single_node_zone_refuses_a_pool_on_two_nodes(seg):
+    admin, sdn, pool, res = seg
+    admin.put(f'/api/vlab/admin/clusters/{CID}/netseg/zone', json={'type': 'simple'})
+    s = admin.post(f'/api/vlab/admin/clusters/{CID}/netseg/segments',
+                   json={'name': 't', 'subnet': '10.77.1.0/24', 'gateway': '10.77.1.1'}).get_json()
+    res[1]['node'] = 'pve2'
+    r = _policy(admin, pool, net_segment=s['id'])
+    assert r.status_code == 400 and 'single-node' in r.get_json()['error']

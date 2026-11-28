@@ -484,6 +484,11 @@ def connect_desktop(desktop_id):
         return _bad("The desktop's VM is not on the cluster any more", 404)
     if vm.get('status') != 'running':
         if pol['start_on_connect'] and not vm.get('lock'):
+            from pegaprox.api.vlab_netseg import before_start
+            why = before_start(desk)            # 네트워크 분리: never up on the wrong network
+            if why:
+                return jsonify({'error': f'The desktop is getting its network ready ({why}) - connect again in a moment',
+                                'code': 'STARTING'}), 409
             r = mgr.vm_action(vm.get('node') or desk['node'], int(desk['vmid']), desk['vm_type'], 'start')
             if isinstance(r, dict) and r.get('success'):
                 log_audit(username, 'vm.start', f"vLAB: start on connect '{desk['name']}' ({desk['vm_type']}/{desk['vmid']})",
@@ -1849,6 +1854,13 @@ def set_pool_policy(pool_id):
         seg = netseg.segment(pol['net_segment'])
         if not seg or seg['cluster_id'] != pool.get('cluster_id'):
             return _bad("net_segment: not a segment of this pool's cluster")
+        z = netseg.zone(pool.get('cluster_id'))
+        if z and z['type'] == 'simple':
+            live = _vm_states(pool.get('cluster_id'))
+            nodes = {(live.get(int(d['vmid'])) or {}).get('node') or d['node'] for d in store.list_desktops(pool['id']) if d.get('vmid')}
+            if len(nodes) > 1:
+                return _bad(f"net_segment: '{seg['name']}' is in a single-node zone but this pool's desktops are on "
+                            f"{', '.join(sorted(nodes))} - use a VLAN or VXLAN zone")
     old = pool_policy.effective(pool.get('settings'))
     was = old.get('ssh_files', 'off') != 'off'
     from pegaprox.vlab import directory
@@ -2648,6 +2660,8 @@ def clone_desktops(pool_id):
         desk = store.add_desktop(pool, tpl.get('node'), vmid, name, vm_type, state='provisioning')
         created.append({'id': desk['id'], 'vmid': vmid, 'name': name, 'task': r.get('data')})
     if created:
+        from pegaprox.api.vlab_netseg import desktop_added as netseg_added
+        netseg_added(store.get_pool(pool['id']) or pool)   # 네트워크 분리: unlocked clones move now, the rest within a minute
         # 템플릿 관리 counts the pools made from each template
         used = set((pool.get('settings') or {}).get('templates') or [])
         if template_vmid not in used:
@@ -3110,6 +3124,11 @@ def _lab_phase(sched, pool, phase, after=None, desks=None):
                 continue
             if not ha.confirm_step(f"LAB prepare {d['id']}"):
                 break
+            from pegaprox.api.vlab_netseg import before_start
+            why = before_start(d)
+            if why:
+                skipped.append({'id': d['id'], 'name': d['name'], 'reason': f'network: {why}'})
+                continue
             r = mgr.vm_action(vm.get('node') or d['node'], int(d['vmid']), d['vm_type'], 'start')
         else:
             if d['id'] in busy:

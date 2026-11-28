@@ -31,7 +31,10 @@ a stopped desktop of a pool with a segment goes onto its VNet, one whose pool le
 import ipaddress
 import logging
 import re
+import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
@@ -214,9 +217,79 @@ def _vnet_live(st, vnet):
 
 # --- desktops --------------------------------------------------------------------------------------
 
-def _first_nic(cfg):
+def _nics(cfg):
     keys = sorted((k for k in cfg if re.match(r'^net\d+$', k)), key=lambda k: int(k[3:]))
-    return (keys[0], cfg[keys[0]]) if keys else (None, None)
+    return [(k, cfg[k]) for k in keys]
+
+
+def _first_nic(cfg):
+    n = _nics(cfg)
+    return n[0] if n else (None, None)
+
+
+def _pick_nic(cfg, from_bridge, vnet, recorded=None):
+    """The NIC that goes onto the segment: the one moved before, else one already on the VNet,
+    else the one on `from_bridge` (a VM with a management NIC and a desktop NIC moves only the
+    desktop one), else the first. (None, None, reason) when the VM has no such NIC."""
+    nics = _nics(cfg)
+    if not nics:
+        return None, None, 'no network card'
+    by = dict(nics)
+    if recorded and recorded in by:
+        return recorded, by[recorded], ''
+    for k, v in nics:
+        if netseg.nic_parts(v)[0].get('bridge') == vnet:
+            return k, v, ''
+    if from_bridge:
+        for k, v in nics:
+            if netseg.nic_parts(v)[0].get('bridge') == from_bridge:
+                return k, v, ''
+        return None, None, f'no network card on bridge {from_bridge}'
+    return nics[0][0], nics[0][1], ''
+
+
+def _in_window(spec, now=None):
+    """'HH:MM-HH:MM' (local time, may run past midnight)."""
+    if not spec:
+        return False
+    a, b = spec.split('-')
+    t = (now or datetime.now()).strftime('%H:%M')
+    return a <= t < b if a <= b else (t >= a or t < b)
+
+
+def _may_restart(pol, restart, busy):
+    """Whether a running desktop may be restarted onto (or off) the segment now.
+    restart: True = the 재시작해서 적용 'all' button, 'idle' = its idle-only form, False = the loop."""
+    if restart is True:
+        return True
+    if busy:
+        return False
+    if restart == 'idle':
+        return True
+    mode = pol.get('net_segment_move') or 'off'
+    return mode == 'idle' or (mode == 'window' and _in_window(pol.get('net_segment_window') or ''))
+
+
+PROBE_PORT = 3389
+
+
+def probe(ip, port=PROBE_PORT, timeout=1.5):
+    """From the MOAVI server (the engine's host - the gateway's view of the network):
+    'open' (connected), 'reachable' (refused: the host answered), 'unreachable' (no route /
+    host unreachable), 'timeout' (filtered or down)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((str(ip), int(port)))
+        return 'open'
+    except ConnectionRefusedError:
+        return 'reachable'
+    except socket.timeout:
+        return 'timeout'
+    except OSError as e:
+        return 'unreachable' if getattr(e, 'errno', None) in (101, 113, 10051, 10065) else 'timeout'
+    finally:
+        s.close()
 
 
 def _put_nic(mgr, node, desk_like, nic, value):
@@ -249,6 +322,16 @@ def _restore(mgr, row, node, running, restart):
     return 'restored'
 
 
+def _seg_ips(mgr, node, desk, seg):
+    from pegaprox.vlab import netiso
+    try:
+        ips = netiso.ipv4s(mgr._fetch_qemu_ips(node, int(desk['vmid'])) or [])
+    except Exception:
+        return []
+    net = ipaddress.ip_network(seg['subnet'])
+    return [ip for ip in ips if ipaddress.ip_address(ip) in net]
+
+
 def _old_address(mgr, node, desk, seg):
     """The guest's IPv4 addresses when none is in the segment's subnet (a fixed address in the
     guest, or a lease not renewed yet); [] when it has one of the subnet or reports nothing."""
@@ -268,7 +351,9 @@ def _fingerprint(seg, desks, vms, rows):
 
 
 def sync_pool(pool, force=False, confirm=True, restart=False):
-    """The pool's desktops onto its segment's VNet (or back). Returns the pool's state."""
+    """The pool's desktops onto its segment's VNet (or back). Returns the pool's state.
+    restart: False (the loop: running desktops move by net_segment_move), 'idle' (restart the
+    running ones nobody is connected to), True (restart all running ones)."""
     pol = policy.effective(pool.get('settings'), pool.get('type'))
     st = _state.setdefault(pool['id'], {'fp': None, 'at': 0, 'problem': '', 'desktops': {}})
     mgr = _mgr(pool.get('cluster_id'))
@@ -294,6 +379,8 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
     problem = ''
     seen = {}
     rows_by = {r['desktop_id']: r for r in rows}
+    busy = store.open_session_desktops() if desks else set()
+    from_bridge = pol.get('net_segment_from') or ''
     sdn = sdn_state(mgr, pool['cluster_id']) if seg else None
     live = bool(seg) and sdn['available'] and _vnet_live(sdn, seg['vnet'])
     node_ok = {}
@@ -306,6 +393,12 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
         # cluster page's warning, not this pool's problem
         mine = {(vms.get(int(d['vmid'])) or {}).get('node') or d['node'] for d in desks}
         problem = node_problem({n: s for n, s in node_ok.items() if n in mine})
+        if z and z['type'] == 'simple' and len(mine) > 1:
+            # a simple zone is a separate network on every node: one pool on two nodes would be
+            # two networks with the same addresses
+            problem = (f"segment '{seg['name']}' is in a single-node (simple) zone but the pool's desktops are on "
+                       f"{', '.join(sorted(mine))} - use a VLAN or VXLAN zone, or keep the pool on one node")
+            live = False
     for d in desks:
         vm = vms.get(int(d['vmid'])) or {}
         node = vm.get('node') or d['node']
@@ -313,24 +406,38 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
         info = {'name': d['name'], 'vmid': d['vmid'], 'running': running}
         try:
             cfg = _data(mgr._api_get(_fw(mgr, f"{_vm_path(node, d.get('vm_type'), d['vmid'])}/config"), timeout=8)) or {}
-            nic, value = _first_nic(cfg)
+            recorded = (rows_by.get(d['id']) or {}).get('nic')
+            if seg:
+                nic, value, why = _pick_nic(cfg, from_bridge, seg['vnet'], recorded)
+            else:
+                nic, value = (recorded, cfg.get(recorded)) if recorded and cfg.get(recorded) else _first_nic(cfg)
+                why = '' if nic else 'no network card'
             kv, _ = netseg.nic_parts(value)
             info['bridge'] = kv.get('bridge') or ''
+            info['nic'] = nic or ''
+            busy_now = d['id'] in busy
             if not nic:
-                info.update(state='error', error='no network card')
+                info.update(state='error', error=why)
+                problem = problem or f"{d['name']}: {why}"
+            elif cfg.get('lock') and kv.get('bridge') != (seg or {}).get('vnet'):
+                info['state'] = 'waiting_lock'     # a clone or backup still holds the VM: next minute
             elif seg:
                 if kv.get('bridge') == seg['vnet']:
                     info['state'] = 'on'          # (put there by hand: no record, so nothing to put back later)
                     if running:                   # on the VNet - but does the guest use an address of it?
                         old_ips = _old_address(mgr, node, d, seg)
+                        new_ips = [] if old_ips else _seg_ips(mgr, node, d, seg)
+                        if new_ips:
+                            info['ips'] = new_ips
+                            info['reach'] = probe(new_ips[0])
                         if old_ips:
                             info['old_ips'] = old_ips
                             problem = problem or (f"{d['name']} is on the segment but still uses {', '.join(old_ips)} - its network "
                                                   f"card has a fixed address; set it to DHCP (or an address of {seg['subnet']})")
                 elif not live or (node_ok and node_ok.get(node) != 'available'):
                     info['state'] = 'waiting_sdn'      # the VNet's bridge is not on that node: the VM would not start
-                elif running and not restart:
-                    info['state'] = 'waiting'
+                elif running and not _may_restart(pol, restart, busy_now):
+                    info['state'] = 'waiting_busy' if busy_now else 'waiting'
                 else:
                     old = rows_by.get(d['id'])
                     orig_bridge, orig_tag = (old['orig_bridge'], old['orig_tag']) if old else (kv.get('bridge') or '', kv.get('tag') or '')
@@ -340,7 +447,7 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
                         _reboot(mgr, node, d)
                     info.update(state='on', bridge=seg['vnet'], changed=True)
             elif d['id'] in rows_by:
-                res = _restore(mgr, dict(rows_by[d['id']], nic=nic), node, running, restart)
+                res = _restore(mgr, dict(rows_by[d['id']], nic=nic), node, running, running and _may_restart(pol, restart, busy_now))
                 if res in ('restored', 'gone'):
                     netseg.forget(d['id'])
                     info.update(state='off', changed=res == 'restored')
@@ -366,7 +473,10 @@ def sync_pool(pool, force=False, confirm=True, restart=False):
     if moved_now:
         log_audit('system', 'vlab.netseg.move',
                   f"pool '{pool['name']}': {', '.join(moved_now)[:300]} " + (f"onto segment '{seg['name']}'" if seg else 'back to their bridge'), '')
-    st.update(fp=None if problem else fp, at=time.time(), problem=problem, desktops=seen)
+    # a lock, a user or the move window can clear without the fingerprint changing: look again next minute
+    again = any(i.get('state') in ('waiting_lock', 'waiting_busy', 'waiting_back') for i in seen.values()) or (
+        (pol.get('net_segment_move') or 'off') != 'off' and any(i.get('state') == 'waiting' for i in seen.values()))
+    st.update(fp=None if problem or again else fp, at=time.time(), problem=problem, desktops=seen)
     return st
 
 
@@ -417,6 +527,47 @@ def release_desktop(desktop_id):
     if _restore(mgr, row, vm.get('node') or row['node'], vm.get('status') == 'running', False) != 'waiting':
         netseg.forget(desktop_id)
         log_audit('system', 'vlab.netseg.release', f"VM {row['vmid']}: back on bridge {row['orig_bridge']} (no longer a desktop)", '')
+
+
+def before_start(desk):
+    """Called before MOAVI starts a stopped desktop (start on connect, LAB prepare): one of a
+    pool with a segment goes onto it first, so it never comes up on the wrong network.
+    Returns '' (start it) or why not (the caller answers 'try again')."""
+    try:
+        pool = store.get_pool(desk.get('pool_id') or '')
+        if not pool:
+            return ''
+        seg_id = policy.effective(pool.get('settings'), pool.get('type')).get('net_segment')
+        if not seg_id:
+            return ''
+        st = sync_pool(pool, force=True, confirm=False)
+        info = (st.get('desktops') or {}).get(desk['id']) or {}
+        if info.get('state') == 'on':
+            return ''
+        return {'waiting_lock': 'the desktop is still being prepared (locked)',
+                'waiting_sdn': "the desktop's network is not ready on its node",
+                'error': info.get('error') or 'its network card could not be moved'}.get(info.get('state'), 'its network is being moved')
+    except Exception as e:
+        logging.warning(f"[VLAB] netseg before start of {desk.get('id')}: {str(e)[:200]}")
+        return ''
+
+
+def migrate_block(desk, target):
+    """Why a desktop on a segment may not move to `target` ('' when it may): its zone is not
+    built there, or the zone is a single-node one (a separate network on every node)."""
+    row = netseg.moved(desk['id'])
+    if not row:
+        return ''
+    z = netseg.zone(row['cluster_id'])
+    if not z:
+        return ''
+    if z['type'] == 'simple':
+        return f"the desktop is on segment VNet {row['vnet']} of a single-node zone - it cannot leave its node"
+    mgr = _mgr(row['cluster_id'])
+    status = node_zone_status(mgr, z['zone']).get(target) if mgr else None
+    if status != 'available':
+        return f"node {target} does not have the desktop's network (zone {z['zone']}: {status or 'unknown'})"
+    return ''
 
 
 def kick(pool_id):
@@ -531,17 +682,138 @@ def get_cluster_netseg(cluster_id):
                                                   'vnets': {}, 'pending_ours': [], 'pending_other': []}
     uses = _uses(cluster_id)
     segs = []
+    gws = [s['gateway'] for s in netseg.segments(cluster_id)]
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(gws)))) as ex:
+        reach = dict(zip(gws, ex.map(lambda ip: probe(ip, 22, 1.0), gws)))
     for s in netseg.segments(cluster_id):
         o = st['vnets'].get(s['vnet'])
         segs.append(dict(s, pools=uses.get(s['id'], {}).get('pools', []), desktops=uses.get(s['id'], {}).get('desktops', 0),
                          usable=netseg.usable(s['subnet']),
-                         sdn='missing' if not o else (o.get('state') or 'applied')))
+                         sdn='missing' if not o else (o.get('state') or 'applied'),
+                         gateway_reach=reach.get(s['gateway'], 'timeout')))
     z = netseg.zone(cluster_id)
     nodes = (node_zone_status(mgr, z['zone']) if mgr and z and st['available'] and any(o['zone'] == z['zone'] for o in st['zones'])
              else {})
     return jsonify({'zone': z, 'segments': segs,
                     'sdn': dict({k: st[k] for k in ('available', 'problem', 'zones', 'pending_ours', 'pending_other')},
                                 nodes=nodes, node_problem=node_problem(nodes))})
+
+
+def bridges(mgr):
+    """{'nodes': [...], 'bridges': [{name, type, nodes, vlan_aware, addressed, comments}]}: the
+    Linux / OVS bridges of every node (GET /nodes/<n>/network). A bridge with an address on a
+    node is usually its management network - said, so a VM network is picked instead."""
+    nodes, out = [], {}
+    for n in [x.get('node') for x in _list(mgr, '/nodes') if x.get('node')]:
+        try:
+            nets = _list(mgr, f'/nodes/{n}/network')
+        except Exception:
+            continue                       # an unreadable node is left out, not counted as missing the bridge
+        nodes.append(n)
+        for i in nets:
+            if i.get('type') not in ('bridge', 'OVSBridge'):
+                continue
+            b = out.setdefault(i['iface'], {'name': i['iface'], 'type': i.get('type'), 'nodes': [], 'vlan_aware': [],
+                                            'addressed': [], 'comments': ''})
+            b['nodes'].append(n)
+            if int(i.get('bridge_vlan_aware') or 0):
+                b['vlan_aware'].append(n)
+            if i.get('address') or i.get('cidr'):
+                b['addressed'].append(n)
+            b['comments'] = b['comments'] or (i.get('comments') or '').strip()[:80]
+    return {'nodes': nodes, 'bridges': sorted(out.values(), key=lambda b: b['name'])}
+
+
+def _ssh_run(mgr, node, cmd):
+    """One read-only command on a node over the cluster's SSH (as 템플릿 만들기 does)."""
+    from pegaprox.utils.ssh import read_capped
+    try:
+        ip = mgr._get_node_ip(node) if hasattr(mgr, '_get_node_ip') else None
+    except Exception:
+        ip = None
+    ssh = mgr._ssh_connect(ip or mgr.host)
+    if not ssh:
+        raise RuntimeError('SSH to the node failed')
+    try:
+        _i, out, _e = ssh.exec_command(cmd, get_pty=False, timeout=20)
+        out.channel.recv_exit_status()
+        return read_capped(out)
+    finally:
+        try:
+            ssh.close()
+        except Exception:
+            pass
+
+
+def readiness(mgr, cluster_id):
+    """Per node, what a zone needs there (read only): the 'source /etc/network/interfaces.d/sdn'
+    line, dnsmasq (simple zones' DHCP), IP forwarding (simple zones route), the zone's bridge
+    (VLAN), the underlay MTU (VXLAN takes 50 bytes)."""
+    z = netseg.zone(cluster_id)
+    bridge = (z or {}).get('bridge') or ''
+    if bridge and not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,15}', bridge):
+        bridge = ''
+    cmd = ("grep -qE '^[[:space:]]*source[[:space:]]+/etc/network/interfaces.d/(sdn|\\*)' /etc/network/interfaces "
+           "&& echo SRC=1 || echo SRC=0; "
+           "dpkg-query -W -f='${Status}' dnsmasq 2>/dev/null | grep -q 'ok installed' && echo DNSMASQ=1 || echo DNSMASQ=0; "
+           "echo FWD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null); "
+           "echo MTU=$(ip -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p' | xargs -r -I{} cat /sys/class/net/{}/mtu)")
+    if bridge:
+        cmd += f"; test -d /sys/class/net/{bridge} && echo BR=1 || echo BR=0"
+    nodes = [n.get('node') for n in _list(mgr, '/nodes') if n.get('node')]
+    zt = (z or {}).get('type') or ''
+
+    def one(n):
+        try:
+            kv = dict(line.split('=', 1) for line in _ssh_run(mgr, n, cmd).splitlines() if '=' in line)
+        except Exception as e:
+            return n, [{'id': 'ssh', 'ok': False, 'detail': str(e)[:160]}]
+        checks = [{'id': 'source', 'ok': kv.get('SRC') == '1',
+                   'fix': "echo 'source /etc/network/interfaces.d/sdn' >> /etc/network/interfaces"}]
+        if zt == 'simple':
+            checks.append({'id': 'dnsmasq', 'ok': kv.get('DNSMASQ') == '1',
+                           'fix': 'apt install -y dnsmasq && systemctl disable --now dnsmasq'})
+            checks.append({'id': 'forward', 'ok': kv.get('FWD') == '1',
+                           'fix': "sysctl -w net.ipv4.ip_forward=1 (and net.ipv4.ip_forward=1 in /etc/sysctl.d/)"})
+        if zt == 'vlan' and bridge:
+            checks.append({'id': 'bridge', 'ok': kv.get('BR') == '1', 'detail': bridge})
+        if zt == 'vxlan':
+            mtu = int(kv.get('MTU') or 0) if str(kv.get('MTU') or '').isdigit() else 0
+            zm = int((z or {}).get('mtu') or 0)
+            checks.append({'id': 'mtu', 'ok': bool(mtu) and (zm and zm <= mtu - 50 or mtu >= 1550),
+                           'detail': f'underlay {mtu or "?"}, zone {zm or "default"}',
+                           'fix': 'set the zone MTU to the underlay MTU - 50 (e.g. 1450), and the same inside the desktops'})
+        return n, checks
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(nodes)))) as ex:
+        res = dict(ex.map(one, nodes))
+    return {'zone_type': zt, 'nodes': [{'node': n, 'checks': res.get(n, []), 'ok': all(c['ok'] for c in res.get(n, []))} for n in nodes]}
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/netseg/bridges', methods=['GET'])
+@require_auth(perms=['vlab.pool.view'])
+def get_bridges(cluster_id):
+    err = _cluster(cluster_id)
+    if err:
+        return err
+    mgr = _mgr(cluster_id)
+    try:
+        return jsonify(bridges(mgr))
+    except Exception as e:
+        return jsonify({'error': str(e)[:300]}), 502
+
+
+@bp.route('/api/vlab/admin/clusters/<cluster_id>/netseg/readiness', methods=['GET'])
+@require_auth(perms=['vlab.pool.manage'])
+def get_readiness(cluster_id):
+    err = _cluster(cluster_id)
+    if err:
+        return err
+    if not netseg.zone(cluster_id):
+        return jsonify({'error': 'set the zone first'}), 409
+    try:
+        return jsonify(readiness(_mgr(cluster_id), cluster_id))
+    except Exception as e:
+        return jsonify({'error': str(e)[:300]}), 502
 
 
 @bp.route('/api/vlab/admin/clusters/<cluster_id>/netseg/zone', methods=['DELETE'])
@@ -593,6 +865,15 @@ def put_zone(cluster_id):
     old = netseg.zone(cluster_id)
     if old and netseg.segments(cluster_id) and (old['zone'] != z['zone'] or old['type'] != z['type']):
         return jsonify({'error': 'the zone cannot change while it has segments - delete them first'}), 409
+    if z['type'] == 'vlan' and not z['existing']:
+        try:
+            b = bridges(_mgr(cluster_id))
+            have = next((x for x in b['bridges'] if x['name'] == z['bridge']), None)
+            missing = sorted(set(b['nodes']) - set(have['nodes'] if have else []))
+            if missing:
+                return jsonify({'error': f"bridge {z['bridge']} is not on node(s) {', '.join(missing)}"}), 400
+        except Exception as e:
+            logging.info(f'[VLAB] netseg: bridges of {cluster_id} not read ({str(e)[:120]}) - zone saved unchecked')
     netseg.set_zone(cluster_id, z, _user())
     log_audit(_user(), 'vlab.netseg.zone', f"cluster {cluster_id}: zone {z['zone']} ({z['type']}{', existing' if z['existing'] else ''})",
               get_client_ip())
@@ -749,7 +1030,7 @@ def _answer(pool, st):
         desks.append({'id': d['id'], 'name': d['name'], 'vmid': d.get('vmid'),
                       'state': info.get('state') or ('on' if row and seg and row['segment_id'] == seg['id'] else 'off'),
                       'bridge': info.get('bridge') or (row['vnet'] if row else ''),
-                      'orig_bridge': row['orig_bridge'] if row else '', 'running': bool(info.get('running')), 'old_ips': info.get('old_ips') or [],
+                      'orig_bridge': row['orig_bridge'] if row else '', 'running': bool(info.get('running')), 'old_ips': info.get('old_ips') or [], 'nic': info.get('nic') or (row['nic'] if row else ''), 'ips': info.get('ips') or [], 'reach': info.get('reach') or '',
                       'error': info.get('error') or ''})
     return {'segment': seg, 'problem': (st or {}).get('problem') or '', 'checked_at': (st or {}).get('at') or None,
             'desktops': desks}
@@ -770,8 +1051,9 @@ def apply_pool_netseg(pool_id):
     pool = store.get_pool(pool_id)
     if not pool:
         return jsonify({'error': 'pool not found'}), 404
-    restart = bool((request.get_json(silent=True) or {}).get('restart'))
+    r = (request.get_json(silent=True) or {}).get('restart')
+    restart = 'idle' if r == 'idle' else bool(r)
     st = sync_pool(pool, force=True, confirm=False, restart=restart)
-    log_audit(_user(), 'vlab.netseg.apply_now', f"pool '{pool['name']}'{' (running desktops restarted)' if restart else ''}",
+    log_audit(_user(), 'vlab.netseg.apply_now', f"pool '{pool['name']}'{' (idle running desktops restarted)' if restart == 'idle' else ' (running desktops restarted)' if restart else ''}",
               get_client_ip())
     return jsonify(_answer(pool, st))
