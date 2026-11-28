@@ -66715,6 +66715,51 @@
         ]
       }
     },
+    "/api/vlab/admin/clusters/{cluster_id}/netmap": {
+      "get": {
+        "operationId": "vlab_netmap.get_cluster_netmap_get",
+        "tags": [
+          "vlab_netmap"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "네트워크 구성도: segments, pools, their firewall rules and what is set up wrong (read only).",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vlab.pool.view"
+        ]
+      }
+    },
     "/api/vlab/admin/warpgate": {
       "get": {
         "operationId": "vlab_warpgate.get_warpgate_get",

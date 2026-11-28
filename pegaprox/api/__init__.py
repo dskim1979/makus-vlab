@@ -76,6 +76,7 @@ def register_blueprints(app):
     from pegaprox.api.vlab_forecast import bp as vlab_forecast_bp  # MOAVI Desk: 증설 예측
     from pegaprox.api.vlab_netiso import bp as vlab_netiso_bp  # MOAVI Desk: 네트워크 격리 (pool policy -> Proxmox firewall)
     from pegaprox.api.vlab_netseg import bp as vlab_netseg_bp  # MOAVI Desk: 네트워크 분리 (SDN VNet segments, IPAM)
+    from pegaprox.api.vlab_netmap import bp as vlab_netmap_bp  # MOAVI Desk: 네트워크 구성도 (what is separated, what is open, what is wrong)
     from pegaprox.api.vlab_directory import bp as vlab_directory_bp  # MOAVI Desk: 내장 디렉터리 (Samba AD DC) · 도메인 가입
     from pegaprox.api.vlab_adobjects import bp as vlab_adobjects_bp  # MOAVI Desk: AD 디렉터리 (사용자 · 그룹 · OU)
     from pegaprox.api.vlab_next import bp as vlab_next_bp  # MOAVI Desk: 부서·가입 심사·USB·게이트웨이·골든 이미지·보드 LAB·빌드 팜·라이선스 서버
@@ -152,6 +153,7 @@ def register_blueprints(app):
     app.register_blueprint(vlab_forecast_bp)
     app.register_blueprint(vlab_netiso_bp)
     app.register_blueprint(vlab_netseg_bp)
+    app.register_blueprint(vlab_netmap_bp)
     app.register_blueprint(vlab_warpgate_bp)
     app.register_blueprint(vlab_directory_bp)
     app.register_blueprint(vlab_adobjects_bp)

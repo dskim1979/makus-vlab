@@ -124,6 +124,7 @@
     "pegaprox/api/vlab_forecast.py",
     "pegaprox/api/vlab_netiso.py",
     "pegaprox/api/vlab_netseg.py",
+    "pegaprox/api/vlab_netmap.py",
     "pegaprox/api/vlab_accounts.py",
     "pegaprox/api/vlab_directory.py",
     "pegaprox/api/vlab_adobjects.py",

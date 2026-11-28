@@ -677,6 +677,12 @@ def get_cluster_netseg(cluster_id):
     err = _cluster(cluster_id)
     if err:
         return err
+    return jsonify(cluster_view(cluster_id))
+
+
+def cluster_view(cluster_id):
+    """The zone, the segments (with their pools and gateway reach) and the SDN state of a cluster
+    (also the 네트워크 구성도, pegaprox/api/vlab_netmap.py)."""
     mgr = _mgr(cluster_id)
     st = sdn_state(mgr, cluster_id) if mgr else {'available': False, 'problem': 'cluster not connected', 'zones': [],
                                                   'vnets': {}, 'pending_ours': [], 'pending_other': []}
@@ -694,9 +700,9 @@ def get_cluster_netseg(cluster_id):
     z = netseg.zone(cluster_id)
     nodes = (node_zone_status(mgr, z['zone']) if mgr and z and st['available'] and any(o['zone'] == z['zone'] for o in st['zones'])
              else {})
-    return jsonify({'zone': z, 'segments': segs,
-                    'sdn': dict({k: st[k] for k in ('available', 'problem', 'zones', 'pending_ours', 'pending_other')},
-                                nodes=nodes, node_problem=node_problem(nodes))})
+    return {'zone': z, 'segments': segs,
+            'sdn': dict({k: st[k] for k in ('available', 'problem', 'zones', 'pending_ours', 'pending_other')},
+                        nodes=nodes, node_problem=node_problem(nodes))}
 
 
 def bridges(mgr):
