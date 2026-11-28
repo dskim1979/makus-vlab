@@ -501,7 +501,7 @@ def my_desktop_warpgate(desktop_id):
         os_kind = _guest_os(mgr, node, int(desk['vmid']))
         if os_kind == 'windows':
             if pol['rdp_tune']:
-                rdp_prepare(desk, mgr, node)
+                rdp_prepare(desk, mgr, node, ip=ip)
             prepare_windows_nla(desk, mgr, node)
         elif os_kind == 'linux' and not rdp_listening(ip, 3389):
             return jsonify({'error': 'This Linux desktop has no RDP server (xrdp)', 'code': 'NO_RDP'}), 409

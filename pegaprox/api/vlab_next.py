@@ -125,6 +125,7 @@ import logging
 import re
 import shlex
 import socket
+import threading
 import time
 from datetime import datetime
 
@@ -132,6 +133,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.api import vlab as core
 from pegaprox.api import vlab_accounts as acct
+from pegaprox.core import ha
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import require_auth
@@ -2254,12 +2256,35 @@ def rdp_prepare_script():
         '"changed=$changed"', 'exit 0']) + '\n'
 
 
-def rdp_prepare(desk, mgr, node, wait=8):
+def rdp_prepare(desk, mgr, node, wait=8, ip=None):
     """Make a Windows desktop ready for RDP (rdp_prepare_script), at most every RDP_TUNE_EVERY.
-    Never raises; a guest still busy after `wait` seconds finishes on its own."""
+    Never raises; a guest still busy after `wait` seconds finishes on its own.
+
+    With ip, a desktop whose RDP port already answers is not waited for: the script runs on in the
+    background (the connect goes on at once). Only a desktop with RDP still off holds the connect -
+    the first connect after an engine restart used to wait up to `wait` seconds for nothing."""
     got = _rdp_tuned.get(desk['id'])
     if got and got[0] == desk['vmid'] and time.time() - got[1] < RDP_TUNE_EVERY:
         return None
+    if ip and rdp_listening(ip, 3389):
+        if desk['id'] in _rdp_tuning:
+            return None
+        _rdp_tuning.add(desk['id'])
+
+        def run():
+            try:
+                _rdp_prepare_now(desk, mgr, node, wait)
+            finally:
+                _rdp_tuning.discard(desk['id'])
+        threading.Thread(target=ha.carry(run), name='vlab-rdp-prepare', daemon=True).start()
+        return None
+    return _rdp_prepare_now(desk, mgr, node, wait)
+
+
+_rdp_tuning = set()   # desktop ids whose RDP setup runs in the background now
+
+
+def _rdp_prepare_now(desk, mgr, node, wait):
     try:
         code, out, _err, e = _agent_run(mgr, node, desk['vmid'], ['powershell.exe', '-NoProfile', '-NonInteractive',
                                         '-ExecutionPolicy', 'Bypass', '-Command', rdp_prepare_script()], wait=wait)
@@ -2339,7 +2364,7 @@ def desktop_rdp_answer(desk, mgr, node, vmid, username, protocol, pool):
     os_kind = _guest_os(mgr, node, vmid)
     if os_kind == 'windows':
         if pol['rdp_tune']:
-            rdp_prepare(desk, mgr, node)
+            rdp_prepare(desk, mgr, node, ip=ip)
         # Warpgate RDP (file or browser): the desktop's own NLA service account first
         from pegaprox.api.vlab_warpgate import prepare_windows_nla, warpgate_serves_rdp
         if warpgate_serves_rdp(protocol):
